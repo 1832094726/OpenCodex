@@ -82,7 +82,7 @@ function createAppServerBridge(deps) {
   }
 
   /** 转发业务请求到 app-server，并统一记录失败日志。 */
-  async function callAppServer(method, payload) {
+  async function callAppServer(method, payload, options = {}) {
     const appServerMethod = APP_SERVER_METHOD_ALIASES.get(method) || method;
     let appServerPayload = payload;
     if (appServerMethod === "experimentalFeature/enablement/set") {
@@ -100,10 +100,33 @@ function createAppServerBridge(deps) {
       }
     }
     try {
-      if (!appServer || !appServer.isConnected()) {
+      if (!appServer) {
         throw new Error(`app-server is not connected for ${appServerMethod}`);
       }
-      return enrichAppServerResultForRenderer(appServerMethod, await appServer.request(appServerMethod, appServerPayload));
+      if (!appServer.isConnected || !appServer.isConnected()) {
+        if (typeof appServer.ensureConnection === "function") {
+          await appServer.ensureConnection();
+        }
+      }
+      if (!appServer.isConnected || !appServer.isConnected()) {
+        throw new Error(`app-server is not connected for ${appServerMethod}`);
+      }
+      if (
+        options &&
+        typeof options === "object" &&
+        typeof options.clientId === "string" &&
+        options.clientId &&
+        typeof appServer.recordRequestClient === "function"
+      ) {
+        appServer.recordRequestClient(appServerMethod, appServerPayload, options.clientId);
+      }
+      const timeoutMs = Number(options && options.timeoutMs);
+      const requestOptions =
+        Number.isFinite(timeoutMs) && timeoutMs > 0 ? { timeoutMs } : undefined;
+      return enrichAppServerResultForRenderer(
+        appServerMethod,
+        await appServer.request(appServerMethod, appServerPayload, requestOptions)
+      );
     } catch (error) {
       logger && logger.warn(`[app-server] ${appServerMethod} failed`, error);
       throw error;

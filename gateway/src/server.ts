@@ -75,6 +75,7 @@ const TARGETED_CHANNELS = new Set([
   "fetch-response",
   "fetch-stream-complete",
   "fetch-stream-error",
+  "mcp-request",
   "mcp-response",
   "codex-web:preview-file",
   "persisted-atom-sync",

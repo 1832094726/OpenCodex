@@ -46,7 +46,7 @@ function createJsonRpcClient(sendFn) {
         const timeoutMs = Number(options && options.timeoutMs);
         const entry = { resolve, reject, timer: null };
         if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-          // cacheable 请求不能无限挂住，否则远端页面会一直等模型/技能等信息。
+          // 关键请求不能无限挂住，否则 renderer 会一直等模型、技能或会话恢复结果。
           entry.timer = setTimeout(() => {
             if (!pending.has(id)) return;
             pending.delete(id);
@@ -192,6 +192,7 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
   const pendingTurnsByThreadId = new Map();
   const pendingTurnIdleTimers = new Map();
   const pendingServerRequests = new Map();
+  const requestClientIdsByThreadId = new Map();
   // responseCache 保存可缓存 RPC 的最近结果，减少远端设备加载时的一串阻塞请求。
   const responseCache = new Map();
   // inflightRequests 用来合并同一个 cache key 的并发请求，避免首屏同时打爆 app-server。
@@ -203,6 +204,13 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
     1_000,
     parsePositiveNumberEnv("CODEX_WEB_APP_SERVER_CACHEABLE_REQUEST_TIMEOUT_MS", 15 * 1000)
   );
+  const METHOD_REQUEST_TIMEOUTS_MS = new Map([
+    ["thread/read", 15 * 1000],
+    ["thread/turns/list", 15 * 1000],
+    ["thread/goal/get", 10 * 1000],
+    ["thread/resume", 30 * 1000],
+  ]);
+  const REQUEST_CLIENT_TTL_MS = 10 * 60 * 1000;
   // fresh TTL：在这段时间内直接返回缓存，同时后台可按需刷新。
   const CACHEABLE_METHOD_TTLS_MS = new Map([
     ["account/read", 30 * 1000],
@@ -250,6 +258,53 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
     ["thread/loaded/list", {}],
     ["mcpServerStatus/list", {}],
   ];
+
+  function timeoutForRequest(method, key, options) {
+    const explicitTimeoutMs = Number(options && options.timeoutMs);
+    if (Number.isFinite(explicitTimeoutMs) && explicitTimeoutMs > 0) return explicitTimeoutMs;
+    if (key) return CACHEABLE_REQUEST_TIMEOUT_MS;
+    return METHOD_REQUEST_TIMEOUTS_MS.get(method) || 0;
+  }
+
+  function threadIdFromParams(params) {
+    if (!params || typeof params !== "object") return "";
+    if (typeof params.threadId === "string" && params.threadId) return params.threadId;
+    if (typeof params.conversationId === "string" && params.conversationId) return params.conversationId;
+    if (params.thread && typeof params.thread === "object" && typeof params.thread.id === "string") {
+      return params.thread.id;
+    }
+    return "";
+  }
+
+  function pruneRequestClientIds(now = Date.now()) {
+    for (const [threadId, entry] of requestClientIdsByThreadId.entries()) {
+      if (!entry || entry.expiresAtMs <= now) requestClientIdsByThreadId.delete(threadId);
+    }
+  }
+
+  function recordRequestClient(method, params, clientId) {
+    const normalizedClientId = typeof clientId === "string" ? clientId : "";
+    if (!normalizedClientId) return false;
+    const threadId = threadIdFromParams(params);
+    if (!threadId) return false;
+    const now = Date.now();
+    pruneRequestClientIds(now);
+    requestClientIdsByThreadId.set(threadId, {
+      clientId: normalizedClientId,
+      method: String(method || ""),
+      expiresAtMs: now + REQUEST_CLIENT_TTL_MS,
+    });
+    return true;
+  }
+
+  function targetClientIdForServerRequest(request) {
+    const params = request && request.params && typeof request.params === "object" ? request.params : null;
+    const threadId = threadIdFromParams(params);
+    if (!threadId) return "";
+    pruneRequestClientIds();
+    const entry = requestClientIdsByThreadId.get(threadId);
+    return entry && typeof entry.clientId === "string" ? entry.clientId : "";
+  }
 
   /** app-server 某些方法要求 params 不能缺失，这里补齐默认请求参数。 */
   function normalizeParams(method, params) {
@@ -671,7 +726,8 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
       method: message.method,
       params: message.params ?? null,
     };
-    pendingServerRequests.set(serverRequestKey(message.id), request);
+    const targetClientId = targetClientIdForServerRequest(request);
+    pendingServerRequests.set(serverRequestKey(message.id), { ...request, targetClientId });
     if (typeof broadcast === "function") {
       broadcast({
         channel: "mcp-request",
@@ -679,6 +735,7 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
           hostId: "local",
           request,
         },
+        ...(targetClientId ? { targetClientId } : {}),
       });
     }
   }
@@ -856,7 +913,7 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
   }
 
   /** 调用 app-server 方法，内置连接、缓存、并发合并和状态变更后的缓存刷新。 */
-  async function request(method, params) {
+  async function request(method, params, options = {}) {
     const normalizedParams = normalizeParams(method, params);
     const key = shouldCacheRequest(method, normalizedParams) ? cacheKey(method, normalizedParams) : null;
     const startRequest = () => {
@@ -877,10 +934,11 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
                     ? `object(${Object.keys(normalizedParams).length})`
                     : typeof normalizedParams,
           });
+        const timeoutMs = timeoutForRequest(method, key, options);
         return client.request(
           method,
           normalizedParams,
-          key ? { timeoutMs: CACHEABLE_REQUEST_TIMEOUT_MS } : undefined
+          timeoutMs > 0 ? { timeoutMs } : undefined
         );
       })();
       const tracked = key
@@ -1046,6 +1104,7 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
     pendingTurnIdleTimers.clear();
     pendingTurnsByThreadId.clear();
     pendingServerRequests.clear();
+    requestClientIdsByThreadId.clear();
     responseCache.clear();
     inflightRequests.clear();
     cacheVersions.clear();
@@ -1057,6 +1116,7 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
   return {
     ensureConnection,
     request,
+    recordRequestClient,
     warmCache,
     getCachedResponse,
     warmStartupCache,

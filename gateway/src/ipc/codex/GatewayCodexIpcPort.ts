@@ -328,7 +328,7 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
   });
 
   /** 官方 AppServerRequestClient 的 host bridge：renderer 发 channel，gateway 转 app-server。 */
-  async function callAppServerForHost(payload, fallbackMethod = null, fallbackParams = null) {
+  async function callAppServerForHost(payload, fallbackMethod = null, fallbackParams = null, context = {}) {
     const input =
       payload &&
       typeof payload === "object" &&
@@ -347,7 +347,12 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
       input && typeof input === "object" && Object.prototype.hasOwnProperty.call(input, "params")
         ? input.params
         : fallbackParams;
-    const result = await appServerBridge.callAppServer(method, params);
+    const timeoutMs = Number(input && typeof input === "object" ? input.timeoutMs : 0);
+    const options = {
+      clientId: targetClientIdForContext(context),
+      ...(Number.isFinite(timeoutMs) && timeoutMs > 0 ? { timeoutMs } : {}),
+    };
+    const result = await appServerBridge.callAppServer(method, params, options);
     if (method === "thread/start") {
       workspaceRuntime.recordThreadStartMetadata(result, params);
     }
@@ -760,16 +765,18 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
       case "shared-object-subscribe":
         return sharedObjectIpc.subscribeSharedObject(payload);
       case "thread:start": {
-        const result = await appServerBridge.callAppServer("thread/start", payload);
+        const result = await appServerBridge.callAppServer("thread/start", payload, {
+          clientId: targetClientIdForContext(context),
+        });
         // 兼容旧式 thread:start channel，保持和 start-conversation 一样的刷新后归属信息。
         workspaceRuntime.recordThreadStartMetadata(result, payload);
         return result;
       }
       case "send-cli-request-for-host":
-        return callAppServerForHost(payload);
+        return callAppServerForHost(payload, null, null, context);
       case "prewarm-thread-start-for-host": {
         const params = payload && typeof payload === "object" && payload.params ? payload.params : payload;
-        return callAppServerForHost(payload, "thread/start", params && params.params);
+        return callAppServerForHost(payload, "thread/start", params && params.params, context);
       }
       case "refresh-recent-conversations-for-host": {
         const params = payload && typeof payload === "object" && payload.params ? payload.params : payload;
