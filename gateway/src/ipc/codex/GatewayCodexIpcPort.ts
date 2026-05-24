@@ -350,6 +350,7 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
     normalizeWorkspacePath: workspaceRuntime.normalizeWorkspacePath,
     shellQuote: workspaceRuntime.shellQuote,
   });
+  let externalAgentImportStatus = { status: "idle" };
 
   const appServerBridge = createAppServerBridge({
     appServer,
@@ -397,6 +398,38 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
     return context && typeof context === "object" && typeof context.clientId === "string"
       ? context.clientId
       : "";
+  }
+
+  function externalAgentImportParams(payload) {
+    return payload && typeof payload === "object" && payload.params && typeof payload.params === "object"
+      ? payload.params
+      : payload;
+  }
+
+  function snapshotExternalAgentImportStatus() {
+    return { ...externalAgentImportStatus };
+  }
+
+  function setExternalAgentImportStatus(status, fields = {}) {
+    // 官方导入流程用 idle/importing/success/error 状态驱动设置页提示，这里保留同名状态快照。
+    externalAgentImportStatus = { status, ...fields };
+    return snapshotExternalAgentImportStatus();
+  }
+
+  function detectExternalAgentImports(_payload) {
+    // 官方 renderer 读取 items 与 unsupportedProjects；Web gateway 没有外部代理迁移器时返回稳定空态。
+    return { items: [], unsupportedProjects: [] };
+  }
+
+  function importExternalAgentItems(payload) {
+    const params = externalAgentImportParams(payload);
+    const items = params && typeof params === "object" && Array.isArray(params.items) ? params.items : [];
+    if (items.length === 0) return { projectRoots: [] };
+    const startedAtMs = Date.now();
+    setExternalAgentImportStatus("importing", { startedAtMs });
+    const completedAtMs = Date.now();
+    setExternalAgentImportStatus("success", { startedAtMs, completedAtMs });
+    return { projectRoots: [] };
   }
 
   const automationIpc = createAutomationIpcHandlers({
@@ -703,6 +736,12 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
         return path.join(os.homedir(), ".codex");
       case "home-directory":
         return { homeDirectory: os.homedir() };
+      case "external-agent-import-detect":
+        return detectExternalAgentImports(payload);
+      case "external-agent-import-import":
+        return importExternalAgentItems(payload);
+      case "external-agent-import-status":
+        return snapshotExternalAgentImportStatus();
       case "external-agent-imported-connectors":
         return { connectors: [] };
       case "locale-info":
@@ -852,6 +891,8 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
         return true;
       case "thread-terminal-snapshot":
         return terminalIpc.threadTerminalSnapshot(payload);
+      case "terminal-shell-options":
+        return terminalIpc.terminalShellOptions(payload);
       case "node-repl-active-execs-kill":
         return terminalIpc.killNodeReplActiveExecs(payload);
       case "turn:start":

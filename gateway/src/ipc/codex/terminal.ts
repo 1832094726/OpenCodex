@@ -19,6 +19,7 @@ const TERMINAL_IDLE_SWEEP_MS = Math.max(
   1_000,
   Number(process.env.CODEX_WEB_TERMINAL_IDLE_SWEEP_MS || Math.min(60 * 1000, TERMINAL_IDLE_CLEANUP_MS))
 );
+const WINDOWS_BASE_SHELL_OPTIONS = ["powershell", "commandPrompt"];
 
 function chmodExecutableIfPresent(filePath) {
   try {
@@ -89,6 +90,65 @@ function cleanTerminalTitle(value) {
   return typeof value === "string" ? value.replace(/[\u0000-\u001F\u007F]/g, "").trim() : null;
 }
 
+function executableFileExists(filePath) {
+  try {
+    return !!filePath && fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function pathEnvironmentEntries() {
+  const rawPath = process.env.Path || process.env.PATH || "";
+  return rawPath.split(path.delimiter).map((entry) => entry.trim()).filter(Boolean);
+}
+
+function executablesOnPath(fileName) {
+  return pathEnvironmentEntries()
+    .map((entry) => path.join(entry, fileName))
+    .filter(executableFileExists);
+}
+
+function windowsGitBashCandidates() {
+  const installRoots = [
+    process.env.ProgramFiles,
+    process.env["ProgramFiles(x86)"],
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "Programs") : null,
+  ].filter(Boolean);
+  const candidates = [];
+  for (const root of installRoots) {
+    candidates.push(
+      path.join(root, "Git", "git-bash.exe"),
+      path.join(root, "Git", "bin", "bash.exe"),
+      path.join(root, "Git", "usr", "bin", "bash.exe")
+    );
+  }
+  return candidates;
+}
+
+function looksLikeGitForWindowsPath(filePath) {
+  const normalized = String(filePath || "").replace(/\//g, "\\");
+  return /\\Git\\(git-bash\.exe|bin\\bash\.exe|usr\\bin\\bash\.exe)$/i.test(normalized);
+}
+
+function hasGitBashShell() {
+  // 官方设置页只需要知道 Git Bash 选项是否可展示，这里按常见安装路径和 PATH 做本地探测。
+  if (windowsGitBashCandidates().some(executableFileExists)) return true;
+  if (executablesOnPath("git-bash.exe").some(looksLikeGitForWindowsPath)) return true;
+  return executablesOnPath("bash.exe").some(looksLikeGitForWindowsPath);
+}
+
+function hasWslShell() {
+  // 32 位宿主访问 64 位 System32 时需要 Sysnative；两者都检查可以贴近官方桌面端的可用性判断。
+  const systemRoot = process.env.SystemRoot || process.env.windir || "C:\\Windows";
+  const candidates = [
+    path.join(systemRoot, "System32", "wsl.exe"),
+    path.join(systemRoot, "Sysnative", "wsl.exe"),
+    ...executablesOnPath("wsl.exe"),
+  ];
+  return candidates.some(executableFileExists);
+}
+
 function createTerminalIpcHandlers(deps) {
   const terminalSessions = new Map();
   const conversationSessions = new Map();
@@ -105,6 +165,14 @@ function createTerminalIpcHandlers(deps) {
   /** 选择 PTY shell，默认跟随用户 SHELL。 */
   function getTerminalShell() {
     return process.env.SHELL || (process.platform === "win32" ? "powershell.exe" : "/bin/zsh");
+  }
+
+  function terminalShellOptions() {
+    if (process.platform !== "win32") return { availableShells: [] };
+    const availableShells = [...WINDOWS_BASE_SHELL_OPTIONS];
+    if (hasGitBashShell()) availableShells.push("gitBash");
+    if (hasWslShell()) availableShells.push("wsl");
+    return { availableShells };
   }
 
   /** 从 invoke context 中取浏览器 clientId。 */
@@ -363,6 +431,7 @@ function createTerminalIpcHandlers(deps) {
   return {
     handleTerminalMessage,
     killNodeReplActiveExecs,
+    terminalShellOptions,
     threadTerminalSnapshot,
   };
 }
