@@ -912,14 +912,18 @@ function routeOfficialWebContentsSend(channel, args) {
     requestRoutes.delete(requestId);
     requestRouteSummaries.delete(requestId);
   }
-  if (targetClientId && wsHub.sendTo(targetClientId, { channel, payload, args }, { suppressDiagnostic: suppressRouteDiagnostic })) {
+  const wsDiagnosticOptions = {
+    suppressDiagnostic: suppressRouteDiagnostic,
+    diagnosticSummary: routeBase,
+  };
+  if (targetClientId && wsHub.sendTo(targetClientId, { channel, payload, args }, wsDiagnosticOptions)) {
     if (!suppressRouteDiagnostic) {
       diagnosticLog("official-ipc-route", "send_to_client", { ...routeBase, route: "target" });
     }
     return true;
   }
   // 没有 requestId 或 clientId 的通知类消息广播给所有在线浏览器。
-  const broadcastCount = wsHub.broadcast({ channel, payload, args }, { suppressDiagnostic: suppressRouteDiagnostic });
+  const broadcastCount = wsHub.broadcast({ channel, payload, args }, wsDiagnosticOptions);
   if (!suppressRouteDiagnostic) {
     diagnosticLog("official-ipc-route", "broadcast", {
       ...routeBase,
@@ -1318,6 +1322,9 @@ function webConfigScript() {
     workspaceRoots: ${JSON.stringify(workspaceRootsFromEnv())},
     homeDir: ${JSON.stringify(os.homedir())},
     locale: ${JSON.stringify(process.env.CODEX_WEB_LOCALE || "zh-CN")},
+    // debugWs 只控制浏览器侧诊断采集，不控制 WS 压缩；压缩属于 gateway 传输层优化。
+    // OPENCODEX_DEBUG_WS=1 时才开启 WS 大包/慢解析诊断，平时不采集。
+    debugWs: ${JSON.stringify(process.env.OPENCODEX_DEBUG_WS === "1")},
     appServer: ${JSON.stringify({ kind: "official-electron-ipc", spawnHook: appServerSpawnHookStatus() })},
     sharedObjectSnapshot: ${JSON.stringify({ host_config: { id: "local", kind: "local" } })},
     // persistedAtomSnapshot 用于首屏同步：renderer 会很早请求它，此时 WebSocket 可能还没连上。

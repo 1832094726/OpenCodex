@@ -16,6 +16,12 @@
   const CLIENT_DIAGNOSTIC_MAX_BATCH = 40;
   const LOW_PRIORITY_IPC_CONCURRENCY = 2;
   const LOW_PRIORITY_IPC_LOG_EVERY = 25;
+  // debugWs 由 gateway 的 OPENCODEX_DEBUG_WS 注入；默认关闭，避免每条 WS 消息都额外计时/算长度。
+  const WS_DEBUG_ENABLED = cfg.debugWs === true || cfg.debugWs === "1";
+  // 下面三个阈值只在 debugWs 开启时生效，用来定位“远端首个会话打开慢”的浏览器侧瓶颈。
+  const WS_INBOUND_LARGE_CHARS = Number(cfg.wsInboundLargeChars || 256 * 1024);
+  const WS_INBOUND_PARSE_SLOW_MS = Number(cfg.wsInboundParseSlowMs || 30);
+  const WS_INBOUND_HANDLE_SLOW_MS = Number(cfg.wsInboundHandleSlowMs || 80);
   // app-host RPC 首屏会连续发多条字符串帧；WS 未握手完成前先短暂排队，超过上限直接关闭端口。
   const APP_HOST_PENDING_MESSAGE_LIMIT = 2000;
   const GATEWAY_AUTH_LOGOUT_LABEL = "退出认证";
@@ -592,6 +598,64 @@
       }
     }
     return summary;
+  }
+
+  function rawWsMessageChars(value) {
+    // 浏览器 WebSocket message 一般是字符串；Blob/ArrayBuffer 分支保留给未来协议变化。
+    if (typeof value === "string") return value.length;
+    if (value && typeof value.size === "number") return value.size;
+    return 0;
+  }
+
+  function appHostGatewayMessageSummary(message) {
+    // app-host 消息只统计字符串长度和端口，不解析 RPC 内容，保持对官方协议透明。
+    return {
+      dataChars: typeof message?.data === "string" ? message.data.length : 0,
+      payloadType: payloadShape(message?.data),
+      portId: typeof message?.portId === "string" ? message.portId : "",
+      type: typeof message?.type === "string" ? message.type : "",
+    };
+  }
+
+  function gatewayWsInboundSummary(message, effectiveChannel, payload) {
+    // 与服务端日志字段对齐，方便用 requestId/channel 在两端拼同一条链路。
+    if (message && typeof message.channel === "string") {
+      return {
+        ...ipcDiagnosticSummary(effectiveChannel || message.channel, payload),
+        target: message.channel,
+      };
+    }
+    if (message && typeof message.type === "string" && message.type.startsWith("app-host-")) {
+      return appHostGatewayMessageSummary(message);
+    }
+    return {
+      payloadType: payloadShape(message),
+      type: message && typeof message.type === "string" ? message.type : "",
+    };
+  }
+
+  function maybeLogLargeOrSlowWsInbound(details) {
+    if (!WS_DEBUG_ENABLED) return;
+    const rawChars = Number(details.rawChars || 0);
+    const parseMs = Number(details.parseMs || 0);
+    const handleMs = Number(details.handleMs || 0);
+    if (
+      rawChars < WS_INBOUND_LARGE_CHARS &&
+      parseMs < WS_INBOUND_PARSE_SLOW_MS &&
+      handleMs < WS_INBOUND_HANDLE_SLOW_MS
+    ) {
+      return;
+    }
+    // 大会话冷加载可能卡在“收到 WS 字符串 -> JSON.parse -> 投递官方 renderer”这一段。
+    clientDiagnostic("ws-inbound-large-or-slow", {
+      ...details.summary,
+      handledBy: details.handledBy,
+      handleMs,
+      parseMs,
+      rawChars,
+      wsReady,
+      wsState: websocketStateName(ws),
+    });
   }
 
   function shouldSuppressRoutineIpcDiagnostic(payload) {
@@ -2939,8 +3003,16 @@
       emitSharedObjectSnapshotValue(STATSIG_DEFAULT_FEATURES_CONFIG);
     });
     socket.addEventListener("message", (event) => {
+      const rawData = event.data;
+      // 这些字段只用于 debugWs 排障；默认值保持 0，避免常态下多做字符串长度和 Date.now 采样。
+      const rawChars = WS_DEBUG_ENABLED ? rawWsMessageChars(rawData) : 0;
+      const parseStartedAtMs = WS_DEBUG_ENABLED ? Date.now() : 0;
+      let msg = null;
+      let parseMs = 0;
       try {
-        const msg = JSON.parse(event.data);
+        // 官方桥接协议要求浏览器收到完整 JSON 后再按 channel/MessagePort 分发，不能在这里改消息形状。
+        msg = JSON.parse(rawData);
+        parseMs = WS_DEBUG_ENABLED ? Date.now() - parseStartedAtMs : 0;
         if (msg && msg.type === "hello-ack" && msg.clientId === clientId) {
           // ack 表示 gateway 已经把 clientId 写入路由表，之后再发 IPC 才不会丢首批异步回包。
           markGatewayWsReady();
@@ -2949,10 +3021,33 @@
             wsReady,
             wsState: websocketStateName(socket),
           });
+          if (WS_DEBUG_ENABLED) {
+            maybeLogLargeOrSlowWsInbound({
+              handledBy: "hello-ack",
+              handleMs: Math.max(0, Date.now() - parseStartedAtMs - parseMs),
+              parseMs,
+              rawChars,
+              summary: gatewayWsInboundSummary(msg),
+            });
+          }
           return;
         }
-        if (handleAppHostGatewayMessage(msg)) return;
+        const appHostStartedAtMs = WS_DEBUG_ENABLED ? Date.now() : 0;
+        if (handleAppHostGatewayMessage(msg)) {
+          if (WS_DEBUG_ENABLED) {
+            maybeLogLargeOrSlowWsInbound({
+              handledBy: "app-host",
+              handleMs: Date.now() - appHostStartedAtMs,
+              parseMs,
+              rawChars,
+              summary: gatewayWsInboundSummary(msg),
+            });
+          }
+          return;
+        }
         if (msg && typeof msg.channel === "string") {
+          // handleStartedAtMs 只包住前端分发阶段，用来和服务端 sendCallbackMs 区分。
+          const handleStartedAtMs = WS_DEBUG_ENABLED ? Date.now() : 0;
           const messageArgs = Array.isArray(msg.args) ? msg.args : [msg.payload];
           const messagePayload = Object.prototype.hasOwnProperty.call(msg, "payload")
             ? msg.payload
@@ -2961,6 +3056,7 @@
           const trackedConnectorLogoResponse =
             effectiveChannel === "fetch-response" && isTrackedConnectorLogoResponse(messagePayload);
           if (!trackedConnectorLogoResponse) {
+            // 常规 ws-message 摘要仍保留，便于排查基础 IPC 路由；真正的大包耗时采样由 debugWs 控制。
             clientDiagnostic("ws-message", {
               ...ipcDiagnosticSummary(effectiveChannel, messagePayload),
               target: msg.channel,
@@ -2970,6 +3066,15 @@
           }
           if (effectiveChannel === "codex-web:preview-file") {
             // 文件预览是 web-shell 扩展事件，直接打开右侧 Codex panel。
+            if (WS_DEBUG_ENABLED) {
+              maybeLogLargeOrSlowWsInbound({
+                handledBy: "preview-file",
+                handleMs: Date.now() - handleStartedAtMs,
+                parseMs,
+                rawChars,
+                summary: gatewayWsInboundSummary(msg, effectiveChannel, messagePayload),
+              });
+            }
             openPreviewInCodexSidePanel(messagePayload);
             return;
           }
@@ -2993,12 +3098,23 @@
             dispatch(effectiveChannel, messagePayload);
           }
           emitWindowMessage(effectiveChannel, messagePayload);
+          if (WS_DEBUG_ENABLED) {
+            maybeLogLargeOrSlowWsInbound({
+              handledBy: "gateway-channel",
+              handleMs: Date.now() - handleStartedAtMs,
+              parseMs,
+              rawChars,
+              summary: gatewayWsInboundSummary(msg, effectiveChannel, messagePayload),
+            });
+          }
         }
       } catch (error) {
         console.warn("[codex-web] invalid gateway message", error);
         clientDiagnostic("ws-message-invalid", {
           error: error instanceof Error ? error.message : String(error),
           errorName: error && error.name ? String(error.name) : "",
+          parseMs: WS_DEBUG_ENABLED ? Date.now() - parseStartedAtMs : 0,
+          rawChars,
           wsState: websocketStateName(socket),
         });
       }
