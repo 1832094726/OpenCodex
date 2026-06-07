@@ -14,19 +14,22 @@
     "desktop:pack:mac": "pnpm run build && pnpm exec electron-builder --mac --dir",
     "desktop:dist:mac": "pnpm run build && pnpm exec electron-builder --mac dmg zip",
     "desktop:pack:win": "pnpm run build && pnpm exec electron-builder --win --dir --x64",
-    "desktop:dist:win": "pnpm run build && pnpm exec electron-builder --win nsis zip --x64"
+    "desktop:dist:win": "pnpm run build && pnpm exec electron-builder --win nsis zip --x64",
+    "desktop:pack:linux": "pnpm run build && pnpm exec electron-builder --linux --dir --x64",
+    "desktop:dist:linux": "pnpm run build && pnpm exec electron-builder --linux AppImage deb zip --x64"
   },
   "dependencies": {
     "@electron/asar": "^4.1.2",
     "balanced-match": "^4.0.2",
     "brace-expansion": "^5.0.6",
+    "resedit": "1.7.2",
     "ws": "^8.18.3"
   },
   "devDependencies": {
-    "electron": "42.0.1",
-    "electron-builder": "^26.0.12",
     "@types/node": "^20.19.27",
     "@types/ws": "^8.18.1",
+    "electron": "42.0.1",
+    "electron-builder": "^26.0.12",
     "typescript": "^5.9.3"
   },
   "pnpm": {
@@ -46,6 +49,7 @@
       "package.json",
       "desktop/**/*",
       "gateway/*.cjs",
+      "gateway/runner/**/*",
       "gateway/runtime/**/*",
       "gateway/dist/**/*",
       "node_modules/**/*",
@@ -74,6 +78,29 @@
       "target": [
         {
           "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "linux": {
+      "category": "Development",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
           "arch": [
             "x64"
           ]

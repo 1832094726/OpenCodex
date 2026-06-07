@@ -17,6 +17,9 @@ importers:
       brace-expansion:
         specifier: ^5.0.6
         version: 5.0.6
+      resedit:
+        specifier: 1.7.2
+        version: 1.7.2
       ws:
         specifier: ^8.18.3
         version: 8.20.1

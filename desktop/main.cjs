@@ -5,7 +5,7 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
-const { prepareOfficialElectronRuntime } = require("./official-electron-runtime.cjs");
+const { prepareOfficialElectronRuntime } = require("../gateway/runner/index.cjs");
 
 const APP_ROOT = path.resolve(__dirname, "..");
 

@@ -3,7 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
-const { prepareOfficialElectronRuntime } = require("../../desktop/official-electron-runtime.cjs");
+const { prepareOfficialElectronRuntime } = require("../runner/index.cjs");
 
 // dev runner 位于 gateway/dev 下，项目根目录需要回退两级。
 const APP_ROOT = path.resolve(__dirname, "..", "..");
