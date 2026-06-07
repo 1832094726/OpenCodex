@@ -10,6 +10,7 @@ const APP_ROOT = path.resolve(__dirname, "..", "..");
 // 开发态所有运行时数据统一放到 .data 下，避免项目根目录散落 cache / official-user-data。
 const DATA_DIR = path.join(APP_ROOT, ".data");
 const runtimeDir = path.resolve(process.env.CODEX_WEB_RUNTIME_DIR || path.join(DATA_DIR, "runtime"));
+const configPath = path.resolve(process.env.CODEX_WEB_CONFIG_PATH || path.join(APP_ROOT, "config.yaml"));
 const reportsDir = path.resolve(process.env.CODEX_WEB_REPORTS_DIR || path.join(DATA_DIR, "reports"));
 const officialBundleDir = path.resolve(
   process.env.CODEX_WEB_OFFICIAL_BUNDLE_DIR || path.join(DATA_DIR, "cache", "codex-official-bundle")
@@ -51,6 +52,8 @@ async function main() {
       // 第 4 个 stdio fd 是生命周期 pipe；父进程退出后 gateway 会主动结束。
       OPENCODEX_GATEWAY_LIFECYCLE_FD: "3",
       CODEX_WEB_RUNTIME_DIR: runtimeDir,
+      // dev 入口固定使用 package.json 同级的 config.yaml；只有显式 CODEX_WEB_CONFIG_PATH 才允许覆盖。
+      CODEX_WEB_CONFIG_PATH: configPath,
       CODEX_WEB_REPORTS_DIR: reportsDir,
       CODEX_WEB_OFFICIAL_BUNDLE_DIR: officialBundleDir,
       CODEX_WEB_OFFICIAL_USER_DATA_DIR: officialUserDataDir,
