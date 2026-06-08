@@ -1,6 +1,7 @@
-const DEFAULT_LOCALE = "en-US";
 const ZH_CN = "zh-CN";
 const EN_US = "en-US";
+const DEFAULT_LOCALE = ZH_CN;
+const PREFERRED_LANGUAGES_ENV = "OPENCODEX_PREFERRED_LANGUAGES";
 
 const MESSAGES = {
   // 文案表是资源数据，不放在逻辑源码里；这里仅按 locale 装载对应 JSON。
@@ -11,6 +12,7 @@ const MESSAGES = {
 function normalizeLocale(value, fallback = DEFAULT_LOCALE) {
   const raw = String(value || "").trim().replace(/_/g, "-").toLowerCase();
   if (!raw) return fallback;
+  if (raw === "c" || raw === "posix" || raw === "c.utf-8") return fallback;
   if (raw === "zh" || raw.startsWith("zh-")) return ZH_CN;
   if (raw === "en" || raw.startsWith("en-")) return EN_US;
   return fallback;
@@ -32,21 +34,43 @@ function t(locale, key, values) {
   return formatMessage(messagesForLocale(locale), key, values);
 }
 
-function systemLocaleCandidates(extraCandidates) {
-  const candidates = [];
-  if (Array.isArray(extraCandidates)) candidates.push(...extraCandidates);
+function flattenLanguageCandidates(value) {
+  if (Array.isArray(value)) return value.flatMap(flattenLanguageCandidates);
+  if (value == null) return [];
+  const raw = String(value).trim();
+  if (!raw) return [];
+  return raw
+    .split(/[,:;\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function preferredLanguagesFromEnv(env = process.env) {
+  const raw = env && env[PREFERRED_LANGUAGES_ENV];
+  if (!raw) return [];
   try {
-    candidates.push(Intl.DateTimeFormat().resolvedOptions().locale);
-  } catch {}
-  candidates.push(process.env.LC_ALL, process.env.LC_MESSAGES, process.env.LANG);
+    const parsed = JSON.parse(raw);
+    // 启动器传入 JSON 数组；手动调试时也兼容 JSON 字符串。
+    return flattenLanguageCandidates(parsed);
+  } catch {
+    return flattenLanguageCandidates(raw);
+  }
+}
+
+function systemLocaleCandidates(extraCandidates) {
+  const candidates = preferredLanguagesFromEnv();
+  if (Array.isArray(extraCandidates)) candidates.push(...extraCandidates);
   return candidates.filter(Boolean);
 }
 
 function resolveOpenCodexLocale(options = {}) {
-  // OpenCodex 自有文案只跟随系统语言；不读官方配置，也不依赖官方 IPC 是否存在。
+  // OpenCodex 自有文案只跟随启动器传入的系统首选语言列表；缺省时默认中文。
   const candidates = systemLocaleCandidates(options.systemLocales);
-  const zhCandidate = candidates.find((candidate) => normalizeLocale(candidate, "") === ZH_CN);
-  return { locale: zhCandidate ? ZH_CN : EN_US, source: zhCandidate ? "system" : "default" };
+  for (const candidate of candidates) {
+    const locale = normalizeLocale(candidate, "");
+    if (locale) return { locale, source: "preferred-env" };
+  }
+  return { locale: DEFAULT_LOCALE, source: "default" };
 }
 
 function resolveOpenCodexI18n(options = {}) {
@@ -61,10 +85,12 @@ module.exports = {
   DEFAULT_LOCALE,
   EN_US,
   MESSAGES,
+  PREFERRED_LANGUAGES_ENV,
   ZH_CN,
   formatMessage,
   messagesForLocale,
   normalizeLocale,
+  preferredLanguagesFromEnv,
   resolveOpenCodexI18n,
   resolveOpenCodexLocale,
   t,

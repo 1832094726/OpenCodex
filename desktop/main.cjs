@@ -6,7 +6,7 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { prepareOfficialElectronRuntime } = require("../gateway/runner/index.cjs");
-const { formatMessage, resolveOpenCodexI18n } = require("../shared/i18n/index.cjs");
+const { PREFERRED_LANGUAGES_ENV, formatMessage, resolveOpenCodexI18n } = require("../shared/i18n/index.cjs");
 
 const APP_ROOT = path.resolve(__dirname, "..");
 
@@ -29,6 +29,8 @@ const gatewayState = {
   paths: null,
   settings: null,
   status: null,
+  i18n: null,
+  preferredLanguages: null,
   lastError: "",
   startedAt: null,
   officialRuntime: null,
@@ -309,7 +311,7 @@ async function ensurePortSetting(paths, settings) {
 }
 
 function buildState() {
-  const i18n = launcherI18n();
+  const i18n = currentGatewayI18n();
   return {
     running: !!gatewayState.child && !gatewayState.child.killed,
     pid: gatewayState.child ? gatewayState.child.pid : null,
@@ -337,16 +339,42 @@ function buildState() {
   };
 }
 
-function launcherI18n() {
-  // launcher 只根据 Electron 看到的系统语言渲染自有文案，不依赖 gateway 或官方 Codex 配置。
-  return resolveOpenCodexI18n({
-    systemLocales: [app && typeof app.getLocale === "function" ? app.getLocale() : ""],
-  });
+function currentGatewayI18n() {
+  const statusI18n = gatewayState.status && gatewayState.status.i18n;
+  if (statusI18n && statusI18n.messages && typeof statusI18n.messages === "object") {
+    gatewayState.i18n = statusI18n;
+    return statusI18n;
+  }
+  if (gatewayState.i18n && gatewayState.i18n.messages && typeof gatewayState.i18n.messages === "object") {
+    return gatewayState.i18n;
+  }
+  // gateway 尚未返回状态前，launcher 可以用即将传给 gateway 的同一份首选语言列表兜底。
+  return resolveOpenCodexI18n({ systemLocales: currentPreferredLanguages() });
 }
 
 function launcherText(key, values) {
-  const i18n = launcherI18n();
+  const i18n = currentGatewayI18n();
   return formatMessage(i18n.messages, key, values);
+}
+
+function preferredSystemLanguages() {
+  try {
+    const languages = app && typeof app.getPreferredSystemLanguages === "function" ? app.getPreferredSystemLanguages() : [];
+    return Array.isArray(languages) ? languages : [];
+  } catch {
+    return [];
+  }
+}
+
+function currentPreferredLanguages() {
+  if (Array.isArray(gatewayState.preferredLanguages)) return gatewayState.preferredLanguages;
+  gatewayState.preferredLanguages = preferredSystemLanguages();
+  return gatewayState.preferredLanguages;
+}
+
+function preferredLanguagesEnvValue() {
+  // 只在 launcher 启动 gateway 时读取系统首选语言；gateway 侧通过环境变量消费同一份列表。
+  return JSON.stringify(currentPreferredLanguages());
 }
 
 function broadcastState() {
@@ -372,6 +400,7 @@ function startStatusPolling() {
   statusTimer = setInterval(async () => {
     try {
       gatewayState.status = await fetchGatewayStatus();
+      if (gatewayState.status && gatewayState.status.i18n) gatewayState.i18n = gatewayState.status.i18n;
       gatewayState.lastError = "";
     } catch (error) {
       gatewayState.lastError = error instanceof Error ? error.message : String(error);
@@ -402,6 +431,7 @@ async function startGateway() {
   gatewayState.lastError = "";
   gatewayState.startedAt = new Date().toISOString();
   gatewayState.officialRuntime = null;
+  gatewayState.preferredLanguages = preferredSystemLanguages();
 
   appendLog(`\n[launcher] starting gateway ${gatewayState.listenUrl} at ${gatewayState.startedAt}\n`);
 
@@ -428,6 +458,7 @@ async function startGateway() {
     env: {
       ...process.env,
       OPENCODEX_GATEWAY_ENTRY: paths.gatewayScriptPath,
+      [PREFERRED_LANGUAGES_ENV]: preferredLanguagesEnvValue(),
       // runner 的 Info.plist 已经用 LSBackgroundOnly 隐藏；该标记让业务入口不要再调用 Dock API。
       OPENCODEX_GATEWAY_AGENT_MODE: "1",
       // 第 4 个 stdio fd 是生命周期 pipe；gateway 会监听它判断 launcher 是否已退出。

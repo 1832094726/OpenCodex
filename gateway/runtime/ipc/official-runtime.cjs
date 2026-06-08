@@ -784,10 +784,8 @@ function parseFetchResponseBodyJson(payload) {
 }
 
 function getI18nSnapshot() {
-  // gateway 运行在官方 Electron runtime 内，但 OpenCodex 自有文案只取当前系统语言，避免官方版本差异影响启动。
-  return resolveOpenCodexI18n({
-    systemLocales: [app && typeof app.getLocale === "function" ? app.getLocale() : ""],
-  });
+  // OpenCodex 自有文案统一由 shared/i18n 解析，gateway 只负责发布解析后的快照。
+  return resolveOpenCodexI18n();
 }
 
 function logComputerUseAuthResponse(routeBase, payload) {
