@@ -118,6 +118,26 @@ If you need to access it from another device, use the LAN address shown by the L
 
 > Directly exposing OpenCodex to the public Internet is not recommended.
 
+## Common Environment Variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HOST` | `0.0.0.0` | Listen address for command-line gateway startup. |
+| `PORT` | `3737` | Listen port for command-line gateway startup. |
+| `OPENCODEX_HOST` | `127.0.0.1` | Default listen address used when the Launcher starts the gateway for the first time. |
+| `OPENCODEX_PORT` | Random available port | Default port used when the Launcher starts the gateway for the first time. |
+| `OPENCODEX_PREFERRED_LANGUAGES` | `zh-CN` | Preferred language list for OpenCodex-owned UI, as a JSON array or comma-separated list, for example `["zh-Hans-CN","en-CN"]`. The Launcher automatically passes the system preferred languages. |
+| `CODEX_WEB_CONFIG_PATH` | `config.yaml` | Path to the gateway authentication config file. |
+| `CODEX_WEB_AUTH_TOKEN_TTL_MS` | `43200000` | Gateway access token lifetime, 12 hours by default. |
+| `CODEX_WEB_DEBUG` | Empty | Set to `1` or `true` to output more debug logs. |
+| `CODEX_WEB_SLOW_LOG_MS` | `750` | Slow IPC call logging threshold, in milliseconds. |
+| `CODEX_WEB_LOCAL_FILE_TOKEN_TTL_MS` | `300000` | Local file preview URL token lifetime, in milliseconds. |
+| `CODEX_DESKTOP_APP_PATH` | Auto scan | Codex Desktop install path or path containing `app.asar`. |
+| `CODEX_WEB_RUNTIME_DIR` | `.data/runtime` | Runtime directory for command-line gateway startup; packaged Launcher mode points this to the user data directory. |
+| `CODEX_WEB_OFFICIAL_BUNDLE_DIR` | `.data/cache/codex-official-bundle` | Official bundle extraction cache directory. |
+| `CODEX_WEB_OFFICIAL_USER_DATA_DIR` | `.data/official-user-data` | Isolated official Electron profile directory. |
+| `CODEX_HOME` | `~/.codex` | Config and runtime data directory for Codex CLI / app-server. |
+
 ## FAQ
 
 ### Chat history is empty the first time a session is opened

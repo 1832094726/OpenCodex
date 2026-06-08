@@ -115,6 +115,26 @@ http://127.0.0.1:3737
 
 > 不建议把 OpenCodex 直接暴露到公网。
 
+## 常用环境变量
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `HOST` | `0.0.0.0` | 命令行 gateway 监听地址。 |
+| `PORT` | `3737` | 命令行 gateway 监听端口。 |
+| `OPENCODEX_HOST` | `127.0.0.1` | Launcher 首次启动 gateway 时使用的默认监听地址。 |
+| `OPENCODEX_PORT` | 随机可用端口 | Launcher 首次启动 gateway 时使用的默认端口。 |
+| `OPENCODEX_PREFERRED_LANGUAGES` | `zh-CN` | OpenCodex 自有界面语言首选列表，支持 JSON 数组或逗号分隔，例如 `["zh-Hans-CN","en-CN"]`。Launcher 会自动传入系统首选语言。 |
+| `CODEX_WEB_CONFIG_PATH` | `config.yaml` | gateway 认证配置文件路径。 |
+| `CODEX_WEB_AUTH_TOKEN_TTL_MS` | `43200000` | gateway 访问 token 有效期，默认 12 小时。 |
+| `CODEX_WEB_DEBUG` | 空 | 设为 `1` 或 `true` 后输出更多调试日志。 |
+| `CODEX_WEB_SLOW_LOG_MS` | `750` | IPC 慢调用日志阈值，单位毫秒。 |
+| `CODEX_WEB_LOCAL_FILE_TOKEN_TTL_MS` | `300000` | 本地文件预览 URL token 有效期，单位毫秒。 |
+| `CODEX_DESKTOP_APP_PATH` | 自动扫描 | 指定 Codex Desktop 安装路径或 `app.asar` 所在路径。 |
+| `CODEX_WEB_RUNTIME_DIR` | `.data/runtime` | 命令行 gateway 运行目录；打包态由 Launcher 指向用户数据目录。 |
+| `CODEX_WEB_OFFICIAL_BUNDLE_DIR` | `.data/cache/codex-official-bundle` | 指定官方 bundle 解包缓存目录。 |
+| `CODEX_WEB_OFFICIAL_USER_DATA_DIR` | `.data/official-user-data` | 指定官方 Electron profile 隔离目录。 |
+| `CODEX_HOME` | `~/.codex` | Codex CLI / app-server 的配置和运行数据目录。 |
+
 ## 常见问题
 
 ### 第一次打开会话历史为空
