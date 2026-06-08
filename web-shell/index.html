@@ -8,6 +8,7 @@
     <link rel="apple-touch-icon" href="/assets/icon.png" />
     <title>OpenCodex</title>
     <!-- codex-official-styles -->
+    <!-- opencodex-runtime-config -->
     <style>
       :root {
         color-scheme: light;
@@ -379,14 +380,14 @@
       <main class="entry" aria-live="polite">
         <section class="panel">
           <h1>OpenCodex</h1>
-          <p id="status" class="status">正在检查访问权限...</p>
+          <p id="status" class="status" data-i18n="web.status.checkingAuth">正在检查访问权限...</p>
           <form id="login-form" class="hidden" autocomplete="on">
-            <label for="password">访问密码</label>
-            <input id="password" name="password" type="password" autocomplete="current-password" placeholder="请输入密码" />
-            <button id="submit" type="submit">进入</button>
+            <label for="password" data-i18n="web.auth.passwordLabel">访问密码</label>
+            <input id="password" name="password" type="password" autocomplete="current-password" placeholder="请输入密码" data-i18n-placeholder="web.auth.passwordPlaceholder" />
+            <button id="submit" type="submit" data-i18n="web.auth.enter">进入</button>
             <div id="error" class="error"></div>
           </form>
-          <p id="hint" class="hint hidden">正在启动 OpenCodex...</p>
+          <p id="hint" class="hint hidden" data-i18n="web.auth.starting">正在启动 OpenCodex...</p>
         </section>
       </main>
       <div class="entry-version">
@@ -394,27 +395,34 @@
         <span>Powered by @Ryens</span>
       </div>
       <button id="settings-open" class="settings-button" type="button" aria-controls="settings-sidebar" aria-expanded="false">
-        设置
+        <span data-i18n="web.settings.open">设置</span>
       </button>
       <div id="settings-backdrop" class="settings-backdrop" hidden></div>
-      <aside id="settings-sidebar" class="settings-sidebar" aria-label="设置" hidden>
+      <aside id="settings-sidebar" class="settings-sidebar" aria-label="设置" data-i18n-aria-label="web.settings.title" hidden>
         <div class="settings-header">
-          <h2>设置</h2>
-          <button id="settings-close" class="settings-close" type="button" aria-label="关闭设置">×</button>
+          <h2 data-i18n="web.settings.title">设置</h2>
+          <button id="settings-close" class="settings-close" type="button" aria-label="关闭设置" data-i18n-aria-label="web.settings.close">×</button>
         </div>
         <div class="settings-list">
           <div class="settings-row">
-            <label for="setting-mobile-keyboard">移动端软键盘优化</label>
+            <label for="setting-mobile-keyboard" data-i18n="web.settings.mobileKeyboard">移动端软键盘优化</label>
             <input id="setting-mobile-keyboard" class="switch" type="checkbox" role="switch" />
           </div>
           <div class="settings-row">
-            <label for="setting-mobile-sidebar-collapse">移动端点击会话自动收起侧栏</label>
+            <label for="setting-mobile-sidebar-collapse" data-i18n="web.settings.mobileSidebarCollapse">移动端点击会话自动收起侧栏</label>
             <input id="setting-mobile-sidebar-collapse" class="switch" type="checkbox" role="switch" />
           </div>
-          <div class="settings-section-title">关于</div>
+          <div class="settings-row">
+            <span class="settings-row-content">
+              <span class="settings-row-title" data-i18n="web.settings.notifications">浏览器通知</span>
+              <span id="setting-notification-status" class="settings-row-description"></span>
+            </span>
+            <input id="setting-notification-permission" class="switch" type="checkbox" role="switch" />
+          </div>
+          <div class="settings-section-title" data-i18n="web.settings.about">关于</div>
           <a class="settings-row settings-link-row" href="https://github.com/RyensX/OpenCodex" target="_blank" rel="noreferrer">
             <span class="settings-row-content">
-              <span class="settings-row-title">如果觉得有用，欢迎Star⭐️支持</span>
+              <span class="settings-row-title" data-i18n="web.settings.star">如果觉得有用，欢迎 Star 支持</span>
               <span class="settings-row-description">https://github.com/RyensX/OpenCodex</span>
             </span>
             <span class="settings-row-trailing" aria-hidden="true">↗</span>
@@ -426,11 +434,16 @@
       (() => {
         const forceLoginKey = "codex_web_force_login";
         const settingsKey = "opencodex_web_settings_v1";
+        const runtimeConfig = window.__CODEX_WEB_CONFIG__ || {};
+        const locale = runtimeConfig.locale || "zh-CN";
+        const messages = runtimeConfig.messages && typeof runtimeConfig.messages === "object" ? runtimeConfig.messages : {};
         const defaultSettings = {
           mobileKeyboardOptimization: true,
           mobileSidebarAutoCollapse: true,
         };
         let runtimeAuthToken = "";
+        // 登录成功后官方 renderer 会替换当前 document，但 window 对象仍会保留；这里把短期 token 暴露给 bridge 使用。
+        window.__OPEN_CODEX_RUNTIME_AUTH_TOKEN__ = "";
         const root = document.getElementById("root");
         const status = document.getElementById("status");
         const hint = document.getElementById("hint");
@@ -444,7 +457,31 @@
         const settingsSidebar = document.getElementById("settings-sidebar");
         const mobileKeyboardSwitch = document.getElementById("setting-mobile-keyboard");
         const mobileSidebarCollapseSwitch = document.getElementById("setting-mobile-sidebar-collapse");
+        const notificationPermissionButton = document.getElementById("setting-notification-permission");
+        const notificationStatus = document.getElementById("setting-notification-status");
         let settingsCloseTimer = 0;
+
+        function t(key, values) {
+          const template = messages[key] || key;
+          if (!values || typeof values !== "object") return template;
+          return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (match, name) =>
+            Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : match
+          );
+        }
+
+        function applyI18n() {
+          // 登录壳必须在未认证时可用，所以只消费启动 HTML 注入的公开 locale/messages。
+          document.documentElement.lang = locale;
+          for (const node of document.querySelectorAll("[data-i18n]")) {
+            node.textContent = t(node.dataset.i18n);
+          }
+          for (const node of document.querySelectorAll("[data-i18n-placeholder]")) {
+            node.setAttribute("placeholder", t(node.dataset.i18nPlaceholder));
+          }
+          for (const node of document.querySelectorAll("[data-i18n-aria-label]")) {
+            node.setAttribute("aria-label", t(node.dataset.i18nAriaLabel));
+          }
+        }
 
         function loadSettings() {
           try {
@@ -468,6 +505,37 @@
           const settings = loadSettings();
           mobileKeyboardSwitch.checked = settings.mobileKeyboardOptimization !== false;
           mobileSidebarCollapseSwitch.checked = settings.mobileSidebarAutoCollapse !== false;
+          syncNotificationPermissionControls();
+        }
+
+        function notificationPermissionState() {
+          if (!("Notification" in window)) return "unsupported";
+          return window.Notification.permission || "default";
+        }
+
+        function syncNotificationPermissionControls(messageOverride) {
+          const state = notificationPermissionState();
+          const labels = {
+            granted: t("web.settings.notificationEnabled"),
+            denied: t("web.settings.notificationBlocked"),
+            default: t("web.settings.notificationPrompt"),
+            unsupported: t("web.settings.notificationUnsupported"),
+          };
+          notificationStatus.textContent = messageOverride || labels[state] || labels.default;
+          notificationPermissionButton.checked = state === "granted";
+          // default/denied 都允许用户点击；denied 时浏览器可能直接返回 denied，但入口不能被我们提前禁用。
+          notificationPermissionButton.disabled =
+            state === "granted" || state === "unsupported" || typeof window.Notification.requestPermission !== "function";
+        }
+
+        function showNotificationPermissionTest() {
+          if (!("Notification" in window) || window.Notification.permission !== "granted") return;
+          try {
+            // 授权成功后立即发一条浏览器通知，便于确认系统通知链路是否真的可用。
+            new window.Notification(t("web.settings.notificationTestTitle"), {
+              body: t("web.settings.notificationTestBody"),
+            });
+          } catch {}
         }
 
         function setSettingsOpen(open) {
@@ -508,10 +576,12 @@
 
         function storeToken(token) {
           runtimeAuthToken = token || "";
+          window.__OPEN_CODEX_RUNTIME_AUTH_TOKEN__ = runtimeAuthToken;
         }
 
         function clearToken() {
           runtimeAuthToken = "";
+          window.__OPEN_CODEX_RUNTIME_AUTH_TOKEN__ = "";
         }
 
         function shouldForceLogin() {
@@ -540,7 +610,7 @@
 
         function localizedError(error) {
           const message = error && error.message ? error.message : String(error || "");
-          if (message === "Invalid password") return "密码不正确。";
+          if (message === "Invalid password") return t("web.auth.invalidPassword");
           return message;
         }
 
@@ -553,7 +623,7 @@
         }
 
         function showLogin(message) {
-          status.textContent = "请输入访问密码。";
+          status.textContent = t("web.auth.prompt");
           hint.classList.add("hidden");
           form.classList.remove("hidden");
           errorBox.textContent = message || "";
@@ -578,7 +648,7 @@
         }
 
         async function bootRenderer() {
-          showBoot("正在启动 OpenCodex...");
+          showBoot(t("web.auth.starting"));
           const res = await fetch("/official-index.patched.html", {
             cache: "no-store",
             credentials: "same-origin",
@@ -586,10 +656,10 @@
           });
           if (res.status === 401) {
             clearToken();
-            showLogin("登录已过期，请重新输入密码。");
+            showLogin(t("web.auth.expired"));
             return;
           }
-          if (!res.ok) throw new Error(`无法加载 OpenCodex：HTTP ${res.status}`);
+          if (!res.ok) throw new Error(t("web.auth.loadFailedHttp", { status: res.status }));
           const html = await res.text();
           document.open();
           document.write(html);
@@ -719,7 +789,7 @@
           });
           const body = await res.json().catch(() => null);
           if (!res.ok || !body || body.ok === false) {
-            throw new Error((body && body.error) || `登录失败：HTTP ${res.status}`);
+            throw new Error((body && body.error) || t("web.auth.loginFailedHttp", { status: res.status }));
           }
           clearForceLogin();
           if (body.token) storeToken(body.token);
@@ -752,6 +822,29 @@
         mobileSidebarCollapseSwitch.addEventListener("change", () => {
           updateSetting("mobileSidebarAutoCollapse", mobileSidebarCollapseSwitch.checked);
         });
+        notificationPermissionButton.addEventListener("change", async () => {
+          if (!("Notification" in window) || typeof window.Notification.requestPermission !== "function") {
+            syncNotificationPermissionControls();
+            return;
+          }
+          if (!notificationPermissionButton.checked) {
+            // 浏览器不允许网页主动撤销通知权限，关闭只能到浏览器站点设置里处理。
+            syncNotificationPermissionControls();
+            return;
+          }
+          notificationPermissionButton.disabled = true;
+          notificationStatus.textContent = t("web.settings.notificationRequesting");
+          let nextPermission = "";
+          try {
+            // 只有用户明确点击设置按钮时才请求权限，避免进入页面时打断登录或会话加载。
+            nextPermission = await window.Notification.requestPermission();
+          } catch {}
+          if (nextPermission === "granted" || window.Notification.permission === "granted") {
+            showNotificationPermissionTest();
+          }
+          syncNotificationPermissionControls(nextPermission === "denied" ? t("web.settings.notificationBlockedHelp") : "");
+        });
+        applyI18n();
         syncSettingsControls();
 
         (async () => {

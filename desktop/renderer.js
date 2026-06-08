@@ -1,6 +1,8 @@
 const launcher = window.openCodexLauncher;
 let currentState = null;
 let pendingHostMode = "";
+let currentLocale = "zh-CN";
+let currentMessages = {};
 
 function $(id) {
   return document.getElementById(id);
@@ -8,23 +10,64 @@ function $(id) {
 
 function text(id, value) {
   const node = $(id);
-  if (node) node.textContent = value || "未知";
+  if (node) node.textContent = value || t("common.unknown");
 }
 
-function pathButton(id, value) {
+function pathButton(id, value, fallbackKey) {
   const node = $(id);
   if (!node) return;
-  node.textContent = value || "未找到";
+  node.textContent = value || t(fallbackKey || "common.notFound");
   node.title = value || "";
   node.dataset.path = value || "";
   node.disabled = !value;
 }
 
+function t(key, values) {
+  const template = currentMessages[key] || key;
+  if (!values || typeof values !== "object") return template;
+  return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (match, name) =>
+    Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : match
+  );
+}
+
+function applyI18n() {
+  // 静态 HTML 只保留中文 fallback；真实语言随 launcher state 到达后统一刷新。
+  document.documentElement.lang = currentLocale;
+  for (const node of document.querySelectorAll("[data-i18n]")) {
+    node.textContent = t(node.dataset.i18n);
+  }
+  for (const node of document.querySelectorAll("[data-i18n-placeholder]")) {
+    node.setAttribute("placeholder", t(node.dataset.i18nPlaceholder));
+  }
+  for (const node of document.querySelectorAll("[data-i18n-title]")) {
+    node.setAttribute("title", t(node.dataset.i18nTitle));
+  }
+  for (const node of document.querySelectorAll("[data-i18n-aria-label]")) {
+    node.setAttribute("aria-label", t(node.dataset.i18nAriaLabel));
+  }
+}
+
+function syncI18n(state) {
+  currentLocale = state.locale || currentLocale;
+  currentMessages = state.messages && typeof state.messages === "object" ? state.messages : currentMessages;
+  applyI18n();
+}
+
+function renderAuthStatus(enabled) {
+  const node = $("authStatus");
+  if (!node) return;
+  const isEnabled = !!enabled;
+  node.textContent = isEnabled ? t("launcher.settings.auth.enabled") : t("launcher.settings.auth.disabled");
+  // 访问控制关闭是需要显眼提示的安全状态，单独加 class，避免影响其它 setting-status。
+  node.classList.toggle("is-enabled", isEnabled);
+  node.classList.toggle("is-disabled", !isEnabled);
+}
+
 function formatDateTime(value) {
-  if (!value) return "未知";
+  if (!value) return t("common.unknown");
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "未知";
-  return date.toLocaleString("zh-CN", {
+  if (Number.isNaN(date.getTime())) return t("common.unknown");
+  return date.toLocaleString(currentLocale, {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -81,19 +124,20 @@ function renderStatus(state) {
   const appServerMode = state.status && state.status.appServer ? state.status.appServer.mode : "";
 
   if (connected) {
-    pill.textContent = appServerMode === "connected" ? "已就绪" : "Gateway 已启动";
+    pill.textContent = appServerMode === "connected" ? t("launcher.status.ready") : t("launcher.status.gatewayStarted");
     pill.classList.remove("offline");
   } else if (running) {
-    pill.textContent = "启动中";
+    pill.textContent = t("launcher.status.starting");
     pill.classList.remove("offline");
   } else {
-    pill.textContent = "未运行";
+    pill.textContent = t("launcher.status.stopped");
     pill.classList.add("offline");
   }
 }
 
 function render(state) {
   currentState = state;
+  syncI18n(state);
   const status = state.status || {};
   const gateway = status.gateway || {};
   const runtime = status.runtime || {};
@@ -107,27 +151,27 @@ function render(state) {
   if (pendingHostMode && settings.hostMode === pendingHostMode) pendingHostMode = "";
   renderHostMode(settings.hostMode);
   renderPort(settings.port || state.port);
-  text("serviceTitle", settings.hostMode === "lan" ? "局域网服务" : "本机服务");
+  text("serviceTitle", settings.hostMode === "lan" ? t("launcher.service.lan") : t("launcher.service.local"));
 
-  text("codexVersion", official.version || "未知");
-  text("codexBuild", official.build || "未知");
+  text("codexVersion", official.version || t("common.unknown"));
+  text("codexBuild", official.build || t("common.unknown"));
   text("cacheUpdatedAt", formatDateTime(official.cacheProcessedAt));
   pathButton("codexAppPath", official.sourceAppPath);
   pathButton("sourceAsarPath", official.sourceAsarPath);
   pathButton("codexBinaryPath", official.codexBinaryPath);
 
-  text("gatewayPid", state.pid ? String(state.pid) : "未运行");
+  text("gatewayPid", state.pid ? String(state.pid) : t("common.notRunning"));
   text("gatewayStartedAt", formatDateTime(state.startedAt));
   text("gatewayListen", gateway.host && gateway.port ? `${gateway.host}:${gateway.port}` : `${state.host}:${state.port}`);
-  text("appServerMode", appServer.mode || "未知");
-  text("nodeVersion", gateway.nodeVersion || "未知");
-  text("electronVersion", gateway.electronVersion || "未知");
+  text("appServerMode", appServer.mode || t("common.unknown"));
+  text("nodeVersion", gateway.nodeVersion || t("common.unknown"));
+  text("electronVersion", gateway.electronVersion || t("common.unknown"));
 
-  pathButton("configPath", runtime.configPath || paths.configPath);
-  pathButton("logPath", paths.logPath);
-  pathButton("reportsDir", runtime.reportsDir || paths.reportsDir);
-  pathButton("officialBundleDir", official.bundleDir || paths.officialBundleDir);
-  text("authStatus", state.auth && state.auth.enabled ? "已启用" : "未启用");
+  pathButton("configPath", runtime.configPath || paths.configPath, "common.notCreated");
+  pathButton("logPath", paths.logPath, "common.notCreated");
+  pathButton("reportsDir", runtime.reportsDir || paths.reportsDir, "common.notCreated");
+  pathButton("officialBundleDir", official.bundleDir || paths.officialBundleDir, "common.notCreated");
+  renderAuthStatus(state.auth && state.auth.enabled);
 
   const error = $("lastError");
   const message = state.lastError || (appServer.lastError ? `app-server: ${appServer.lastError}` : "");

@@ -1,3 +1,0 @@
-[submodule "vendor/electron-to-web"]
-	path = vendor/electron-to-web
-	url = https://github.com/lsadehaan/electron-to-web

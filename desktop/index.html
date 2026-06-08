@@ -15,9 +15,9 @@
       <div class="header-inner">
         <div class="header-brand">
           <img class="logo" src="../web-shell/assets/icon.png" alt="Logo" />
-          <h1 id="serviceTitle">本机服务</h1>
+          <h1 id="serviceTitle" data-i18n="launcher.service.local">本机服务</h1>
         </div>
-        <div class="status-pill" id="statusPill">启动中</div>
+        <div class="status-pill" id="statusPill" data-i18n="launcher.status.starting">启动中</div>
       </div>
     </header>
 
@@ -30,34 +30,34 @@
         <!-- 顶部核心大动作区域 -->
         <section class="hero-section">
           <div class="hero-content">
-            <div class="hero-label">访问地址</div>
+            <div class="hero-label" data-i18n="launcher.hero.urlLabel">访问地址</div>
             <div class="url-list" id="lanUrls" hidden></div>
           </div>
           <div class="hero-actions">
-            <button class="primary" id="openCodex">打开 Codex</button>
-            <button id="copyUrl">复制地址</button>
-            <button id="restart">重启服务</button>
+            <button class="primary" id="openCodex" data-i18n="launcher.actions.openCodex">打开 Codex</button>
+            <button id="copyUrl" data-i18n="launcher.actions.copyUrl">复制地址</button>
+            <button id="restart" data-i18n="launcher.actions.restart">重启服务</button>
           </div>
         </section>
 
         <!-- 核心设置列表 -->
         <section class="setting-section">
-          <h2>设置 <span class="section-caption">服务访问</span></h2>
+          <h2><span data-i18n="launcher.settings.title">设置</span> <span class="section-caption" data-i18n="launcher.settings.accessCaption">服务访问</span></h2>
           <div class="setting-list">
             <div class="setting-item">
               <div class="setting-info">
-                <div class="setting-label">启动地址</div>
-                <div class="setting-desc">选择服务运行的接口绑定</div>
+                <div class="setting-label" data-i18n="launcher.settings.host.label">启动地址</div>
+                <div class="setting-desc" data-i18n="launcher.settings.host.description">选择服务运行的接口绑定</div>
               </div>
               <div class="setting-control">
                 <div class="segmented" id="hostModeGroup">
                   <label>
                     <input type="radio" name="hostMode" value="local" />
-                    <span>本机</span>
+                    <span data-i18n="launcher.settings.host.local">本机</span>
                   </label>
                   <label>
                     <input type="radio" name="hostMode" value="lan" />
-                    <span>局域网</span>
+                    <span data-i18n="launcher.settings.host.lan">局域网</span>
                   </label>
                 </div>
               </div>
@@ -65,26 +65,27 @@
 
             <div class="setting-item">
               <div class="setting-info">
-                <div class="setting-label">端口</div>
-                <div class="setting-desc">服务监听的网络端口</div>
+                <div class="setting-label" data-i18n="launcher.settings.port.label">端口</div>
+                <div class="setting-desc" data-i18n="launcher.settings.port.description">服务监听的网络端口</div>
               </div>
               <div class="setting-control port-row">
                 <input id="portInput" type="number" min="1" max="65535" step="1" inputmode="numeric" />
-                <button id="savePort">保存</button>
+                <button id="savePort" data-i18n="common.save">保存</button>
               </div>
             </div>
 
             <div class="setting-item">
               <div class="setting-info">
-                <div class="setting-label">访问密码</div>
+                <div class="setting-label" data-i18n="launcher.settings.auth.label">访问密码</div>
                 <div class="setting-desc">
-                  设置访问权限 - 当前状态: <span class="setting-status" id="authStatus">未启用</span>
+                  <span data-i18n="launcher.settings.auth.descriptionPrefix">设置访问权限 - 当前状态:</span>
+                  <span class="setting-status" id="authStatus">未启用</span>
                 </div>
               </div>
               <div class="setting-control password-row">
-                <input id="passwordInput" type="password" autocomplete="new-password" placeholder="留空关闭密码" />
-                <button id="savePassword">保存</button>
-                <button id="clearPassword">清空</button>
+                <input id="passwordInput" type="password" autocomplete="new-password" placeholder="留空关闭密码" data-i18n-placeholder="launcher.settings.auth.placeholder" />
+                <button id="savePassword" data-i18n="common.save">保存</button>
+                <button id="clearPassword" data-i18n="common.clear">清空</button>
               </div>
             </div>
           </div>
@@ -92,54 +93,54 @@
 
         <!-- Codex 运行时 -->
         <section class="setting-section">
-          <h2>Codex <span class="section-caption">官方运行时</span></h2>
+          <h2>Codex <span class="section-caption" data-i18n="launcher.codex.caption">官方运行时</span></h2>
           <div class="setting-list kv">
             <div class="setting-item">
-              <div class="setting-label">版本</div>
-              <div class="setting-value" id="codexVersion">未知</div>
+              <div class="setting-label" data-i18n="launcher.codex.version">版本</div>
+              <div class="setting-value" id="codexVersion" data-i18n="common.unknown">未知</div>
             </div>
             <div class="setting-item">
-              <div class="setting-label">构建</div>
-              <div class="setting-value" id="codexBuild">未知</div>
+              <div class="setting-label" data-i18n="launcher.codex.build">构建</div>
+              <div class="setting-value" id="codexBuild" data-i18n="common.unknown">未知</div>
             </div>
             <div class="setting-item">
-              <div class="setting-label">缓存时间</div>
-              <div class="setting-value" id="cacheUpdatedAt">未知</div>
+              <div class="setting-label" data-i18n="launcher.codex.cacheTime">缓存时间</div>
+              <div class="setting-value" id="cacheUpdatedAt" data-i18n="common.unknown">未知</div>
             </div>
             <div class="setting-item">
-              <div class="setting-label">Codex 路径</div>
-              <div class="setting-control"><button class="path" id="codexAppPath">未找到</button></div>
+              <div class="setting-label" data-i18n="launcher.codex.path">Codex 路径</div>
+              <div class="setting-control"><button class="path" id="codexAppPath" data-i18n="common.notFound">未找到</button></div>
             </div>
             <div class="setting-item">
               <div class="setting-label">app.asar</div>
-              <div class="setting-control"><button class="path" id="sourceAsarPath">未找到</button></div>
+              <div class="setting-control"><button class="path" id="sourceAsarPath" data-i18n="common.notFound">未找到</button></div>
             </div>
             <div class="setting-item">
-              <div class="setting-label">命令行</div>
-              <div class="setting-control"><button class="path" id="codexBinaryPath">未找到</button></div>
+              <div class="setting-label" data-i18n="launcher.codex.cli">命令行</div>
+              <div class="setting-control"><button class="path" id="codexBinaryPath" data-i18n="common.notFound">未找到</button></div>
             </div>
           </div>
         </section>
 
         <!-- 网关状态 -->
         <section class="setting-section">
-          <h2>网关 <span class="section-caption">本机进程</span></h2>
+          <h2><span data-i18n="launcher.gateway.title">网关</span> <span class="section-caption" data-i18n="launcher.gateway.caption">本机进程</span></h2>
           <div class="setting-list kv">
             <div class="setting-item">
-              <div class="setting-label">进程</div>
-              <div class="setting-value" id="gatewayPid">未运行</div>
+              <div class="setting-label" data-i18n="launcher.gateway.process">进程</div>
+              <div class="setting-value" id="gatewayPid" data-i18n="common.notRunning">未运行</div>
             </div>
             <div class="setting-item">
-              <div class="setting-label">启动时间</div>
-              <div class="setting-value" id="gatewayStartedAt">未知</div>
+              <div class="setting-label" data-i18n="launcher.gateway.startedAt">启动时间</div>
+              <div class="setting-value" id="gatewayStartedAt" data-i18n="common.unknown">未知</div>
             </div>
             <div class="setting-item">
-              <div class="setting-label">监听</div>
+              <div class="setting-label" data-i18n="launcher.gateway.listen">监听</div>
               <div class="setting-value" id="gatewayListen">127.0.0.1:3737</div>
             </div>
             <div class="setting-item">
-              <div class="setting-label">应用服务</div>
-              <div class="setting-value" id="appServerMode">未知</div>
+              <div class="setting-label" data-i18n="launcher.gateway.appServer">应用服务</div>
+              <div class="setting-value" id="appServerMode" data-i18n="common.unknown">未知</div>
             </div>
             <div class="setting-item">
               <div class="setting-label">Node</div>
@@ -155,25 +156,25 @@
         <!-- 运行目录 -->
         <section class="setting-section">
           <div class="section-head">
-            <h2>运行目录</h2>
-            <button id="openLogs" class="secondary-btn">查看日志</button>
+            <h2 data-i18n="launcher.paths.title">运行目录</h2>
+            <button id="openLogs" class="secondary-btn" data-i18n="launcher.paths.openLogs">查看日志</button>
           </div>
           <div class="setting-list kv paths">
             <div class="setting-item">
-              <div class="setting-label">配置</div>
-              <div class="setting-control"><button class="path" id="configPath">未创建</button></div>
+              <div class="setting-label" data-i18n="launcher.paths.config">配置</div>
+              <div class="setting-control"><button class="path" id="configPath" data-i18n="common.notCreated">未创建</button></div>
             </div>
             <div class="setting-item">
-              <div class="setting-label">日志</div>
-              <div class="setting-control"><button class="path" id="logPath">未创建</button></div>
+              <div class="setting-label" data-i18n="launcher.paths.log">日志</div>
+              <div class="setting-control"><button class="path" id="logPath" data-i18n="common.notCreated">未创建</button></div>
             </div>
             <div class="setting-item">
-              <div class="setting-label">报告</div>
-              <div class="setting-control"><button class="path" id="reportsDir">未创建</button></div>
+              <div class="setting-label" data-i18n="launcher.paths.reports">报告</div>
+              <div class="setting-control"><button class="path" id="reportsDir" data-i18n="common.notCreated">未创建</button></div>
             </div>
             <div class="setting-item">
-              <div class="setting-label">渲染器缓存</div>
-              <div class="setting-control"><button class="path" id="officialBundleDir">未创建</button></div>
+              <div class="setting-label" data-i18n="launcher.paths.rendererCache">渲染器缓存</div>
+              <div class="setting-control"><button class="path" id="officialBundleDir" data-i18n="common.notCreated">未创建</button></div>
             </div>
           </div>
         </section>

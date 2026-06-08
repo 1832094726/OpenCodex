@@ -5,8 +5,11 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
+const { prepareOfficialElectronRuntime } = require("../gateway/runner/index.cjs");
+const { PREFERRED_LANGUAGES_ENV, formatMessage, resolveOpenCodexI18n } = require("../shared/i18n/index.cjs");
 
 const APP_ROOT = path.resolve(__dirname, "..");
+
 const DEFAULT_HOST = process.env.OPENCODEX_HOST || "127.0.0.1";
 const DEFAULT_PORT = normalizePort(process.env.OPENCODEX_PORT);
 
@@ -26,8 +29,11 @@ const gatewayState = {
   paths: null,
   settings: null,
   status: null,
+  i18n: null,
+  preferredLanguages: null,
   lastError: "",
   startedAt: null,
+  officialRuntime: null,
 };
 
 function ensureDir(dirPath) {
@@ -59,7 +65,8 @@ function runtimePaths() {
     configPath: path.join(runtimeDir, "config.yaml"),
     settingsPath: path.join(userDataDir, "launcher-settings.json"),
     logPath: path.join(logsDir, "gateway.log"),
-    gatewayScriptPath: path.join(APP_ROOT, "gateway", "dist", "server.js"),
+    gatewayScriptPath: path.join(APP_ROOT, "gateway", "main.cjs"),
+    officialElectronRunnerDir: path.join(runtimeDir, "official-electron-runner"),
   };
 }
 
@@ -304,6 +311,7 @@ async function ensurePortSetting(paths, settings) {
 }
 
 function buildState() {
+  const i18n = currentGatewayI18n();
   return {
     running: !!gatewayState.child && !gatewayState.child.killed,
     pid: gatewayState.child ? gatewayState.child.pid : null,
@@ -324,7 +332,49 @@ function buildState() {
     status: gatewayState.status,
     lastError: gatewayState.lastError,
     startedAt: gatewayState.startedAt,
+    officialRuntime: gatewayState.officialRuntime,
+    locale: i18n.locale,
+    messages: i18n.messages,
+    i18nSource: i18n.source,
   };
+}
+
+function currentGatewayI18n() {
+  const statusI18n = gatewayState.status && gatewayState.status.i18n;
+  if (statusI18n && statusI18n.messages && typeof statusI18n.messages === "object") {
+    gatewayState.i18n = statusI18n;
+    return statusI18n;
+  }
+  if (gatewayState.i18n && gatewayState.i18n.messages && typeof gatewayState.i18n.messages === "object") {
+    return gatewayState.i18n;
+  }
+  // gateway 尚未返回状态前，launcher 可以用即将传给 gateway 的同一份首选语言列表兜底。
+  return resolveOpenCodexI18n({ systemLocales: currentPreferredLanguages() });
+}
+
+function launcherText(key, values) {
+  const i18n = currentGatewayI18n();
+  return formatMessage(i18n.messages, key, values);
+}
+
+function preferredSystemLanguages() {
+  try {
+    const languages = app && typeof app.getPreferredSystemLanguages === "function" ? app.getPreferredSystemLanguages() : [];
+    return Array.isArray(languages) ? languages : [];
+  } catch {
+    return [];
+  }
+}
+
+function currentPreferredLanguages() {
+  if (Array.isArray(gatewayState.preferredLanguages)) return gatewayState.preferredLanguages;
+  gatewayState.preferredLanguages = preferredSystemLanguages();
+  return gatewayState.preferredLanguages;
+}
+
+function preferredLanguagesEnvValue() {
+  // 只在 launcher 启动 gateway 时读取系统首选语言；gateway 侧通过环境变量消费同一份列表。
+  return JSON.stringify(currentPreferredLanguages());
 }
 
 function broadcastState() {
@@ -350,6 +400,7 @@ function startStatusPolling() {
   statusTimer = setInterval(async () => {
     try {
       gatewayState.status = await fetchGatewayStatus();
+      if (gatewayState.status && gatewayState.status.i18n) gatewayState.i18n = gatewayState.status.i18n;
       gatewayState.lastError = "";
     } catch (error) {
       gatewayState.lastError = error instanceof Error ? error.message : String(error);
@@ -369,7 +420,7 @@ async function startGateway() {
   gatewayState.host = hostForMode(gatewayState.settings.hostMode);
 
   if (!fs.existsSync(paths.gatewayScriptPath)) {
-    gatewayState.lastError = `Missing gateway build: ${paths.gatewayScriptPath}`;
+    gatewayState.lastError = `Missing gateway entry: ${paths.gatewayScriptPath}`;
     broadcastState();
     return buildState();
   }
@@ -379,14 +430,42 @@ async function startGateway() {
   gatewayState.status = null;
   gatewayState.lastError = "";
   gatewayState.startedAt = new Date().toISOString();
+  gatewayState.officialRuntime = null;
+  gatewayState.preferredLanguages = preferredSystemLanguages();
 
   appendLog(`\n[launcher] starting gateway ${gatewayState.listenUrl} at ${gatewayState.startedAt}\n`);
 
-  const child = spawn(process.execPath, [paths.gatewayScriptPath], {
+  let officialRuntime;
+  try {
+    // gateway 必须运行在官方 Electron ABI 下，否则官方 native addon（例如 better-sqlite3）会随 Codex 升级失配。
+    officialRuntime = await prepareOfficialElectronRuntime({
+      runtimeDir: paths.runtimeDir,
+      officialBundleDir: paths.officialBundleDir,
+      logger: appendLog,
+    });
+    gatewayState.officialRuntime = officialRuntime;
+  } catch (error) {
+    gatewayState.lastError = error instanceof Error ? error.message : String(error);
+    appendLog(`[launcher] official Electron runtime prepare failed: ${gatewayState.lastError}\n`);
+    broadcastState();
+    return buildState();
+  }
+
+  const officialUserDataDir = path.join(paths.runtimeDir, "official-user-data");
+  const officialRuntimeArgs = [`--user-data-dir=${officialUserDataDir}`];
+  const child = spawn(officialRuntime.executablePath, officialRuntimeArgs, {
     cwd: APP_ROOT,
     env: {
       ...process.env,
-      ELECTRON_RUN_AS_NODE: "1",
+      OPENCODEX_GATEWAY_ENTRY: paths.gatewayScriptPath,
+      [PREFERRED_LANGUAGES_ENV]: preferredLanguagesEnvValue(),
+      // runner 的 Info.plist 已经用 LSBackgroundOnly 隐藏；该标记让业务入口不要再调用 Dock API。
+      OPENCODEX_GATEWAY_AGENT_MODE: "1",
+      // 第 4 个 stdio fd 是生命周期 pipe；gateway 会监听它判断 launcher 是否已退出。
+      OPENCODEX_GATEWAY_LIFECYCLE_FD: "3",
+      // Chromium profile 必须和官方 Desktop 隔离；核心数据继续通过 CODEX_HOME 共享。
+      CODEX_WEB_OFFICIAL_USER_DATA_DIR: officialUserDataDir,
+      CODEX_ELECTRON_USER_DATA_PATH: officialUserDataDir,
       HOST: gatewayState.host,
       PORT: String(gatewayState.port),
       CODEX_WEB_RUNTIME_DIR: paths.runtimeDir,
@@ -396,7 +475,8 @@ async function startGateway() {
       CODEX_WEB_GATEWAY_BASE_URL: gatewayState.primaryUrl,
       CODEX_WEB_LAUNCHER_TOKEN: gatewayState.token,
     },
-    stdio: ["ignore", "pipe", "pipe"],
+    // 第 4 个 fd 是生命周期 pipe：launcher 退出时 OS 会关闭写端，gateway watchdog 会自杀。
+    stdio: ["ignore", "pipe", "pipe", "pipe"],
   });
 
   gatewayState.child = child;
@@ -522,7 +602,7 @@ ipcMain.handle("launcher:update-host-mode", async (_event, hostMode) => {
 ipcMain.handle("launcher:update-port", async (_event, port) => {
   const nextPort = normalizePort(port);
   if (!nextPort) {
-    gatewayState.lastError = "端口必须是 1 到 65535 之间的整数";
+    gatewayState.lastError = launcherText("launcher.error.invalidPort");
     broadcastState();
     return buildState();
   }

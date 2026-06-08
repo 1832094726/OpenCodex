@@ -35,7 +35,7 @@ class OfficialBundleRefreshPolicy {
     if (Number(manifest.sourceAsarMtimeMs) !== sourceInfo.sourceAsarMtimeMs) {
       return `app.asar 修改时间变化：${manifest.sourceAsarMtimeMs} -> ${sourceInfo.sourceAsarMtimeMs}`;
     }
-    if (!webviewReady) return "已处理的 webview 缓存缺失或不完整";
+    if (!webviewReady) return "已处理的官方运行时缓存缺失或不完整";
     return "";
   }
 }
@@ -77,6 +77,11 @@ class OfficialBundleCache {
     return path.join(this.bundleDir, "webview");
   }
 
+  get bootstrapPath(): string {
+    // 官方 Electron main 的入口文件，gateway 通过它启动 hidden runtime。
+    return path.join(this.bundleDir, ".vite", "build", "bootstrap.js");
+  }
+
   readManifest(): any | null {
     const manifestPath = path.join(this.bundleDir, "manifest.json");
     if (!this.fileSystem.exists(manifestPath)) return null;
@@ -97,6 +102,7 @@ class OfficialBundleCache {
   }
 
   replaceWith(sourceDir: string): void {
+    // 先备份旧缓存，再把新缓存 rename 到位；失败时尽量恢复旧缓存。
     const backupDir = `${this.bundleDir}.bak-${process.pid}-${Date.now()}`;
     this.fileSystem.removeTree(backupDir);
     if (this.fileSystem.exists(this.bundleDir)) {
@@ -116,8 +122,14 @@ class OfficialBundleCache {
   private isWebviewReady(): boolean {
     const indexPath = path.join(this.webviewDir, "index.html");
     const assetsDir = path.join(this.webviewDir, "assets");
+    const packagePath = path.join(this.bundleDir, "package.json");
+    const nodeModulesDir = path.join(this.bundleDir, "node_modules");
+    // 缓存完整性同时检查 renderer 和 main runtime，防止旧版只含 webview 的缓存被误复用。
     if (!this.fileSystem.exists(indexPath)) return false;
     if (!this.fileSystem.exists(assetsDir)) return false;
+    if (!this.fileSystem.exists(this.bootstrapPath)) return false;
+    if (!this.fileSystem.exists(packagePath)) return false;
+    if (!this.fileSystem.exists(nodeModulesDir)) return false;
     try {
       return this.fileSystem.readDir(assetsDir).length > 0;
     } catch {
@@ -134,6 +146,7 @@ class OfficialBundleManifestFactory {
       sourceAppPath: sourceInfo.installRoot,
       sourceResourcesPath: sourceInfo.resourcesDir,
       sourceAsarPath: sourceInfo.asarPath,
+      sourceUnpackedAsarPath: sourceInfo.unpackedAsarDir,
       sourceCodexBinaryPath: sourceInfo.codexBinaryPath,
       sourceLayoutKind: sourceInfo.layoutKind,
       sourcePlatformHint: sourceInfo.platformHint,

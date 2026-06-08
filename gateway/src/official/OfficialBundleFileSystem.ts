@@ -91,6 +91,12 @@ class OfficialBundleFileSystem {
     fs.rmSync(dirPath, { recursive: true, force: true });
   }
 
+  copyTree(fromPath: string, toPath: string): void {
+    // 官方 app.asar.unpacked 里放的是 native addon 等 asar 不能承载的文件；复制到缓存工作副本时允许覆盖旧残留。
+    this.ensureDir(path.dirname(toPath));
+    fs.cpSync(fromPath, toPath, { recursive: true, force: true });
+  }
+
   rename(fromPath: string, toPath: string): void {
     fs.renameSync(fromPath, toPath);
   }

@@ -13,5 +13,7 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts"]
+  "include": [
+    "src/official/**/*.ts"
+  ]
 }

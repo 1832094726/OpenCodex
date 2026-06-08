@@ -1,8 +1,5 @@
-packages:
-  - "vendor/electron-to-web"
+packages: []
 
 allowBuilds:
-  better-sqlite3: true
   electron: true
   electron-winstaller: true
-  node-pty: true

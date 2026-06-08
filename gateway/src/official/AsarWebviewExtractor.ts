@@ -3,13 +3,13 @@ export {};
 
 const path = require("path");
 
-/** 校验 asar entry 解压目标，只允许写入目标 webview 目录内部。 */
+/** 校验 asar entry 解压目标，只允许写入目标运行时目录内部。 */
 class WebviewExtractionPathGuard {
-  resolve(webviewDestDir: string, relativeEntryPath: string): string {
+  resolve(bundleDestDir: string, relativeEntryPath: string): string {
     if (this.isUnsafeRelativePath(relativeEntryPath)) {
       throw new Error(`拒绝解压可疑 webview 路径：${relativeEntryPath}`);
     }
-    const root = path.resolve(webviewDestDir);
+    const root = path.resolve(bundleDestDir);
     const dest = path.resolve(root, relativeEntryPath);
     const relativeToRoot = path.relative(root, dest);
     if (relativeToRoot.startsWith("..") || path.isAbsolute(relativeToRoot)) {
@@ -27,7 +27,14 @@ class WebviewExtractionPathGuard {
   }
 }
 
-/** 只从 app.asar 中解压官方渲染器的 webview 资源，其他入口全部忽略。 */
+const RUNTIME_DIR_PREFIXES = [".vite/build/", "webview/", "node_modules/"];
+const RUNTIME_FILE_ENTRIES = new Set(["package.json"]);
+
+/**
+ * 只允许解压 official gateway 运行官方 main/renderer 必需的白名单资源。
+ *
+ * 这是运行时工作副本生成逻辑，不是对官方 bundle 做补丁，也不会进入 OpenCodex dist。
+ */
 class AsarWebviewExtractor {
   constructor({
     archive,
@@ -43,33 +50,53 @@ class AsarWebviewExtractor {
     this.pathGuard = pathGuard;
   }
 
-  extract(asarPath: string, webviewDestDir: string): any {
+  extract(asarPath: string, bundleDestDir: string): any {
+    /**
+     * 解压策略是“白名单复制”，不是完整展开 app.asar：
+     * - .vite/build/bootstrap.js 启动官方 main。
+     * - webview/ 提供官方 renderer 静态资源。
+     * - node_modules/ 和 package.json 满足官方 bootstrap 的运行时依赖。
+     *
+     * 复制出来的文件只放在用户 runtime cache；官方安装源保持只读语义。
+     */
     const entries = this.archive.listPackage(asarPath);
     let fileCount = 0;
     let byteCount = 0;
 
     for (const rawEntry of entries) {
       const entry = String(rawEntry).replace(/^[\\/]+/, "");
-      // Windows 下 @electron/asar 会返回反斜杠路径；统一成 POSIX 形式后再判断 webview 前缀。
+      // Windows 下 @electron/asar 会返回反斜杠路径；统一成 POSIX 形式后再判断运行时白名单。
       const normalizedEntry = entry.replace(/\\/g, "/");
-      if (!normalizedEntry.startsWith("webview/")) continue;
-      const rel = normalizedEntry.slice("webview/".length);
-      if (!rel) continue;
+      if (!this.shouldExtractEntry(normalizedEntry)) continue;
 
+      // asar 目录项没有内容，真正需要写盘的是文件项。
       const stat = this.archive.statFile(asarPath, entry);
       if (stat && stat.files) continue;
 
       const data = this.archive.extractFile(asarPath, entry);
-      const dest = this.pathGuard.resolve(webviewDestDir, rel);
+      const dest = this.pathGuard.resolve(bundleDestDir, normalizedEntry);
       this.fileSystem.writeFile(dest, data);
       fileCount += 1;
       byteCount += data.length;
     }
 
-    if (!this.fileSystem.exists(path.join(webviewDestDir, "index.html"))) {
+    // 这三个文件/目录是官方 hidden runtime 能跑起来的最低要求，缺一就让缓存刷新失败。
+    if (!this.fileSystem.exists(path.join(bundleDestDir, "webview", "index.html"))) {
       throw new Error(`从 ${asarPath} 解压出的 Codex webview 缺少 index.html`);
     }
+    if (!this.fileSystem.exists(path.join(bundleDestDir, ".vite", "build", "bootstrap.js"))) {
+      throw new Error(`从 ${asarPath} 解压出的 Codex 运行时缺少 .vite/build/bootstrap.js`);
+    }
+    if (!this.fileSystem.exists(path.join(bundleDestDir, "package.json"))) {
+      throw new Error(`从 ${asarPath} 解压出的 Codex 运行时缺少 package.json`);
+    }
     return { fileCount, byteCount };
+  }
+
+  private shouldExtractEntry(normalizedEntry: string): boolean {
+    // 只解压白名单前缀，避免把整个 app.asar 展开到项目缓存里。
+    if (RUNTIME_FILE_ENTRIES.has(normalizedEntry)) return true;
+    return RUNTIME_DIR_PREFIXES.some((prefix) => normalizedEntry.startsWith(prefix));
   }
 }
 

@@ -15,9 +15,12 @@ const { AsarWebviewExtractor } = require("./AsarWebviewExtractor");
 type EnsureOfficialBundleResult = {
   bundleDir: string;
   webviewDir: string;
+  bootstrapPath: string;
+  packageJsonPath: string;
   manifest: any;
   sourceAppPath: string;
   sourceAsarPath: string;
+  sourceResourcesPath: string;
   codexBinaryPath: string | null;
   version: string;
   build: string;
@@ -40,7 +43,10 @@ type LocalCodexBundleProviderOptions = {
  * 2. 如果记录文件不存在，用跨平台扫描器定位当前可用的 app.asar。
  * 3. 从 plist 或 package.json 读取展示用版本信息。
  * 4. 用统一的 app.asar 文件身份判断缓存是否过期。
- * 5. 只在缓存过期时从 app.asar 解压 webview。
+ * 5. 只在缓存过期时从 app.asar 解压运行时工作副本。
+ *
+ * 注意：这里不会修改官方 Codex.app / app.asar，也不会要求打包产物内置官方 bundle。
+ * 抽取结果只落到 OpenCodex 的用户可写 runtime cache，作为 gateway 启动官方代码的临时工作副本。
  *
  * 网关入口继续使用 ensureOfficialBundle()。
  * 具体扫描、缓存、manifest 和解压逻辑拆到同目录下的独立类中。
@@ -70,6 +76,10 @@ class LocalCodexBundleProvider {
   }
 
   ensure({ projectRoot }: { projectRoot: string }): EnsureOfficialBundleResult {
+    /**
+     * ensure 是 official gateway 启动前的唯一入口。
+     * 它会尽量复用缓存；只有 app.asar 文件身份或缓存完整性不满足时才重新解压。
+     */
     const cache = this.createCache(projectRoot);
     const manifest = cache.readManifest();
     const layout = this.scanner.find({ cachedAsarPath: manifest?.sourceAsarPath });
@@ -88,9 +98,14 @@ class LocalCodexBundleProvider {
     return {
       bundleDir: cache.bundleDir,
       webviewDir: cache.webviewDir,
+      // Electron gateway 直接 require 官方 bootstrap，因此 provider 需要把入口路径暴露给运行时层。
+      bootstrapPath: cache.bootstrapPath,
+      packageJsonPath: path.join(cache.bundleDir, "package.json"),
       manifest: activeManifest,
       sourceAppPath: sourceInfo.installRoot,
       sourceAsarPath: sourceInfo.asarPath,
+      // process.resourcesPath 会对齐到官方 Resources，保证官方代码能找到 codex 二进制等资源。
+      sourceResourcesPath: sourceInfo.resourcesDir,
       codexBinaryPath: sourceInfo.codexBinaryPath,
       version: sourceInfo.version,
       build: sourceInfo.build,
@@ -130,27 +145,43 @@ class LocalCodexBundleProvider {
     sourceInfo: any;
     reason: string;
   }): any {
+    // 刷新使用临时目录 + 原子替换，避免 gateway 在半解压状态下读到不完整 runtime。
     const startedAt = Date.now();
     const tmpDir = `${cache.bundleDir}.tmp-${process.pid}-${Date.now()}`;
     this.fileSystem.removeTree(tmpDir);
     this.fileSystem.ensureDir(tmpDir);
 
     this.logger.info(`需要刷新缓存：${reason}`);
-    this.logger.info(`从 ${sourceInfo.asarPath} 解压 webview`);
+    this.logger.info(`从 ${sourceInfo.asarPath} 解压官方运行时`);
     try {
-      const webviewDir = path.join(tmpDir, "webview");
-      const result = this.extractor.extract(sourceInfo.asarPath, webviewDir);
+      // 这里解压的是完整运行时白名单；目标是 OpenCodex runtime cache，不会回写官方安装目录。
+      const result = this.extractor.extract(sourceInfo.asarPath, tmpDir);
+      const unpackedResult = this.copyUnpackedRuntime({ sourceInfo, tmpDir });
       const manifest = this.manifestFactory.create(sourceInfo);
       this.fileSystem.writeJson(path.join(tmpDir, "manifest.json"), manifest);
       cache.replaceWith(tmpDir);
       this.logger.info(
-        `已解压 ${result.fileCount} 个 webview 文件（${this.byteFormatter.format(result.byteCount)}），耗时 ${Date.now() - startedAt}ms`
+        `已解压 ${result.fileCount} 个官方运行时文件（${this.byteFormatter.format(result.byteCount)}），同步 unpacked=${unpackedResult.copied ? "yes" : "no"}，耗时 ${Date.now() - startedAt}ms`
       );
       return manifest;
     } catch (error) {
       this.fileSystem.removeTree(tmpDir);
       throw error;
     }
+  }
+
+  private copyUnpackedRuntime({ sourceInfo, tmpDir }: { sourceInfo: any; tmpDir: string }): any {
+    const unpackedDir = sourceInfo.unpackedAsarDir;
+    if (!unpackedDir || !this.fileSystem.isDirectory(unpackedDir)) {
+      return { copied: false };
+    }
+    /**
+     * app.asar 只包含 JS/静态资源，better-sqlite3 这类 native addon 会在官方安装目录的
+     * app.asar.unpacked 中。刷新缓存时必须把 unpacked 同步进工作副本，否则旧 .node 残留会导致
+     * NODE_MODULE_VERSION 不匹配，表现为 Codex 无法访问本地 SQLite。
+     */
+    this.fileSystem.copyTree(unpackedDir, tmpDir);
+    return { copied: true };
   }
 }
 

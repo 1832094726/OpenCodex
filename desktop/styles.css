@@ -290,6 +290,14 @@ button.primary:hover {
   font-weight: 600;
 }
 
+.setting-status.is-disabled {
+  color: var(--error-text);
+}
+
+.setting-status.is-enabled {
+  color: var(--accent-color);
+}
+
 .setting-control {
   display: flex;
   align-items: center;

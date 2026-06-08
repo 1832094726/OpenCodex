@@ -39,6 +39,8 @@ class CodexBundleSourceInfoReader {
       installRoot: layout.installRoot,
       resourcesDir: layout.resourcesDir,
       asarPath: layout.asarPath,
+      // Electron 打包 native addon 时会把 .node 等文件放在 app.asar.unpacked；缓存工作副本必须同步这部分资源。
+      unpackedAsarDir: `${layout.asarPath}.unpacked`,
       codexBinaryPath: layout.codexBinaryPath,
       bundleIdentifier,
       version: String(plistInfo?.CFBundleShortVersionString || packageInfo.version || "unknown"),
