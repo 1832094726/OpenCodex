@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, clipboard, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, Menu, Tray, clipboard, ipcMain, nativeImage, shell } = require("electron");
 const crypto = require("crypto");
 const fs = require("fs");
 const net = require("net");
@@ -14,6 +14,8 @@ const DEFAULT_HOST = process.env.OPENCODEX_HOST || "127.0.0.1";
 const DEFAULT_PORT = normalizePort(process.env.OPENCODEX_PORT);
 
 let mainWindow = null;
+let tray = null;
+let trayMenu = null;
 let statusTimer = null;
 let isQuitting = false;
 
@@ -357,6 +359,15 @@ function launcherText(key, values) {
   return formatMessage(i18n.messages, key, values);
 }
 
+function canOpenOpenCodex() {
+  return !!gatewayState.child && !gatewayState.child.killed && !!gatewayState.primaryUrl;
+}
+
+function openOpenCodex() {
+  if (canOpenOpenCodex()) shell.openExternal(gatewayState.primaryUrl);
+  return buildState();
+}
+
 function preferredSystemLanguages() {
   try {
     const languages = app && typeof app.getPreferredSystemLanguages === "function" ? app.getPreferredSystemLanguages() : [];
@@ -378,6 +389,7 @@ function preferredLanguagesEnvValue() {
 }
 
 function broadcastState() {
+  updateTrayMenu();
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.webContents.send("launcher:state", buildState());
 }
@@ -538,6 +550,7 @@ async function restartGateway() {
 function createWindow() {
   // Windows/Linux 默认会显示 Electron 应用菜单；启动器不需要菜单栏，创建窗口前统一关闭。
   Menu.setApplicationMenu(null);
+  void showLauncherDockIcon();
   mainWindow = new BrowserWindow({
     width: 980,
     height: 720,
@@ -557,8 +570,141 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, "index.html"));
   mainWindow.setMenuBarVisibility(false);
   mainWindow.on("closed", () => {
+    // 窗口允许真正关闭；后台驻留由托盘对象和 app 生命周期负责，之后需要时再重建窗口。
     mainWindow = null;
+    hideLauncherDockIconIfWindowless();
+    updateTrayMenu();
   });
+}
+
+async function showLauncherDockIcon() {
+  if (process.platform !== "darwin") return;
+  try {
+    if (typeof app.setActivationPolicy === "function") app.setActivationPolicy("regular");
+  } catch {}
+  if (!app.dock || typeof app.dock.show !== "function") return;
+  try {
+    const result = app.dock.show();
+    if (result && typeof result.then === "function") await result;
+  } catch {}
+}
+
+function hideLauncherDockIconIfWindowless() {
+  if (process.platform !== "darwin" || BrowserWindow.getAllWindows().length > 0) return;
+  try {
+    // macOS 关掉最后一个窗口后只保留菜单栏托盘图标，避免 Dock 里留下一个无窗口应用图标。
+    if (app.dock && typeof app.dock.hide === "function") app.dock.hide();
+  } catch {}
+  try {
+    // accessory 模式会同时从 Dock / Cmd+Tab 里移除应用；重新打开窗口前会切回 regular。
+    if (typeof app.setActivationPolicy === "function") app.setActivationPolicy("accessory");
+  } catch {}
+}
+
+function presentLauncherWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  try {
+    if (process.platform === "darwin" && typeof app.focus === "function") app.focus({ steal: true });
+  } catch {}
+  try {
+    if (typeof mainWindow.moveTop === "function") mainWindow.moveTop();
+  } catch {}
+  mainWindow.focus();
+}
+
+function scheduleLauncherWindowPresent() {
+  presentLauncherWindow();
+  for (const delayMs of [80, 250]) {
+    const timer = setTimeout(presentLauncherWindow, delayMs);
+    if (timer && typeof timer.unref === "function") timer.unref();
+  }
+}
+
+async function showLauncherWindow() {
+  await showLauncherDockIcon();
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  // macOS 从 accessory 切回 regular 后窗口有时会先创建在后台；短延迟重试确保从托盘打开时直接前置。
+  scheduleLauncherWindowPresent();
+}
+
+function createTrayImage() {
+  const iconPath = path.join(APP_ROOT, "web-shell", "assets", "icon.png");
+  let image = nativeImage.createFromPath(iconPath);
+
+  if (image.isEmpty()) {
+    // 所有入口共用同一份图标；读取失败时返回空图，避免启动器因托盘资源异常崩溃。
+    image = nativeImage.createEmpty();
+  }
+  if (image.isEmpty()) return nativeImage.createEmpty();
+
+  // 托盘区域尺寸很小，运行时缩放一份稳定图标，避免各平台显示尺寸不一致。
+  const trayImage = image.resize({
+    width: process.platform === "darwin" ? 18 : 16,
+    height: process.platform === "darwin" ? 18 : 16,
+  });
+  return trayImage;
+}
+
+function updateTrayMenu() {
+  if (!tray) return;
+
+  const menuTemplate = [
+    {
+      label: launcherText("launcher.tray.openLauncher"),
+      click: () => {
+        void showLauncherWindow();
+      },
+    },
+  ];
+
+  if (canOpenOpenCodex()) {
+    menuTemplate.push({
+      label: launcherText("launcher.actions.openCodex"),
+      click: openOpenCodex,
+    });
+  }
+
+  menuTemplate.push({
+    label: launcherText("launcher.actions.restart"),
+    click: async () => {
+      await restartGateway();
+      updateTrayMenu();
+    },
+  });
+
+  menuTemplate.push(
+    { type: "separator" },
+    {
+      label: launcherText("launcher.tray.quit"),
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      },
+    }
+  );
+
+  trayMenu = Menu.buildFromTemplate(menuTemplate);
+  tray.setToolTip(launcherText("launcher.tray.tooltip"));
+  tray.setContextMenu(trayMenu);
+}
+
+function showTrayMenu() {
+  if (!tray) return;
+  updateTrayMenu();
+  try {
+    // Windows/Linux 左键点击默认不会像 macOS 一样弹出 setContextMenu 菜单，因此这里手动弹出。
+    tray.popUpContextMenu(trayMenu || undefined);
+  } catch {}
+}
+
+function createLauncherTray() {
+  if (tray) return;
+  tray = new Tray(createTrayImage());
+  if (process.platform !== "darwin") tray.on("click", showTrayMenu);
+  updateTrayMenu();
 }
 
 function revealPath(targetPath) {
@@ -577,8 +723,7 @@ ipcMain.handle("launcher:get-state", () => buildState());
 ipcMain.handle("launcher:start", () => startGateway());
 ipcMain.handle("launcher:restart", () => restartGateway());
 ipcMain.handle("launcher:open-url", () => {
-  if (gatewayState.primaryUrl) shell.openExternal(gatewayState.primaryUrl);
-  return buildState();
+  return openOpenCodex();
 });
 ipcMain.handle("launcher:open-logs", () => {
   if (gatewayState.paths) revealPath(gatewayState.paths.logPath);
@@ -628,22 +773,23 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    if (!mainWindow) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
+    void showLauncherWindow();
   });
 
   app.whenReady().then(async () => {
     createWindow();
+    createLauncherTray();
     await startGateway();
   });
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    void showLauncherWindow();
   });
 
   app.on("window-all-closed", () => {
-    if (process.platform !== "darwin") app.quit();
+    // 所有平台关闭窗口后都继续驻留托盘，避免 gateway 因 launcher 退出而被生命周期守护关闭。
+    hideLauncherDockIconIfWindowless();
+    updateTrayMenu();
   });
 
   app.on("before-quit", () => {

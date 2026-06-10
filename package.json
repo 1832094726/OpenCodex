@@ -42,6 +42,7 @@
     "appId": "dev.opencodex.launcher",
     "productName": "OpenCodex",
     "asar": false,
+    "icon": "web-shell/assets/icon.png",
     "directories": {
       "output": "release"
     },
