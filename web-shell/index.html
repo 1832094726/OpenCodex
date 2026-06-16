@@ -518,7 +518,7 @@
         }
 
         function pluginDescription(plugin) {
-          return plugin.desc || "";
+          return localizedPluginText(plugin.descKey, plugin.desc || "");
         }
 
         // 只要插件目录里发现插件，就在“插件”区域自动生成一个总开关。

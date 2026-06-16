@@ -143,8 +143,9 @@
   pluginSystem.registerPlugin({
     id: "opencodex.mobile-sidebar-auto-collapse",
     name: "Mobile sidebar auto collapse",
-    labelKey: "web.settings.mobileSidebarCollapse",
+    labelKey: "plugin.mobileSidebarAutoCollapse.label",
     label: "移动端侧栏优化",
+    descKey: "plugin.mobileSidebarAutoCollapse.desc",
     desc: "在移动端打开会话或新建会话后自动收起侧栏。",
     enableStorageKey: "mobileSidebarAutoCollapse",
     defaultEnabled: false,

@@ -3,7 +3,7 @@
   const pluginSystem = w.OpenCodexPluginSystem || w.__OpenCodexPluginSystem;
   if (!pluginSystem || typeof pluginSystem.registerPlugin !== "function") return;
 
-  const ROOT_DATA_ATTR = "opencodexIosSafariViewportFix";
+  const ROOT_DATA_ATTR = "opencodexIosFix";
   const KEYBOARD_DATA_ATTR = "opencodexIosKeyboardVisible";
   const STANDALONE_DATA_ATTR = "opencodexIosStandalone";
   const APP_SHELL_DATA_ATTR = "opencodexIosAppShell";
@@ -15,7 +15,7 @@
   const THREAD_SCROLL_SELECTOR = ".thread-scroll-container";
   const THREAD_FOOTER_SELECTOR = "[data-thread-scroll-footer='true']";
   const COMPOSER_SELECTOR = "[data-thread-find-composer='true']";
-  const DEBUG_GLOBAL = "__opencodexIosSafariViewportFixDebug";
+  const DEBUG_GLOBAL = "__opencodexIosFixDebug";
   const SETTLE_DELAYS_MS = [80, 260, 600];
 
   function isIOSWebKitDevice() {
@@ -67,9 +67,10 @@
   pluginSystem.registerPlugin({
     id: "opencodex.ios-fix",
     name: "iOS fix",
-    labelKey: "web.settings.iosFix",
-    label: "iOS Safari 兼容修复",
-    desc: "修复 iOS 下视口高度、底部遮挡和软键盘重复避让等兼容问题。",
+    labelKey: "plugin.iosFix.label",
+    label: "iOS兼容修复",
+    descKey: "plugin.iosFix.desc",
+    desc: "修复iOS下视口高度、底部遮挡和软键盘重复避让等兼容问题。",
     // v2 避免旧版 defaultEnabled=false 写入的 iosCompatibilityFix:false 持续覆盖 iOS 默认开启。
     enableStorageKey: "iosCompatibilityFix.v2",
     defaultEnabled: isIOSWebKitDevice(),
@@ -80,11 +81,11 @@
         context.scope !== "renderer" ||
         !document ||
         !isIOSWebKitDevice() ||
-        document.__opencodexIosSafariViewportFixInstalled
+        document.__opencodexIosFixInstalled
       ) {
         return null;
       }
-      document.__opencodexIosSafariViewportFixInstalled = true;
+      document.__opencodexIosFixInstalled = true;
 
       let animationFrame = 0;
       let keyboardOpeningUntilMs = 0;
@@ -269,10 +270,10 @@
       w[DEBUG_GLOBAL] = debugSnapshot;
 
       const style = document.createElement("style");
-      style.id = "opencodex-ios-safari-viewport-fix-styles";
+      style.id = "opencodex-ios-fix-styles";
       style.textContent = `
         @media (max-width: 820px), (pointer: coarse) {
-          html[data-opencodex-ios-safari-viewport-fix="true"] {
+          html[data-opencodex-ios-fix="true"] {
             --opencodex-ios-app-height: var(--opencodex-ios-visual-viewport-height, 100svh);
             --opencodex-ios-footer-padding-bottom: max(env(safe-area-inset-bottom, 0px), 8px);
             --thread-floating-content-bottom-inset: 0px !important;
@@ -287,11 +288,11 @@
             overscroll-behavior: none !important;
           }
 
-          html[data-opencodex-ios-safari-viewport-fix="true"][data-opencodex-ios-keyboard-visible="true"] {
+          html[data-opencodex-ios-fix="true"][data-opencodex-ios-keyboard-visible="true"] {
             --opencodex-ios-footer-padding-bottom: 0px;
           }
 
-          html[data-opencodex-ios-safari-viewport-fix="true"] body {
+          html[data-opencodex-ios-fix="true"] body {
             /* iOS 底部地址栏会压缩 visualViewport，这里固定到实际可视高度。 */
             position: fixed !important;
             top: var(--opencodex-ios-visual-viewport-offset-top, 0px) !important;
@@ -309,8 +310,8 @@
             overscroll-behavior: none !important;
           }
 
-          html[data-opencodex-ios-safari-viewport-fix="true"] #root,
-          html[data-opencodex-ios-safari-viewport-fix="true"] [data-opencodex-ios-app-shell="true"] {
+          html[data-opencodex-ios-fix="true"] #root,
+          html[data-opencodex-ios-fix="true"] [data-opencodex-ios-app-shell="true"] {
             /* 官方根容器常带 100vh/100dvh，高度必须直接覆盖到 visualViewport。 */
             box-sizing: border-box !important;
             width: 100% !important;
@@ -322,20 +323,20 @@
             overflow-x: hidden !important;
           }
 
-          html[data-opencodex-ios-safari-viewport-fix="true"] .h-screen,
-          html[data-opencodex-ios-safari-viewport-fix="true"] .h-dvh,
-          html[data-opencodex-ios-safari-viewport-fix="true"] .h-\\[100dvh\\] {
+          html[data-opencodex-ios-fix="true"] .h-screen,
+          html[data-opencodex-ios-fix="true"] .h-dvh,
+          html[data-opencodex-ios-fix="true"] .h-\\[100dvh\\] {
             height: var(--opencodex-ios-app-height) !important;
           }
 
-          html[data-opencodex-ios-safari-viewport-fix="true"] .min-h-screen {
+          html[data-opencodex-ios-fix="true"] .min-h-screen {
             min-height: var(--opencodex-ios-app-height) !important;
           }
 
-          html[data-opencodex-ios-safari-viewport-fix="true"] .main-surface,
-          html[data-opencodex-ios-safari-viewport-fix="true"] .app-shell-main-content-viewport,
-          html[data-opencodex-ios-safari-viewport-fix="true"] .app-shell-main-content-frame,
-          html[data-opencodex-ios-safari-viewport-fix="true"] .thread-scroll-container {
+          html[data-opencodex-ios-fix="true"] .main-surface,
+          html[data-opencodex-ios-fix="true"] .app-shell-main-content-viewport,
+          html[data-opencodex-ios-fix="true"] .app-shell-main-content-frame,
+          html[data-opencodex-ios-fix="true"] .thread-scroll-container {
             box-sizing: border-box !important;
             min-height: 0 !important;
             min-width: 0 !important;
@@ -343,13 +344,13 @@
             overflow-x: hidden !important;
           }
 
-          html[data-opencodex-ios-safari-viewport-fix="true"] .app-shell-main-content-viewport.app-shell-main-content-viewport,
-          html[data-opencodex-ios-safari-viewport-fix="true"][data-opencodex-ios-keyboard-optimization="true"] .app-shell-main-content-viewport {
+          html[data-opencodex-ios-fix="true"] .app-shell-main-content-viewport.app-shell-main-content-viewport,
+          html[data-opencodex-ios-fix="true"][data-opencodex-ios-keyboard-optimization="true"] .app-shell-main-content-viewport {
             /* 移动键盘插件会额外给 floating footer 留 inset；iOS 修复插件只保留 visualViewport 收缩。 */
             --thread-floating-content-bottom-inset: 0px !important;
           }
 
-          html[data-opencodex-ios-safari-viewport-fix="true"] .thread-scroll-container {
+          html[data-opencodex-ios-fix="true"] .thread-scroll-container {
             height: 100% !important;
             max-height: 100% !important;
             overflow-y: auto !important;
@@ -358,21 +359,21 @@
             -webkit-overflow-scrolling: touch;
           }
 
-          html[data-opencodex-ios-safari-viewport-fix="true"] [data-thread-scroll-footer="true"] {
+          html[data-opencodex-ios-fix="true"] [data-thread-scroll-footer="true"] {
             bottom: 0 !important;
             margin-bottom: 0 !important;
             padding-bottom: var(--opencodex-ios-footer-padding-bottom) !important;
           }
 
-          html[data-opencodex-ios-safari-viewport-fix="true"][data-opencodex-ios-keyboard-visible="true"] [data-thread-scroll-footer="true"],
-          html[data-opencodex-ios-safari-viewport-fix="true"] [data-thread-scroll-footer="true"]:focus-within {
+          html[data-opencodex-ios-fix="true"][data-opencodex-ios-keyboard-visible="true"] [data-thread-scroll-footer="true"],
+          html[data-opencodex-ios-fix="true"] [data-thread-scroll-footer="true"]:focus-within {
             /* 键盘态不能叠加 footer padding，否则会在键盘上方留下额外 DOM 空白。 */
             padding-bottom: 0 !important;
             margin-bottom: 0 !important;
           }
 
-          html[data-opencodex-ios-safari-viewport-fix="true"] [data-thread-find-composer="true"][data-thread-find-composer="true"],
-          html[data-opencodex-ios-safari-viewport-fix="true"][data-opencodex-ios-keyboard-optimization="true"] [data-thread-find-composer="true"] {
+          html[data-opencodex-ios-fix="true"] [data-thread-find-composer="true"][data-thread-find-composer="true"],
+          html[data-opencodex-ios-fix="true"][data-opencodex-ios-keyboard-optimization="true"] [data-thread-find-composer="true"] {
             /* 禁用移动键盘插件的 translate 避让，避免和 visualViewport 收缩重复计算。 */
             transform: translate3d(0, 0, 0) !important;
             will-change: auto !important;
@@ -549,7 +550,7 @@
         if (style.parentNode) style.parentNode.removeChild(style);
         if (w[DEBUG_GLOBAL] === debugSnapshot) delete w[DEBUG_GLOBAL];
         clearViewportState();
-        document.__opencodexIosSafariViewportFixInstalled = false;
+        document.__opencodexIosFixInstalled = false;
       };
     },
   });

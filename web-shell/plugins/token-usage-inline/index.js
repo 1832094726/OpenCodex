@@ -220,7 +220,9 @@
   pluginSystem.registerPlugin({
     id: PLUGIN_ID,
     name: "Token usage inline",
+    labelKey: "plugin.tokenUsageInline.label",
     label: "显示Token消耗",
+    descKey: "plugin.tokenUsageInline.desc",
     desc: "在AI回复底部显示输入、输出 token 和缓存命中率。",
     defaultEnabled: true,
     builtin: true,

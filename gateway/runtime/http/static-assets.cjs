@@ -9,14 +9,17 @@ const {
   mimeType,
   readText,
 } = require("../core/config.cjs");
+const {
+  OPENCODEX_PLUGIN_URL_PREFIX,
+  listPluginEntries,
+  pluginEntryFileFromRequestPath,
+  withPluginI18nMessages,
+} = require("../core/plugin-assets.cjs");
 const { gzipIfUseful, send } = require("./http-utils.cjs");
 
 const OPENCODEX_PLUGIN_LOADER_PATH = "/opencodex-plugin-loader.js";
-const OPENCODEX_PLUGIN_URL_PREFIX = "/opencodex-plugins/";
 const OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH = "/codex-token-usage-capability.js";
 const PWA_MANIFEST_PATH = "/manifest.webmanifest";
-const WEB_SHELL_PLUGINS_DIR = path.join(WEB_SHELL_DIR, "plugins");
-const SAFE_PLUGIN_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*\.js$/;
 
 // 静态资源层把官方 renderer/web-shell 的路径差异统一隐藏起来，server 只需要按 URL 取文件。
 function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
@@ -153,7 +156,8 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
 
   function currentI18n() {
     // web-shell 登录页在未认证时也需要知道语言；这里消费 runtime 注入的系统语言快照。
-    return typeof getI18nSnapshot === "function" ? getI18nSnapshot() : { locale: "en-US", messages: {} };
+    const snapshot = typeof getI18nSnapshot === "function" ? getI18nSnapshot() : { locale: "en-US", messages: {} };
+    return withPluginI18nMessages(snapshot);
   }
 
   function patchHtmlLang(rawHtml, locale) {
@@ -174,32 +178,13 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     return `<script>window.__CODEX_WEB_CONFIG__=Object.assign(window.__CODEX_WEB_CONFIG__||{},${JSON.stringify(publicConfig)});</script>`;
   }
 
-  function listPluginFileNames() {
-    if (!exists(WEB_SHELL_PLUGINS_DIR)) return [];
-    return fs
-      .readdirSync(WEB_SHELL_PLUGINS_DIR)
-      .filter((entry) => SAFE_PLUGIN_FILE_NAME.test(entry))
-      .filter((entry) => {
-        try {
-          return fs.statSync(path.join(WEB_SHELL_PLUGINS_DIR, entry)).isFile();
-        } catch {
-          return false;
-        }
-      })
-      .sort();
-  }
-
   function createPluginLoaderScript() {
-    const pluginUrls = listPluginFileNames().map((fileName) => {
-      const file = path.join(WEB_SHELL_PLUGINS_DIR, fileName);
-      const stat = fs.statSync(file);
-      // iOS Safari 偶发会复用同 URL 的脚本；mtime/size 版本号保证插件调试改动立即生效。
-      const version = `${Math.round(stat.mtimeMs)}-${stat.size}`;
-      return `${OPENCODEX_PLUGIN_URL_PREFIX}${fileName}?v=${version}`;
-    });
+    const pluginUrls = listPluginEntries().map(
+      (entry) => `${OPENCODEX_PLUGIN_URL_PREFIX}${entry.name}/index.js?v=${entry.version}`
+    );
     return `(() => {
   const pluginUrls = ${JSON.stringify(pluginUrls)};
-  // loader 由 gateway 生成；刷新页面即可重新扫描 web-shell/plugins 下的插件文件。
+  // loader 由 gateway 生成；刷新页面即可重新扫描 web-shell/plugins 下的插件目录。
   function loadPlugin(url) {
     if (document.readyState === "loading") {
       document.write('<script src="' + url + '"><\\/script>');
@@ -324,10 +309,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     if (reqPath === "/codex-bridge-polyfill.js") return path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js");
     if (reqPath === "/codex-tooltip-dismiss-guard.js") return path.join(WEB_SHELL_DIR, "codex-tooltip-dismiss-guard.js");
     if (reqPath.startsWith(OPENCODEX_PLUGIN_URL_PREFIX)) {
-      const fileName = reqPath.slice(OPENCODEX_PLUGIN_URL_PREFIX.length);
-      // 插件只允许顶层安全文件名，避免 URL 拼接穿透到插件目录外。
-      if (SAFE_PLUGIN_FILE_NAME.test(fileName)) return path.join(WEB_SHELL_PLUGINS_DIR, fileName);
-      return null;
+      return pluginEntryFileFromRequestPath(reqPath);
     }
     if (reqPath.startsWith(WEB_SHELL_ASSETS_PREFIX)) {
       const rel = reqPath.slice(WEB_SHELL_ASSETS_PREFIX.length);

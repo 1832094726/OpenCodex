@@ -45,8 +45,9 @@
   pluginSystem.registerPlugin({
     id: "opencodex.mobile-keyboard-optimization",
     name: "Mobile keyboard optimization",
-    labelKey: "web.settings.mobileKeyboard",
+    labelKey: "plugin.mobileKeyboardOptimization.label",
     label: "移动端软键盘优化",
+    descKey: "plugin.mobileKeyboardOptimization.desc",
     desc: "优化移动端输入框聚焦和视口高度，减少软键盘遮挡。",
     enableStorageKey: "mobileKeyboardOptimization",
     defaultEnabled: true,

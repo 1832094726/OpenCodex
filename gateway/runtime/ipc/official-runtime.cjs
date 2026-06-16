@@ -29,6 +29,7 @@ const {
 const { persistedAtomSnapshotForRenderer } = require("../state/desktop-state.cjs");
 const { diagnosticLog, diagnosticWarn, shortId } = require("../core/diagnostics.cjs");
 const { resolveOpenCodexI18n } = require("../../../shared/i18n/index.cjs");
+const { withPluginI18nMessages } = require("../core/plugin-assets.cjs");
 const {
   handleOfficialNotificationEvent,
   installOfficialNotificationHook,
@@ -1335,7 +1336,7 @@ function buildGatewayStatus() {
 
 async function webConfigScript() {
   // 这个脚本由浏览器入口动态加载，避免把本机路径和端口写死到 web-shell 构建产物里。
-  const i18n = getI18nSnapshot();
+  const i18n = withPluginI18nMessages(getI18nSnapshot());
   return `(() => {
   window.__CODEX_WEB_CONFIG__ = {
     gatewayBaseUrl: location.origin,
