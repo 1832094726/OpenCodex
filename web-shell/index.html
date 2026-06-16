@@ -432,8 +432,7 @@
             </span>
             <input id="setting-notification-permission" class="switch" type="checkbox" role="switch" />
           </div>
-          <div id="plugin-settings-title" class="settings-section-title" data-i18n="web.settings.plugins" hidden>插件</div>
-          <div id="plugin-settings-list" class="plugin-settings-list" hidden></div>
+          <!-- 关于入口固定放在插件列表前，避免插件较多时仓库链接被推到侧栏底部。 -->
           <div class="settings-section-title" data-i18n="web.settings.about">关于</div>
           <a class="settings-row settings-link-row" href="https://github.com/RyensX/OpenCodex" target="_blank" rel="noreferrer">
             <span class="settings-row-content">
@@ -442,6 +441,8 @@
             </span>
             <span class="settings-row-trailing" aria-hidden="true">↗</span>
           </a>
+          <div id="plugin-settings-title" class="settings-section-title" data-i18n="web.settings.plugins" hidden>插件</div>
+          <div id="plugin-settings-list" class="plugin-settings-list" hidden></div>
         </div>
       </aside>
     </div>
