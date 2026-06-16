@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, clipboard, ipcMain, nativeImage, shell } = require("electron");
+const { app, BrowserWindow, Menu, Tray, clipboard, dialog, ipcMain, nativeImage, shell } = require("electron");
 const crypto = require("crypto");
 const fs = require("fs");
 const net = require("net");
@@ -12,6 +12,7 @@ const APP_ROOT = path.resolve(__dirname, "..");
 
 const DEFAULT_HOST = process.env.OPENCODEX_HOST || "127.0.0.1";
 const DEFAULT_PORT = normalizePort(process.env.OPENCODEX_PORT);
+const PLUGIN_DIRS_ENV = "OPENCODEX_PLUGIN_DIRS";
 
 let mainWindow = null;
 let tray = null;
@@ -90,10 +91,31 @@ function normalizePort(value) {
   return port;
 }
 
+function normalizePluginDirs(value) {
+  return String(value || "").trim();
+}
+
+function splitConfiguredPluginDirs(value) {
+  const text = normalizePluginDirs(value);
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    // 手写配置时允许 JSON 数组，数组里的路径按原样处理，不再用分隔符拆开。
+    if (Array.isArray(parsed)) return parsed.map((item) => normalizePluginDirs(item)).filter(Boolean);
+    if (typeof parsed === "string") return [normalizePluginDirs(parsed)].filter(Boolean);
+  } catch {}
+  return text
+    .split(path.delimiter)
+    .flatMap((part) => part.split(","))
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
 function defaultSettings() {
   return {
     hostMode: DEFAULT_HOST === "0.0.0.0" ? "lan" : "local",
     port: DEFAULT_PORT,
+    pluginDirs: "",
   };
 }
 
@@ -105,6 +127,7 @@ function loadLauncherSettings(paths) {
       ...parsed,
       hostMode: normalizeHostMode(parsed.hostMode),
       port: normalizePort(parsed.port),
+      pluginDirs: normalizePluginDirs(parsed.pluginDirs),
     };
   } catch {
     return defaultSettings();
@@ -117,6 +140,7 @@ function saveLauncherSettings(paths, settings) {
     ...settings,
     hostMode: normalizeHostMode(settings && settings.hostMode),
     port: normalizePort(settings && settings.port),
+    pluginDirs: normalizePluginDirs(settings && settings.pluginDirs),
   };
   fs.writeFileSync(paths.settingsPath, `${JSON.stringify(nextSettings, null, 2)}\n`, "utf8");
   return nextSettings;
@@ -190,6 +214,22 @@ function writeAuthConfig(paths, password) {
   const value = String(password || "").trim();
   const stored = value ? `sha256-v1:${sha256Hex(value)}` : "";
   fs.writeFileSync(paths.configPath, `auth:\n  password: ${JSON.stringify(stored)}\n`, "utf8");
+}
+
+function externalPluginStatus(pluginDirs) {
+  const roots = splitConfiguredPluginDirs(pluginDirs);
+  if (roots.length === 0) return { configured: false, count: 0 };
+  let count = 0;
+  for (const root of roots) {
+    try {
+      // Launcher 只展示外部插件目录的直观数量：根目录下有多少个子目录。
+      count += fs.readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).length;
+    } catch {}
+  }
+  return {
+    configured: true,
+    count,
+  };
 }
 
 function parseIpv4Parts(address) {
@@ -331,6 +371,7 @@ function buildState() {
     auth: {
       enabled: gatewayState.paths ? readAuthEnabled(gatewayState.paths.configPath) : false,
     },
+    externalPlugins: externalPluginStatus((gatewayState.settings || defaultSettings()).pluginDirs),
     status: gatewayState.status,
     lastError: gatewayState.lastError,
     startedAt: gatewayState.startedAt,
@@ -465,28 +506,36 @@ async function startGateway() {
 
   const officialUserDataDir = path.join(paths.runtimeDir, "official-user-data");
   const officialRuntimeArgs = [`--user-data-dir=${officialUserDataDir}`];
+  const childEnv = {
+    ...process.env,
+    OPENCODEX_GATEWAY_ENTRY: paths.gatewayScriptPath,
+    [PREFERRED_LANGUAGES_ENV]: preferredLanguagesEnvValue(),
+    // runner 的 Info.plist 已经用 LSBackgroundOnly 隐藏；该标记让业务入口不要再调用 Dock API。
+    OPENCODEX_GATEWAY_AGENT_MODE: "1",
+    // 第 4 个 stdio fd 是生命周期 pipe；gateway 会监听它判断 launcher 是否已退出。
+    OPENCODEX_GATEWAY_LIFECYCLE_FD: "3",
+    // Chromium profile 必须和官方 Desktop 隔离；核心数据继续通过 CODEX_HOME 共享。
+    CODEX_WEB_OFFICIAL_USER_DATA_DIR: officialUserDataDir,
+    CODEX_ELECTRON_USER_DATA_PATH: officialUserDataDir,
+    HOST: gatewayState.host,
+    PORT: String(gatewayState.port),
+    CODEX_WEB_RUNTIME_DIR: paths.runtimeDir,
+    CODEX_WEB_CONFIG_PATH: paths.configPath,
+    CODEX_WEB_REPORTS_DIR: paths.reportsDir,
+    CODEX_WEB_OFFICIAL_BUNDLE_DIR: paths.officialBundleDir,
+    CODEX_WEB_GATEWAY_BASE_URL: gatewayState.primaryUrl,
+    CODEX_WEB_LAUNCHER_TOKEN: gatewayState.token,
+  };
+  const pluginDirs = normalizePluginDirs(gatewayState.settings && gatewayState.settings.pluginDirs);
+  if (pluginDirs) {
+    childEnv[PLUGIN_DIRS_ENV] = pluginDirs;
+  } else {
+    // Launcher 设置为空表示不配置外部插件目录，同时避免继承启动 Launcher 时的同名环境变量。
+    delete childEnv[PLUGIN_DIRS_ENV];
+  }
   const child = spawn(officialRuntime.executablePath, officialRuntimeArgs, {
     cwd: APP_ROOT,
-    env: {
-      ...process.env,
-      OPENCODEX_GATEWAY_ENTRY: paths.gatewayScriptPath,
-      [PREFERRED_LANGUAGES_ENV]: preferredLanguagesEnvValue(),
-      // runner 的 Info.plist 已经用 LSBackgroundOnly 隐藏；该标记让业务入口不要再调用 Dock API。
-      OPENCODEX_GATEWAY_AGENT_MODE: "1",
-      // 第 4 个 stdio fd 是生命周期 pipe；gateway 会监听它判断 launcher 是否已退出。
-      OPENCODEX_GATEWAY_LIFECYCLE_FD: "3",
-      // Chromium profile 必须和官方 Desktop 隔离；核心数据继续通过 CODEX_HOME 共享。
-      CODEX_WEB_OFFICIAL_USER_DATA_DIR: officialUserDataDir,
-      CODEX_ELECTRON_USER_DATA_PATH: officialUserDataDir,
-      HOST: gatewayState.host,
-      PORT: String(gatewayState.port),
-      CODEX_WEB_RUNTIME_DIR: paths.runtimeDir,
-      CODEX_WEB_CONFIG_PATH: paths.configPath,
-      CODEX_WEB_REPORTS_DIR: paths.reportsDir,
-      CODEX_WEB_OFFICIAL_BUNDLE_DIR: paths.officialBundleDir,
-      CODEX_WEB_GATEWAY_BASE_URL: gatewayState.primaryUrl,
-      CODEX_WEB_LAUNCHER_TOKEN: gatewayState.token,
-    },
+    env: childEnv,
     // 第 4 个 fd 是生命周期 pipe：launcher 退出时 OS 会关闭写端，gateway watchdog 会自杀。
     stdio: ["ignore", "pipe", "pipe", "pipe"],
   });
@@ -765,6 +814,35 @@ ipcMain.handle("launcher:update-password", async (_event, password) => {
   ensureRuntimeLayout(paths);
   gatewayState.paths = paths;
   writeAuthConfig(paths, password);
+  return restartGateway();
+});
+ipcMain.handle("launcher:update-plugin-dirs", async (_event, pluginDirs) => {
+  const paths = runtimePaths();
+  ensureRuntimeLayout(paths);
+  gatewayState.paths = paths;
+  gatewayState.settings = saveLauncherSettings(paths, {
+    ...(gatewayState.settings || loadLauncherSettings(paths)),
+    pluginDirs: normalizePluginDirs(pluginDirs),
+  });
+  return restartGateway();
+});
+ipcMain.handle("launcher:choose-plugin-dir", async () => {
+  const dialogOptions = {
+    properties: ["openDirectory"],
+    title: launcherText("launcher.settings.pluginDirs.chooseDialogTitle"),
+  };
+  const result =
+    mainWindow && !mainWindow.isDestroyed()
+      ? await dialog.showOpenDialog(mainWindow, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions);
+  if (result.canceled || !result.filePaths || !result.filePaths[0]) return buildState();
+  const paths = runtimePaths();
+  ensureRuntimeLayout(paths);
+  gatewayState.paths = paths;
+  gatewayState.settings = saveLauncherSettings(paths, {
+    ...(gatewayState.settings || loadLauncherSettings(paths)),
+    pluginDirs: result.filePaths[0],
+  });
   return restartGateway();
 });
 

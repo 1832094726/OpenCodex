@@ -63,6 +63,19 @@ function renderAuthStatus(enabled) {
   node.classList.toggle("is-disabled", !isEnabled);
 }
 
+function renderExternalPluginStatus(status) {
+  const node = $("pluginDirsStatus");
+  if (!node) return;
+  const configured = !!(status && status.configured);
+  const count = status && Number.isFinite(Number(status.count)) ? Number(status.count) : 0;
+  node.textContent = configured
+    ? t("launcher.settings.pluginDirs.enabled", { count })
+    : t("launcher.settings.pluginDirs.disabled");
+  // 外部目录为空是正常状态，不使用红色告警；配置后按启用状态显示绿色。
+  node.classList.toggle("is-enabled", configured);
+  node.classList.remove("is-disabled");
+}
+
 function formatDateTime(value) {
   if (!value) return t("common.unknown");
   const date = new Date(value);
@@ -95,6 +108,12 @@ function renderPort(port) {
   const input = $("portInput");
   if (!input || document.activeElement === input) return;
   input.value = port ? String(port) : "";
+}
+
+function renderPluginDirs(pluginDirs) {
+  const input = $("pluginDirsInput");
+  if (!input || document.activeElement === input) return;
+  input.value = pluginDirs || "";
 }
 
 function renderUrls(state) {
@@ -151,6 +170,8 @@ function render(state) {
   if (pendingHostMode && settings.hostMode === pendingHostMode) pendingHostMode = "";
   renderHostMode(settings.hostMode);
   renderPort(settings.port || state.port);
+  renderPluginDirs(settings.pluginDirs);
+  renderExternalPluginStatus(state.externalPlugins);
   text("serviceTitle", settings.hostMode === "lan" ? t("launcher.service.lan") : t("launcher.service.local"));
 
   text("codexVersion", official.version || t("common.unknown"));
@@ -226,6 +247,21 @@ document.addEventListener("click", async (event) => {
     render(await launcher.updatePassword(""));
     return;
   }
+  if (target.id === "choosePluginDir") {
+    render(await launcher.choosePluginDir());
+    return;
+  }
+  if (target.id === "savePluginDirs") {
+    const input = $("pluginDirsInput");
+    render(await launcher.updatePluginDirs(input ? input.value : ""));
+    return;
+  }
+  if (target.id === "clearPluginDirs") {
+    const input = $("pluginDirsInput");
+    if (input) input.value = "";
+    render(await launcher.updatePluginDirs(""));
+    return;
+  }
   if (target.id === "openLogs") {
     await launcher.openLogs();
     return;
@@ -238,9 +274,15 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("keydown", async (event) => {
   const target = event.target;
-  if (!target || target.id !== "portInput" || event.key !== "Enter") return;
-  event.preventDefault();
-  render(await launcher.updatePort(target.value));
+  if (!target || event.key !== "Enter") return;
+  if (target.id === "portInput") {
+    event.preventDefault();
+    render(await launcher.updatePort(target.value));
+  }
+  if (target.id === "pluginDirsInput") {
+    event.preventDefault();
+    render(await launcher.updatePluginDirs(target.value));
+  }
 });
 
 document.addEventListener("change", async (event) => {

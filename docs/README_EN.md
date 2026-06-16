@@ -127,6 +127,7 @@ If you need to access it from another device, use the LAN address shown by the L
 | `OPENCODEX_HOST` | `127.0.0.1` | Default listen address used when the Launcher starts the gateway for the first time. |
 | `OPENCODEX_PORT` | Random available port | Default port used when the Launcher starts the gateway for the first time. |
 | `OPENCODEX_PREFERRED_LANGUAGES` | `zh-CN` | Preferred language list for OpenCodex-owned UI, as a JSON array or comma-separated list, for example `["zh-Hans-CN","en-CN"]`. The Launcher automatically passes the system preferred languages. |
+| `OPENCODEX_PLUGIN_DIRS` | Empty | External plugin root directories matching the `web-shell/plugins` layout; pass multiple roots with the platform path delimiter or a JSON array. |
 | `CODEX_WEB_CONFIG_PATH` | `config.yaml` | Path to the gateway authentication config file. |
 | `CODEX_WEB_AUTH_TOKEN_TTL_MS` | `43200000` | Gateway access token lifetime, 12 hours by default. |
 | `CODEX_WEB_DEBUG` | Empty | Set to `1` or `true` to output more debug logs. |

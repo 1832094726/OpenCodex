@@ -2,31 +2,56 @@
 
 **中文** | [English](PLUGINS_EN.md)
 
-OpenCodex 支持把插件 JS 文件放进固定目录后自动发现、加载并在设置页生成插件开关。当前插件系统用于承载 OpenCodex 自有增强能力，例如移动端软键盘优化和移动端侧栏优化。
+OpenCodex 支持把插件目录放进内置或外部插件根目录后自动发现、加载并在设置页生成插件开关。当前插件系统用于承载 OpenCodex 自有增强能力，例如移动端软键盘优化和移动端侧栏优化。
 
 > 当前插件以可信同页脚本方式运行，没有沙箱隔离。插件可以访问 `window`、`document` 和页面运行时对象，所以只应放入你信任的插件文件。
 
 ## 插件目录
 
-插件文件放在：
+内置插件放在：
 
 ```text
-web-shell/plugins/*.js
+web-shell/plugins/<plugin-name>/index.js
 ```
 
-gateway 会在请求 `/opencodex-plugin-loader.js` 时扫描该目录，并加载符合安全文件名规则的顶层 `.js` 文件。刷新页面即可重新扫描插件目录。
+gateway 会在请求 `/opencodex-plugin-loader.js` 时扫描插件根目录，并加载符合安全目录名规则的 `<plugin-name>/index.js`。刷新页面即可重新扫描插件目录。
 
-有效文件名示例：
+有效目录名示例：
 
 ```text
-my-plugin.js
-mobile-helper.v1.js
+my-plugin
+mobile-helper.v1
 ```
 
 插件文件会通过以下 URL 加载：
 
 ```text
-/opencodex-plugins/<file-name>.js
+/opencodex-plugins/builtin/<plugin-name>/index.js
+```
+
+## 外部插件目录
+
+通过环境变量 `OPENCODEX_PLUGIN_DIRS` 可以追加外部插件根目录。外部根目录和内置目录使用相同结构：
+
+```text
+/path/to/plugins/
+  my-plugin/
+    index.js
+    i18.zh.json
+    i18.en.json
+```
+
+多个外部根目录可以用系统路径分隔符传入，也可以使用 JSON 数组：
+
+```bash
+OPENCODEX_PLUGIN_DIRS="/path/to/plugins:/another/plugins"
+OPENCODEX_PLUGIN_DIRS='["/path/to/plugins", "/another/plugins"]'
+```
+
+外部插件 URL 会带独立 source 段，例如：
+
+```text
+/opencodex-plugins/external-1/<plugin-name>/index.js
 ```
 
 ## 加载时机
@@ -46,7 +71,9 @@ mobile-helper.v1.js
   pluginSystem.registerPlugin({
     id: "example.hello",
     name: "Hello plugin",
+    labelKey: "plugin.exampleHello.label",
     label: "示例插件",
+    descKey: "plugin.exampleHello.desc",
     desc: "这段描述会显示在插件标题下面；为空时不显示。",
     defaultEnabled: true,
     order: 100,
@@ -71,7 +98,9 @@ mobile-helper.v1.js
 | `id` | 是 | 插件唯一 ID。建议使用反向域名或命名空间，例如 `opencodex.mobile-keyboard-optimization`。 |
 | `name` | 否 | 插件内部名称。 |
 | `label` | 否 | 设置页插件开关标题。未提供时回退到 `name` 或 `id`。 |
-| `desc` | 否 | 设置页标题下方描述。为空时不显示描述。插件文案应由插件 JS 自己提供。 |
+| `labelKey` | 否 | 设置页插件开关标题的 i18 key，优先从插件自己的 i18 文件解析。 |
+| `desc` | 否 | 设置页标题下方描述。为空时不显示描述。 |
+| `descKey` | 否 | 设置页插件描述的 i18 key，优先从插件自己的 i18 文件解析。 |
 | `defaultEnabled` | 否 | 插件总开关默认值。未声明时默认 `true`。 |
 | `enableStorageKey` | 否 | 插件总开关在本地设置里的字段名。未声明时使用 `plugin.<id>.enabled`。 |
 | `builtin` | 否 | 是否内置插件。当前主要用于元信息标记。 |
@@ -79,7 +108,25 @@ mobile-helper.v1.js
 | `settings` | 否 | 插件自定义设置声明。当前设置页只自动渲染插件总开关，该字段暂作扩展预留。 |
 | `activate(context)` | 否 | 插件激活函数。启用状态下进入对应 scope 时调用。可返回 dispose 函数。 |
 
-`labelKey` 目前仍存在于宿主实现中，主要服务 OpenCodex 内置文案。普通插件应优先使用 `label` 和 `desc`，避免把插件文案写进主项目 locale。
+## 插件 i18n
+
+插件文案不要写进宿主 locale。插件目录内可放置语言文件：
+
+```text
+i18.zh.json
+i18.en.json
+```
+
+示例：
+
+```json
+{
+  "plugin.exampleHello.label": "示例插件",
+  "plugin.exampleHello.desc": "这段描述会显示在插件标题下面。"
+}
+```
+
+宿主会先读取中文默认文件，再按当前语言叠加对应语言文件。插件 JS 里继续使用 `labelKey` / `descKey`，并保留 `label` / `desc` 作为缺失 i18 文案时的兜底。
 
 ## 开关存储
 

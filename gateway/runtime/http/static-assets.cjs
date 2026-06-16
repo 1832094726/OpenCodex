@@ -180,7 +180,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
 
   function createPluginLoaderScript() {
     const pluginUrls = listPluginEntries().map(
-      (entry) => `${OPENCODEX_PLUGIN_URL_PREFIX}${entry.name}/index.js?v=${entry.version}`
+      (entry) => `${OPENCODEX_PLUGIN_URL_PREFIX}${entry.urlPath}?v=${entry.version}`
     );
     return `(() => {
   const pluginUrls = ${JSON.stringify(pluginUrls)};

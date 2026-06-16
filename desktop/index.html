@@ -88,6 +88,23 @@
                 <button id="clearPassword" data-i18n="common.clear">清空</button>
               </div>
             </div>
+
+            <div class="setting-item">
+              <div class="setting-info">
+                <div class="setting-label" data-i18n="launcher.settings.pluginDirs.label">外部插件目录</div>
+                <div class="setting-desc">
+                  <span data-i18n="launcher.settings.pluginDirs.descriptionPrefix">外部插件目录 - 当前状态:</span>
+                  <span class="setting-status" id="pluginDirsStatus">未设置</span>
+                </div>
+                <div class="setting-desc" data-i18n="launcher.settings.pluginDirs.description">留空则不设置；选择或填写包含插件子目录的根目录</div>
+              </div>
+              <div class="setting-control plugin-dirs-row">
+                <input id="pluginDirsInput" type="text" spellcheck="false" placeholder="留空不设置" data-i18n-placeholder="launcher.settings.pluginDirs.placeholder" />
+                <button id="choosePluginDir" data-i18n="common.choose">选择</button>
+                <button id="savePluginDirs" data-i18n="common.save">保存</button>
+                <button id="clearPluginDirs" data-i18n="common.clear">清空</button>
+              </div>
+            </div>
           </div>
         </section>
 

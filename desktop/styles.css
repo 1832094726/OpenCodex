@@ -307,7 +307,8 @@ button.primary:hover {
 
 /* Inputs */
 input[type="number"],
-input[type="password"] {
+input[type="password"],
+input[type="text"] {
   font-family: inherit;
   font-size: 14px;
   height: 36px;
@@ -318,6 +319,19 @@ input[type="password"] {
   color: var(--text-primary);
   width: 220px;
   transition: all 0.15s ease;
+}
+
+.plugin-dirs-row input[type="text"] {
+  width: 100%;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 13px;
+}
+
+.plugin-dirs-row {
+  width: min(440px, 52vw);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 input:focus {
@@ -441,9 +455,14 @@ input:focus {
     justify-content: flex-start;
   }
   input[type="number"],
-  input[type="password"] {
+  input[type="password"],
+  input[type="text"] {
     width: 100%;
     flex: 1;
+  }
+  .plugin-dirs-row {
+    width: 100%;
+    justify-content: flex-start;
   }
   .kv .setting-item {
     flex-direction: row;

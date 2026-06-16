@@ -2,31 +2,56 @@
 
 [中文](PLUGINS.md) | **English**
 
-OpenCodex supports plugin JavaScript files that can be dropped into a fixed directory, discovered automatically, loaded automatically, and shown as plugin switches in Settings. The current plugin system hosts OpenCodex-owned enhancements such as mobile keyboard optimization and mobile sidebar optimization.
+OpenCodex supports plugin directories that can be dropped into built-in or external plugin roots, discovered automatically, loaded automatically, and shown as plugin switches in Settings. The current plugin system hosts OpenCodex-owned enhancements such as mobile keyboard optimization and mobile sidebar optimization.
 
 > Plugins currently run as trusted same-page scripts without sandbox isolation. They can access `window`, `document`, and page runtime objects, so only place plugin files that you trust in the plugin directory.
 
 ## Plugin Directory
 
-Place plugin files in:
+Built-in plugins live in:
 
 ```text
-web-shell/plugins/*.js
+web-shell/plugins/<plugin-name>/index.js
 ```
 
-The gateway scans this directory when `/opencodex-plugin-loader.js` is requested, then loads top-level `.js` files whose names match the safe file-name rule. Refresh the page to rescan the plugin directory.
+The gateway scans plugin roots when `/opencodex-plugin-loader.js` is requested, then loads `<plugin-name>/index.js` entries whose directory names match the safe directory-name rule. Refresh the page to rescan plugin directories.
 
-Valid file-name examples:
+Valid directory-name examples:
 
 ```text
-my-plugin.js
-mobile-helper.v1.js
+my-plugin
+mobile-helper.v1
 ```
 
 Plugin files are served from:
 
 ```text
-/opencodex-plugins/<file-name>.js
+/opencodex-plugins/builtin/<plugin-name>/index.js
+```
+
+## External Plugin Roots
+
+Use `OPENCODEX_PLUGIN_DIRS` to append external plugin roots. External roots use the same layout as the built-in root:
+
+```text
+/path/to/plugins/
+  my-plugin/
+    index.js
+    i18.zh.json
+    i18.en.json
+```
+
+Pass multiple external roots with the platform path delimiter or a JSON array:
+
+```bash
+OPENCODEX_PLUGIN_DIRS="/path/to/plugins:/another/plugins"
+OPENCODEX_PLUGIN_DIRS='["/path/to/plugins", "/another/plugins"]'
+```
+
+External plugin URLs include their own source segment, for example:
+
+```text
+/opencodex-plugins/external-1/<plugin-name>/index.js
 ```
 
 ## Load Timing
@@ -46,7 +71,9 @@ The plugin system has two phases: registration and activation.
   pluginSystem.registerPlugin({
     id: "example.hello",
     name: "Hello plugin",
+    labelKey: "plugin.exampleHello.label",
     label: "Example plugin",
+    descKey: "plugin.exampleHello.desc",
     desc: "This description appears below the plugin title; empty descriptions are hidden.",
     defaultEnabled: true,
     order: 100,
@@ -71,7 +98,9 @@ The plugin system has two phases: registration and activation.
 | `id` | Yes | Unique plugin ID. Prefer a namespace or reverse-domain style name, for example `opencodex.mobile-keyboard-optimization`. |
 | `name` | No | Internal plugin name. |
 | `label` | No | Plugin switch title in Settings. Falls back to `name` or `id`. |
-| `desc` | No | Description shown below the title in Settings. Empty descriptions are hidden. Plugin copy should be provided by the plugin JS itself. |
+| `labelKey` | No | i18n key for the plugin switch title, resolved from the plugin's own i18n files first. |
+| `desc` | No | Description shown below the title in Settings. Empty descriptions are hidden. |
+| `descKey` | No | i18n key for the plugin description, resolved from the plugin's own i18n files first. |
 | `defaultEnabled` | No | Default value of the plugin's main switch. Defaults to `true` when omitted. |
 | `enableStorageKey` | No | Field name used for this plugin's main switch in local settings. Defaults to `plugin.<id>.enabled`. |
 | `builtin` | No | Marks a built-in plugin. Currently used mainly as metadata. |
@@ -79,7 +108,25 @@ The plugin system has two phases: registration and activation.
 | `settings` | No | Custom plugin setting descriptors. The current Settings UI only auto-renders the plugin's main switch; this field is reserved for future expansion. |
 | `activate(context)` | No | Plugin activation function. Called for an active scope when the plugin is enabled. May return a dispose function. |
 
-`labelKey` still exists in the host implementation, mainly for OpenCodex built-in copy. Regular plugins should prefer `label` and `desc`, and should not add plugin copy to the main project locale files.
+## Plugin i18n
+
+Plugin copy should not be added to host locale files. A plugin directory can include language files:
+
+```text
+i18.zh.json
+i18.en.json
+```
+
+Example:
+
+```json
+{
+  "plugin.exampleHello.label": "Example plugin",
+  "plugin.exampleHello.desc": "This description appears below the plugin title."
+}
+```
+
+The host reads the Chinese default file first, then overlays the current language file. Plugin JavaScript keeps using `labelKey` / `descKey`, with `label` / `desc` as fallbacks when i18n text is missing.
 
 ## Switch Storage
 
