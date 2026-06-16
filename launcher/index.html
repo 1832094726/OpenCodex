@@ -13,9 +13,15 @@
     <!-- 极简顶部导航栏 -->
     <header class="app-header">
       <div class="header-inner">
+        <!-- 左上角固定展示应用名称和 launcher 版本。 -->
         <div class="header-brand">
           <img class="logo" src="../web-shell/assets/icon.png" alt="Logo" />
-          <h1 id="serviceTitle" data-i18n="launcher.service.local">本机服务</h1>
+          <div class="header-copy">
+            <div class="brand-title">
+              <h1>OpenCodex</h1>
+              <span class="brand-version" id="openCodexVersion" data-i18n="common.unknown">未知</span>
+            </div>
+          </div>
         </div>
         <div class="status-pill" id="statusPill" data-i18n="launcher.status.starting">启动中</div>
       </div>
@@ -104,17 +110,6 @@
                 <button id="savePluginDirs" data-i18n="common.save">保存</button>
                 <button id="clearPluginDirs" data-i18n="common.clear">清空</button>
               </div>
-            </div>
-          </div>
-        </section>
-
-        <!-- OpenCodex 启动器版本 -->
-        <section class="setting-section">
-          <h2>OpenCodex <span class="section-caption" data-i18n="launcher.app.caption">启动器</span></h2>
-          <div class="setting-list kv">
-            <div class="setting-item">
-              <div class="setting-label" data-i18n="launcher.app.version">版本</div>
-              <div class="setting-value" id="openCodexVersion" data-i18n="common.unknown">未知</div>
             </div>
           </div>
         </section>

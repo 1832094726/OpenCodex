@@ -173,8 +173,8 @@ function render(state) {
   renderPort(settings.port || state.port);
   renderPluginDirs(settings.pluginDirs);
   renderExternalPluginStatus(state.externalPlugins);
-  text("serviceTitle", settings.hostMode === "lan" ? t("launcher.service.lan") : t("launcher.service.local"));
 
+  // launcher 自身版本固定展示在左上角品牌区，避免占用设置列表空间。
   text("openCodexVersion", appInfo.version || t("common.unknown"));
   text("codexVersion", official.version || t("common.unknown"));
   text("codexBuild", official.build || t("common.unknown"));
