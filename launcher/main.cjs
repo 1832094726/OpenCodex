@@ -405,12 +405,18 @@ function launcherText(key, values) {
   return formatMessage(i18n.messages, key, values);
 }
 
+function openOpenCodexUrl() {
+  // 只有 launcher 主动打开浏览器时固定使用 localhost；展示和复制仍走 primaryUrl 方便局域网访问。
+  return gatewayState.port ? `http://localhost:${gatewayState.port}` : "";
+}
+
 function canOpenOpenCodex() {
-  return !!gatewayState.child && !gatewayState.child.killed && !!gatewayState.primaryUrl;
+  return !!gatewayState.child && !gatewayState.child.killed && !!openOpenCodexUrl();
 }
 
 function openOpenCodex() {
-  if (canOpenOpenCodex()) shell.openExternal(gatewayState.primaryUrl);
+  const openUrl = openOpenCodexUrl();
+  if (canOpenOpenCodex()) shell.openExternal(openUrl);
   return buildState();
 }
 
