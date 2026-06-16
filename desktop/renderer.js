@@ -164,6 +164,7 @@ function render(state) {
   const appServer = status.appServer || {};
   const paths = state.paths || {};
   const settings = state.settings || {};
+  const appInfo = state.app || {};
 
   renderStatus(state);
   renderUrls(state);
@@ -174,6 +175,7 @@ function render(state) {
   renderExternalPluginStatus(state.externalPlugins);
   text("serviceTitle", settings.hostMode === "lan" ? t("launcher.service.lan") : t("launcher.service.local"));
 
+  text("openCodexVersion", appInfo.version || t("common.unknown"));
   text("codexVersion", official.version || t("common.unknown"));
   text("codexBuild", official.build || t("common.unknown"));
   text("cacheUpdatedAt", formatDateTime(official.cacheProcessedAt));

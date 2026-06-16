@@ -411,7 +411,8 @@
         </section>
       </main>
       <div class="entry-version">
-        <span>v1.0</span>
+        <!-- 版本文本由 gateway 响应期从 shared/app-version.cjs 注入，静态 fallback 只用于直接打开 HTML。 -->
+        <span data-opencodex-version>v0.0.0</span>
         <span>Powered by @Ryens</span>
       </div>
       <button id="settings-open" class="settings-button" type="button" aria-controls="settings-sidebar" aria-expanded="false">

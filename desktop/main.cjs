@@ -6,6 +6,7 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { prepareOfficialElectronRuntime } = require("../gateway/runner/index.cjs");
+const { OPENCODEX_VERSION_LABEL } = require("../shared/app-version.cjs");
 const { PREFERRED_LANGUAGES_ENV, formatMessage, resolveOpenCodexI18n } = require("../shared/i18n/index.cjs");
 
 const APP_ROOT = path.resolve(__dirname, "..");
@@ -370,6 +371,10 @@ function buildState() {
     settings: gatewayState.settings || defaultSettings(),
     auth: {
       enabled: gatewayState.paths ? readAuthEnabled(gatewayState.paths.configPath) : false,
+    },
+    // launcher 版本来自构建前同步的静态文件，不依赖 gateway 或官方 Codex runtime 状态。
+    app: {
+      version: OPENCODEX_VERSION_LABEL,
     },
     externalPlugins: externalPluginStatus((gatewayState.settings || defaultSettings()).pluginDirs),
     status: gatewayState.status,

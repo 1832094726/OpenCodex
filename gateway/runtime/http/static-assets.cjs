@@ -16,6 +16,7 @@ const {
   withPluginI18nMessages,
 } = require("../core/plugin-assets.cjs");
 const { gzipIfUseful, send } = require("./http-utils.cjs");
+const { OPENCODEX_VERSION_LABEL } = require("../../../shared/app-version.cjs");
 
 const OPENCODEX_PLUGIN_LOADER_PATH = "/opencodex-plugin-loader.js";
 const OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH = "/codex-token-usage-capability.js";
@@ -178,6 +179,23 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     return `<script>window.__CODEX_WEB_CONFIG__=Object.assign(window.__CODEX_WEB_CONFIG__||{},${JSON.stringify(publicConfig)});</script>`;
   }
 
+  function escapeHtml(value) {
+    // 版本号来自同步脚本生成的静态文件，这里仍做 HTML 转义，避免未来格式扩展时污染登录页。
+    return String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function patchWebShellAppVersion(rawHtml) {
+    // 认证入口必须展示 OpenCodex 自身版本，不能使用官方 Codex runtime 的版本。
+    return rawHtml.replace(
+      /(<span\b[^>]*\bdata-opencodex-version\b[^>]*>)([\s\S]*?)(<\/span>)/i,
+      (_match, start, _content, end) => `${start}${escapeHtml(OPENCODEX_VERSION_LABEL)}${end}`
+    );
+  }
+
   function createPluginLoaderScript() {
     const pluginUrls = listPluginEntries().map(
       (entry) => `${OPENCODEX_PLUGIN_URL_PREFIX}${entry.urlPath}?v=${entry.version}`
@@ -202,7 +220,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   function createWebShellIndexResponse() {
     const shell = path.join(WEB_SHELL_DIR, "index.html");
     const i18n = currentI18n();
-    let html = patchHtmlLang(readText(shell), i18n.locale);
+    let html = patchWebShellAppVersion(patchHtmlLang(readText(shell), i18n.locale));
     const links = officialStyleLinks();
     if (links) {
       // web-shell 自己负责承载 UI，注入官方样式后视觉表现和桌面 renderer 保持一致。

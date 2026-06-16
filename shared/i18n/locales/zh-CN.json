@@ -39,6 +39,8 @@
   "launcher.settings.pluginDirs.enabled": "共 {count} 个插件",
   "launcher.settings.pluginDirs.disabled": "未设置",
   "launcher.settings.pluginDirs.chooseDialogTitle": "选择外部插件目录",
+  "launcher.app.caption": "启动器",
+  "launcher.app.version": "版本",
   "launcher.codex.caption": "官方运行时",
   "launcher.codex.version": "版本",
   "launcher.codex.build": "构建",

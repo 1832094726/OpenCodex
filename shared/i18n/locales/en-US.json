@@ -39,6 +39,8 @@
   "launcher.settings.pluginDirs.enabled": "{count} plugins",
   "launcher.settings.pluginDirs.disabled": "Not set",
   "launcher.settings.pluginDirs.chooseDialogTitle": "Choose external plugin directory",
+  "launcher.app.caption": "Launcher",
+  "launcher.app.version": "Version",
   "launcher.codex.caption": "Official runtime",
   "launcher.codex.version": "Version",
   "launcher.codex.build": "Build",
