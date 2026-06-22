@@ -19,10 +19,26 @@ const { gzipIfUseful, send } = require("./http-utils.cjs");
 const { OPENCODEX_VERSION_LABEL } = require("../../../shared/app-version.cjs");
 
 const OPENCODEX_PLUGIN_LOADER_PATH = "/opencodex-plugin-loader.js";
+const OPENCODEX_PLUGIN_SYSTEM_PATH = "/opencodex-plugin-system.js";
 const OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH = "/codex-token-usage-capability.js";
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH = "/codex-window-controls-overlay.css";
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH = "/codex-window-controls-overlay.js";
+const CODEX_BRIDGE_POLYFILL_PATH = "/codex-bridge-polyfill.js";
+const CODEX_TOOLTIP_DISMISS_GUARD_PATH = "/codex-tooltip-dismiss-guard.js";
+const FAVICON_PATH = "/favicon.ico";
 const PWA_MANIFEST_PATH = "/manifest.webmanifest";
+const WEB_SHELL_ASSETS_DIR = path.join(WEB_SHELL_DIR, "assets");
+// 固定 web-shell 资源只在这里登记一次，白名单和文件映射共用同一份配置。
+const WEB_SHELL_STATIC_FILES = new Map([
+  [FAVICON_PATH, path.join(WEB_SHELL_ASSETS_DIR, "icon.png")],
+  [PWA_MANIFEST_PATH, path.join(WEB_SHELL_DIR, "manifest.webmanifest")],
+  [OPENCODEX_PLUGIN_SYSTEM_PATH, path.join(WEB_SHELL_DIR, "opencodex-plugin-system.js")],
+  [OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH, path.join(WEB_SHELL_DIR, "codex-token-usage-capability.js")],
+  [OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.css")],
+  [OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.js")],
+  [CODEX_BRIDGE_POLYFILL_PATH, path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js")],
+  [CODEX_TOOLTIP_DISMISS_GUARD_PATH, path.join(WEB_SHELL_DIR, "codex-tooltip-dismiss-guard.js")],
+]);
 
 // 静态资源层把官方 renderer/web-shell 的路径差异统一隐藏起来，server 只需要按 URL 取文件。
 function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
@@ -77,21 +93,21 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     html = html.replace(/(src|href)=["']\.\/([^"'#?]+)["']/g, '$1="/official/$2"');
     const base = [
       '<base href="/official/">',
-      '<link rel="manifest" href="/manifest.webmanifest">',
+      `<link rel="manifest" href="${PWA_MANIFEST_PATH}">`,
       '<meta name="theme-color" content="#ffffff">',
       '<meta name="application-name" content="OpenCodex">',
       '<meta name="mobile-web-app-capable" content="yes">',
       '<meta name="apple-mobile-web-app-title" content="OpenCodex">',
       '<meta name="apple-mobile-web-app-capable" content="yes">',
       '<meta name="apple-mobile-web-app-status-bar-style" content="default">',
-      '<link id="codex-web-window-controls-overlay-styles" rel="stylesheet" href="/codex-window-controls-overlay.css">',
+      `<link id="codex-web-window-controls-overlay-styles" rel="stylesheet" href="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH}">`,
       '<script src="/codex-web-config.js"></script>',
-      '<script src="/opencodex-plugin-system.js"></script>',
-      '<script src="/opencodex-plugin-loader.js"></script>',
-      '<script src="/codex-token-usage-capability.js"></script>',
-      '<script src="/codex-window-controls-overlay.js"></script>',
-      '<script src="/codex-bridge-polyfill.js"></script>',
-      '<script src="/codex-tooltip-dismiss-guard.js"></script>',
+      `<script src="${OPENCODEX_PLUGIN_SYSTEM_PATH}"></script>`,
+      `<script src="${OPENCODEX_PLUGIN_LOADER_PATH}"></script>`,
+      `<script src="${OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH}"></script>`,
+      `<script src="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH}"></script>`,
+      `<script src="${CODEX_BRIDGE_POLYFILL_PATH}"></script>`,
+      `<script src="${CODEX_TOOLTIP_DISMISS_GUARD_PATH}"></script>`,
     ].join("\n    ");
     if (/<head[^>]*>/i.test(html)) {
       html = html.replace(/<head([^>]*)>/i, `<head$1>\n    ${base}`);
@@ -245,20 +261,8 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
 
   function isPublicStaticPath(reqPath) {
     // 登录前必须可访问的资源限定在入口依赖和官方静态 asset，不包含任何 API。
-    if (reqPath === "/favicon.ico" || reqPath === PWA_MANIFEST_PATH || reqPath.startsWith(WEB_SHELL_ASSETS_PREFIX)) {
-      return true;
-    }
-    if (
-      reqPath === OPENCODEX_PLUGIN_LOADER_PATH ||
-      reqPath === "/opencodex-plugin-system.js" ||
-      reqPath === OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH ||
-      reqPath === OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH ||
-      reqPath === OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH ||
-      reqPath === "/codex-bridge-polyfill.js" ||
-      reqPath === "/codex-tooltip-dismiss-guard.js"
-    ) {
-      return true;
-    }
+    if (WEB_SHELL_STATIC_FILES.has(reqPath) || reqPath.startsWith(WEB_SHELL_ASSETS_PREFIX)) return true;
+    if (reqPath === OPENCODEX_PLUGIN_LOADER_PATH) return true;
     if (matchedPatchedOfficialPrefix(reqPath)) return true;
     if (reqPath.startsWith(OPENCODEX_PLUGIN_URL_PREFIX)) return true;
     return reqPath.startsWith("/official/");
@@ -326,26 +330,16 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   /** 将 URL path 映射到 web-shell 或官方 asset 的真实文件。 */
   function staticFile(reqPath) {
     // 路径映射只接受固定前缀；不能把任意 URL path 直接拼到项目根目录。
-    if (reqPath === "/favicon.ico") return path.join(WEB_SHELL_DIR, "assets", "icon.png");
-    if (reqPath === PWA_MANIFEST_PATH) return path.join(WEB_SHELL_DIR, "manifest.webmanifest");
-    if (reqPath === "/opencodex-plugin-system.js") return path.join(WEB_SHELL_DIR, "opencodex-plugin-system.js");
-    if (reqPath === OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH) return path.join(WEB_SHELL_DIR, "codex-token-usage-capability.js");
-    if (reqPath === OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH) {
-      return path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.css");
-    }
-    if (reqPath === OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH) {
-      return path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.js");
-    }
-    if (reqPath === "/codex-bridge-polyfill.js") return path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js");
-    if (reqPath === "/codex-tooltip-dismiss-guard.js") return path.join(WEB_SHELL_DIR, "codex-tooltip-dismiss-guard.js");
+    const fixedWebShellFile = WEB_SHELL_STATIC_FILES.get(reqPath);
+    if (fixedWebShellFile) return fixedWebShellFile;
     if (reqPath.startsWith(OPENCODEX_PLUGIN_URL_PREFIX)) {
       return pluginEntryFileFromRequestPath(reqPath);
     }
     if (reqPath.startsWith(WEB_SHELL_ASSETS_PREFIX)) {
       const rel = reqPath.slice(WEB_SHELL_ASSETS_PREFIX.length);
-      if (rel && !rel.includes("..") && !path.isAbsolute(rel)) {
-        return path.join(WEB_SHELL_DIR, "assets", rel);
-      }
+      const candidate = rel ? path.normalize(path.join(WEB_SHELL_ASSETS_DIR, rel)) : "";
+      // assets 目录也用真实路径校验，和官方资源分支保持同一套边界模型。
+      if (candidate && isWithinRoot(candidate, WEB_SHELL_ASSETS_DIR)) return candidate;
     }
     if (matchedPatchedOfficialPrefix(reqPath)) {
       const rel = patchedOfficialRelPath(reqPath);
