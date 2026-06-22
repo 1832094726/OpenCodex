@@ -20,6 +20,8 @@ const { OPENCODEX_VERSION_LABEL } = require("../../../shared/app-version.cjs");
 
 const OPENCODEX_PLUGIN_LOADER_PATH = "/opencodex-plugin-loader.js";
 const OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH = "/codex-token-usage-capability.js";
+const OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH = "/codex-window-controls-overlay.css";
+const OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH = "/codex-window-controls-overlay.js";
 const PWA_MANIFEST_PATH = "/manifest.webmanifest";
 
 // 静态资源层把官方 renderer/web-shell 的路径差异统一隐藏起来，server 只需要按 URL 取文件。
@@ -82,10 +84,12 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       '<meta name="apple-mobile-web-app-title" content="OpenCodex">',
       '<meta name="apple-mobile-web-app-capable" content="yes">',
       '<meta name="apple-mobile-web-app-status-bar-style" content="default">',
+      '<link id="codex-web-window-controls-overlay-styles" rel="stylesheet" href="/codex-window-controls-overlay.css">',
       '<script src="/codex-web-config.js"></script>',
       '<script src="/opencodex-plugin-system.js"></script>',
       '<script src="/opencodex-plugin-loader.js"></script>',
       '<script src="/codex-token-usage-capability.js"></script>',
+      '<script src="/codex-window-controls-overlay.js"></script>',
       '<script src="/codex-bridge-polyfill.js"></script>',
       '<script src="/codex-tooltip-dismiss-guard.js"></script>',
     ].join("\n    ");
@@ -248,6 +252,8 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       reqPath === OPENCODEX_PLUGIN_LOADER_PATH ||
       reqPath === "/opencodex-plugin-system.js" ||
       reqPath === OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH ||
+      reqPath === OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH ||
+      reqPath === OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH ||
       reqPath === "/codex-bridge-polyfill.js" ||
       reqPath === "/codex-tooltip-dismiss-guard.js"
     ) {
@@ -324,6 +330,12 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     if (reqPath === PWA_MANIFEST_PATH) return path.join(WEB_SHELL_DIR, "manifest.webmanifest");
     if (reqPath === "/opencodex-plugin-system.js") return path.join(WEB_SHELL_DIR, "opencodex-plugin-system.js");
     if (reqPath === OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH) return path.join(WEB_SHELL_DIR, "codex-token-usage-capability.js");
+    if (reqPath === OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH) {
+      return path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.css");
+    }
+    if (reqPath === OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH) {
+      return path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.js");
+    }
     if (reqPath === "/codex-bridge-polyfill.js") return path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js");
     if (reqPath === "/codex-tooltip-dismiss-guard.js") return path.join(WEB_SHELL_DIR, "codex-tooltip-dismiss-guard.js");
     if (reqPath.startsWith(OPENCODEX_PLUGIN_URL_PREFIX)) {

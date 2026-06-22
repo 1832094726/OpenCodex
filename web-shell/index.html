@@ -14,9 +14,11 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <link rel="icon" type="image/png" href="/assets/icon.png" />
     <link rel="apple-touch-icon" href="/assets/icon.png" />
+    <link id="codex-web-window-controls-overlay-styles" rel="stylesheet" href="/codex-window-controls-overlay.css" />
     <title>OpenCodex</title>
     <!-- codex-official-styles -->
     <!-- opencodex-runtime-config -->
+    <script src="/codex-window-controls-overlay.js"></script>
     <script src="/opencodex-plugin-system.js"></script>
     <script src="/opencodex-plugin-loader.js"></script>
     <style>
@@ -392,6 +394,20 @@
         .entry-version {
           bottom: max(12px, calc(env(safe-area-inset-bottom, 0px) + 12px));
         }
+      }
+      @media (display-mode: window-controls-overlay) {
+        .settings-button {
+          /* PWA 窗口控件覆盖标题栏时，按浏览器暴露的可用标题栏区域避让右上角系统按钮。 */
+          top: max(12px, calc(var(--opencodex-wco-top) + 12px));
+          right: max(
+            12px,
+            calc(var(--opencodex-wco-right) + 12px)
+          );
+        }
+      }
+      html[data-opencodex-wco-visible="true"] .settings-button {
+        top: max(12px, calc(var(--opencodex-wco-top) + 12px));
+        right: max(12px, calc(var(--opencodex-wco-right) + 12px));
       }
     </style>
   </head>
