@@ -19,11 +19,18 @@
   }
   const OPENCODEX_LANGUAGES = [OPENCODEX_LOCALE, "zh-CN", "zh", "en-US", "en"];
   const AUTH_FORCE_LOGIN_STORAGE_KEY = "codex_web_force_login";
-  const WS_READY_WAIT_TIMEOUT_MS = 2500;
-  const CLIENT_DIAGNOSTIC_FLUSH_DELAY_MS = 120;
+ // DERP 中继 RTT ~1800ms，WS 握手需 5 个 RTT（~9s），但 HTTP IPC 只要 855ms。
+ // 设 3s 超时：WS 握手在 3s 内完成则用 WS，否则降级 HTTP，WS 后台继续连。
+ const WS_READY_WAIT_TIMEOUT_MS = 3000;
+ // 首次 WS 连接尝试是否已完成（无论成功失败）；完成后不再阻塞 IPC 等待 WS。
+ // 解决冷启动矛盾：首批 IPC 需 WS 注册 clientId 才能收异步回包，但 DERP 下 WS 握手可能 >3s。
+ // 超时后后续 IPC 直接走 HTTP，WS 在后台异步建立成功后自动接管。
+ let wsFirstConnectDone = false;
+ const CLIENT_DIAGNOSTIC_FLUSH_DELAY_MS = 120;
   const CLIENT_DIAGNOSTIC_MAX_BATCH = 40;
   const LOW_PRIORITY_IPC_CONCURRENCY = 2;
   const LOW_PRIORITY_IPC_LOG_EVERY = 25;
+  const READ_ONLY_APP_SERVER_CACHE_TTL_MS = 15000;
   // debugWs 由 gateway 的 OPENCODEX_DEBUG_WS 注入；默认关闭，避免每条 WS 消息都额外计时/算长度。
   const WS_DEBUG_ENABLED = cfg.debugWs === true || cfg.debugWs === "1";
   // 下面三个阈值只在 debugWs 开启时生效，用来定位“远端首个会话打开慢”的浏览器侧瓶颈。
@@ -49,19 +56,22 @@
     try {
       document.documentElement.lang = OPENCODEX_LOCALE;
     } catch {}
+    const nav = w.navigator;
+    if (!nav) return;
     try {
-      Object.defineProperty(navigator, "language", {
+      Object.defineProperty(nav, "language", {
         configurable: true,
         get: () => OPENCODEX_LOCALE,
       });
     } catch {}
     try {
-      Object.defineProperty(navigator, "languages", {
+      Object.defineProperty(nav, "languages", {
         configurable: true,
         get: () => OPENCODEX_LANGUAGES,
       });
     } catch {}
   }
+
 
   function opencodexPluginSystem() {
     return w.OpenCodexPluginSystem || w.__OpenCodexPluginSystem || null;
@@ -344,8 +354,99 @@
     "3903742690": true,
     artifacts: true,
   };
-  const clientId =
-    w.crypto?.randomUUID?.() || `web-client-${Math.random().toString(36).slice(2)}`;
+  const OPENCODEX_CLIENT_ID_STORAGE_KEY = "opencodex_browser_client_id_v1";
+  const OPENCODEX_LAST_ROUTE_STORAGE_KEY = "opencodex_last_thread_route_v1";
+
+  function createBrowserClientId() {
+    return w.crypto?.randomUUID?.() || `web-client-${Math.random().toString(36).slice(2)}`;
+  }
+
+  function persistentBrowserClientId() {
+    try {
+      const existing = String(localStorage.getItem(OPENCODEX_CLIENT_ID_STORAGE_KEY) || "").trim();
+      if (existing && existing.length <= 160) return existing;
+      const next = createBrowserClientId();
+      localStorage.setItem(OPENCODEX_CLIENT_ID_STORAGE_KEY, next);
+      return next;
+    } catch {
+      return createBrowserClientId();
+    }
+  }
+
+  function routeRestorationEnabled() {
+    try {
+      if (w.sessionStorage?.getItem("opencodex_skip_last_route_restore") === "1") return false;
+    } catch {}
+    return true;
+  }
+
+  function normalizeRestorableRoute(value) {
+    const text = typeof value === "string" ? value.trim() : "";
+    if (!text || text === "/" || text.startsWith("//")) return "";
+    try {
+      const parsed = new URL(text, location.origin);
+      if (parsed.origin !== location.origin) return "";
+      const route = `${parsed.pathname || "/"}${parsed.search || ""}${parsed.hash || ""}`;
+      return isRestorableThreadRoute(route) ? route : "";
+    } catch {
+      return isRestorableThreadRoute(text) ? text : "";
+    }
+  }
+
+  function isRestorableThreadRoute(route) {
+    // 只恢复官方会话路由，避免把设置页、登录页或外部路径固定成下次启动入口。
+    return /^\/(?:local|thread|conversation|remote)\/[^/?#]+/.test(String(route || ""));
+  }
+
+  function currentRestorableRoute() {
+    return normalizeRestorableRoute(`${location.pathname || "/"}${location.search || ""}${location.hash || ""}`);
+  }
+
+  function persistCurrentRoute() {
+    const route = currentRestorableRoute();
+    if (!route) return;
+    try {
+      localStorage.setItem(OPENCODEX_LAST_ROUTE_STORAGE_KEY, route);
+    } catch {}
+  }
+
+  function restoreLastRouteOnColdEntry() {
+    if (!routeRestorationEnabled()) return;
+    if (location.pathname !== "/" || location.search || location.hash) return;
+    let route = "";
+    try {
+      route = normalizeRestorableRoute(localStorage.getItem(OPENCODEX_LAST_ROUTE_STORAGE_KEY) || "");
+    } catch {}
+    if (!route) return;
+    try {
+      history.replaceState(history.state, "", route);
+      clientDiagnostic("last-route-restored", { route });
+    } catch {}
+  }
+
+  function installRoutePersistence() {
+    persistCurrentRoute();
+    const originalPushState = history.pushState?.bind(history);
+    const originalReplaceState = history.replaceState?.bind(history);
+    if (originalPushState) {
+      history.pushState = function pushStateWithOpenCodexRoutePersistence(...args) {
+        const result = originalPushState(...args);
+        persistCurrentRoute();
+        return result;
+      };
+    }
+    if (originalReplaceState) {
+      history.replaceState = function replaceStateWithOpenCodexRoutePersistence(...args) {
+        const result = originalReplaceState(...args);
+        persistCurrentRoute();
+        return result;
+      };
+    }
+    w.addEventListener("popstate", persistCurrentRoute);
+    w.addEventListener("pagehide", persistCurrentRoute);
+  }
+
+  const clientId = persistentBrowserClientId();
   let ws = null;
   let wsReady = false;
   const wsReadyWaiters = new Set();
@@ -354,11 +455,16 @@
   const bridgeStartedAtMs = Date.now();
   const clientDiagnosticQueue = [];
   let clientDiagnosticFlushTimer = null;
+  let crossClientSyncTimer = null;
+  let lastCrossClientSyncAtMs = 0;
   const lowPriorityIpcQueue = [];
   const connectorLogoResponseCache = new Map();
   const connectorLogoInFlight = new Map();
   const connectorLogoRequestCacheKeys = new Map();
   const connectorLogoDiagnosticCounts = new Map();
+  const readOnlyAppServerCache = new Map();
+  const readOnlyAppServerInFlight = new Map();
+  const statsigBootstrapRequestIds = new Set();
   let activeLowPriorityIpcCount = 0;
   let lowPriorityIpcQueuedCount = 0;
   let lowPriorityIpcStartedCount = 0;
@@ -776,8 +882,13 @@
     });
   }
 
+  restoreLastRouteOnColdEntry();
+  installRoutePersistence();
+
   clientDiagnostic("bridge-installed", {
     target: "codex-bridge-polyfill",
+    clientIdStable: true,
+    restoredRoute: currentRestorableRoute(),
     wsState: websocketStateName(ws),
   });
 
@@ -1294,14 +1405,6 @@
     w.setTimeout(() => removeBridgeToast(toast), 8000);
   }
 
-  function showBridgeToast(payload) {
-    // 先广播给可能存在的官方适配器；无人处理时再用官方类名兜底渲染。
-    const delivered = dispatch("codex-web:toast", payload);
-    emitWindowMessage("codex-web:toast", payload);
-    if (delivered > 0) return;
-    renderBridgeErrorToast(payload);
-  }
-
   /** fetch 形态没有稳定的官方业务 catch，这里才做同款 toast 兜底并短时间去重。 */
   function surfaceFetchIpcError(channel, payload) {
     if (!payload || typeof payload !== "object") return;
@@ -1323,13 +1426,11 @@
       description: `${url}: ${message}`,
     };
 
-    showBridgeToast(toastPayload);
-  }
-
-  function handleRemoteWorkspaceRootOption(payload) {
-    const picker = w.OpenCodexWorkspaceRootPicker;
-    if (!picker || typeof picker.handleMessage !== "function") return null;
-    return picker.handleMessage(payload);
+    // 先广播给可能存在的官方适配器；无人处理时再用官方类名兜底渲染。
+    const delivered = dispatch("codex-web:toast", toastPayload);
+    emitWindowMessage("codex-web:toast", toastPayload);
+    if (delivered > 0) return;
+    renderBridgeErrorToast(toastPayload);
   }
 
   /** 把 ArrayBuffer 转成 base64；分块处理避免大文件触发调用栈上限。 */
@@ -1544,6 +1645,166 @@
     return true;
   }
 
+  function browserLocaleInfo() {
+    return {
+      ideLocale: OPENCODEX_LOCALE,
+      systemLocale: OPENCODEX_LOCALE,
+    };
+  }
+
+  /** 官方 i18n provider 会查询 locale-info；Web 壳直接返回中文，确保语言包解析走 zh-CN。 */
+  function handleLocaleInfoFetchMessage(payload) {
+    if (!payload || typeof payload !== "object") return false;
+    if (payload.type !== "fetch" || !/locale-info$/i.test(String(payload.url || ""))) return false;
+    emitFetchSuccess(String(payload.requestId || ""), browserLocaleInfo());
+    return true;
+  }
+
+  function parseFetchJsonBody(payload) {
+    if (!payload || typeof payload !== "object" || typeof payload.body !== "string" || payload.body.trim() === "") {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(payload.body);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function fetchUrlPath(payload) {
+    try {
+      return new URL(String(payload && payload.url ? payload.url : ""), "vscode://codex").pathname.replace(/\/+$/, "");
+    } catch {
+      return "";
+    }
+  }
+
+  function fetchParamValue(payload, name) {
+    try {
+      const parsed = new URL(String(payload && payload.url ? payload.url : ""), "vscode://codex");
+      const value = parsed.searchParams.get(name);
+      if (value != null) return value;
+    } catch {}
+    const body = parseFetchJsonBody(payload);
+    const params = body && typeof body.params === "object" ? body.params : null;
+    return String((params && params[name]) || (body && body[name]) || "");
+  }
+
+  function isDomainIsolationRemoteStateKey(key) {
+    // 域名隔离模式不允许官方远程 host 选择进入 OpenCodex 网页态。
+    return key === "selected-remote-host-id" || String(key || "").startsWith("remote-thread-summaries:");
+  }
+
+  function handleDomainIsolationGlobalStateFetch(payload) {
+    if (!payload || typeof payload !== "object" || payload.type !== "fetch") return false;
+    const path = fetchUrlPath(payload);
+    const key = fetchParamValue(payload, "key");
+    if (path === "/get-global-state" && isDomainIsolationRemoteStateKey(key)) {
+      emitFetchSuccess(String(payload.requestId || ""), { value: null });
+      return true;
+    }
+    if (path === "/set-global-state" && isDomainIsolationRemoteStateKey(key)) {
+      emitFetchSuccess(String(payload.requestId || ""), {});
+      return true;
+    }
+    if (path === "/set-remote-control-connections-enabled") {
+      emitFetchSuccess(String(payload.requestId || ""), { enabled: false });
+      return true;
+    }
+    return false;
+  }
+
+  function isStatsigBootstrapFetchPayload(payload) {
+    return !!(
+      payload &&
+      typeof payload === "object" &&
+      payload.type === "fetch" &&
+      String(payload.url || "").replace(/^vscode:\/\/codex/i, "") === "/wham/statsig/bootstrap"
+    );
+  }
+
+  function rememberStatsigBootstrapRequest(payload) {
+    const requestId = payload && typeof payload.requestId === "string" ? payload.requestId : "";
+    if (requestId) statsigBootstrapRequestIds.add(requestId);
+  }
+
+  /** 官方 Statsig bootstrap 要用中文语言头，否则 i18n layer 可能保持默认英文策略。 */
+  function normalizeStatsigBootstrapRequest(payload) {
+    if (!isStatsigBootstrapFetchPayload(payload)) return;
+    rememberStatsigBootstrapRequest(payload);
+    payload.headers = {
+      ...(payload.headers && typeof payload.headers === "object" ? payload.headers : {}),
+      "OAI-Language": OPENCODEX_LOCALE,
+    };
+    try {
+      const body = payload.body ? JSON.parse(payload.body) : {};
+      if (body && typeof body === "object") {
+        body.locale = OPENCODEX_LOCALE;
+        payload.body = JSON.stringify(body);
+      }
+    } catch {}
+  }
+
+  /** 有些官方 IPC 会绕过 sendMessageFromView 包装；发送前递归兜底，确保真实传输的 args 已经携带中文语言参数。 */
+  function normalizeStatsigBootstrapArgs(value, seen = new WeakSet()) {
+    if (!value || typeof value !== "object") return;
+    if (seen.has(value)) return;
+    seen.add(value);
+    normalizeStatsigBootstrapRequest(value);
+    if (Array.isArray(value)) {
+      for (const item of value) normalizeStatsigBootstrapArgs(item, seen);
+      return;
+    }
+    for (const item of Object.values(value)) normalizeStatsigBootstrapArgs(item, seen);
+  }
+
+  function i18nStatsigLayerConfig() {
+    return {
+      name: STATSIG_I18N_LAYER_CONFIG,
+      value: { ...STATSIG_I18N_LAYER_VALUES },
+      rule_id: "opencodex_i18n",
+      secondary_exposures: [],
+    };
+  }
+
+  function patchStatsigPayloadForOfficialI18n(statsigPayload) {
+    if (!statsigPayload || typeof statsigPayload !== "object") return false;
+    statsigPayload.layer_configs =
+      statsigPayload.layer_configs && typeof statsigPayload.layer_configs === "object"
+        ? statsigPayload.layer_configs
+        : {};
+    statsigPayload.layer_configs[STATSIG_I18N_LAYER_CONFIG] = i18nStatsigLayerConfig();
+    statsigPayload.has_updates = true;
+    return true;
+  }
+
+  /** 官方返回的 statsigPayload 是 JSON 字符串；只补 i18n layer，仍让官方 IntlProvider 加载官方 zh-CN 语言包。 */
+  function patchStatsigBootstrapFetchResponse(payload) {
+    if (!payload || typeof payload !== "object") return payload;
+    const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
+    if (!requestId || !statsigBootstrapRequestIds.has(requestId)) return payload;
+    statsigBootstrapRequestIds.delete(requestId);
+    if (payload.responseType !== "success" || typeof payload.bodyJsonString !== "string") return payload;
+    try {
+      const body = JSON.parse(payload.bodyJsonString);
+      const statsigPayload = body && typeof body.statsigPayload === "string" ? JSON.parse(body.statsigPayload) : null;
+      if (!patchStatsigPayloadForOfficialI18n(statsigPayload)) return payload;
+      body.statsigPayload = JSON.stringify(statsigPayload);
+      payload.bodyJsonString = JSON.stringify(body);
+      clientDiagnostic("statsig-bootstrap-i18n-layer-patched", {
+        locale: OPENCODEX_LOCALE,
+        requestId,
+      });
+    } catch (error) {
+      clientDiagnostic("statsig-bootstrap-i18n-layer-patch-failed", {
+        error: error instanceof Error ? error.message : String(error),
+        requestId,
+      });
+    }
+    return payload;
+  }
+
   /** 短延迟 Promise，用于启动期 transient fetch 失败后的重试。 */
   function delay(ms) {
     return new Promise((resolve) => w.setTimeout(resolve, ms));
@@ -1595,6 +1856,34 @@
     settleWsReadyWaiters(true);
     // hello-ack 到达后服务端才知道当前 clientId，此时再冲刷 app-host 队列才能保证定向路由正确。
     flushAllAppHostRelayMessages();
+  }
+
+  function hasEditableFocus() {
+    const active = document.activeElement;
+    if (!active) return false;
+    const tag = String(active.tagName || "").toLowerCase();
+    return tag === "input" || tag === "textarea" || active.isContentEditable === true;
+  }
+
+  function scheduleCrossClientSyncRefresh(message) {
+    if (!message || message.sourceClientId === clientId) return;
+    const nowMs = Date.now();
+    const minIntervalMs = document.visibilityState === "visible" ? 8000 : 2500;
+    if (nowMs - lastCrossClientSyncAtMs < minIntervalMs) return;
+    if (crossClientSyncTimer) return;
+    crossClientSyncTimer = w.setTimeout(() => {
+      crossClientSyncTimer = null;
+      lastCrossClientSyncAtMs = Date.now();
+      clientDiagnostic("cross-client-sync-refresh", {
+        reason: message.reason || "",
+        requestId: message.requestId || "",
+        sourceClientId: shortClientId(message.sourceClientId || ""),
+      });
+      // 域名隔离模式下没有跨主机环境状态，收到同步通知时只触发当前页面刷新事件。
+      try {
+        w.dispatchEvent(new CustomEvent("opencodex:sync-refresh", { detail: message }));
+      } catch {}
+    }, 800);
   }
 
   function waitForGatewayWsReady() {
@@ -1933,11 +2222,237 @@
     );
   }
 
+  /** 统计被本地拦截的 log-message 数量，用于诊断上报。 */
+  let logMessageInterceptedCount = 0;
+
+  /** 判断 payload 是否为 log-message 类型 IPC。 */
+  function isLogMessagePayload(payload) {
+    return !!(payload && typeof payload === "object" && payload.type === "log-message");
+  }
+
+  /**
+   * log-message 是官方 renderer 发给 main 进程的日志写入，返回值不影响前端逻辑。
+   * 在浏览器侧直接本地输出并短路返回，避免每个 log-message 都消耗一次 HTTP RTT。
+   */
+  function handleLocalLogMessage(payload, diagnosticSummary) {
+    logMessageInterceptedCount += 1;
+    // 本地 console 保持与官方 main 进程一致的日志级别，方便开发者排查。
+    const level = typeof payload.level === "string" ? payload.level : "log";
+    const message = typeof payload.message === "string" ? payload.message : "";
+    const logger = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
+    if (logger) {
+      try {
+        logger.call(console, `[codex:log-message] ${message}`, payload.args || "");
+      } catch {}
+    }
+    // 每 50 条采样上报一次，确认拦截仍在生效，但不刷屏诊断日志。
+    if (logMessageInterceptedCount === 1 || logMessageInterceptedCount % 50 === 0) {
+      clientDiagnostic("log-message-intercepted", {
+        ...diagnosticSummary,
+        count: logMessageInterceptedCount,
+      });
+    }
+    return Promise.resolve(true);
+  }
+
+  /** 记录已经通过网络订阅过的 shared-object key，避免重复 RTT。 */
+  const subscribedSharedObjectKeys = new Set();
+  let sharedObjectSubscribeInterceptedCount = 0;
+
+  /** 判断 payload 是否为 shared-object-subscribe 类型 IPC。 */
+  function isSharedObjectSubscribePayload(payload) {
+    return !!(
+      payload &&
+      typeof payload === "object" &&
+      payload.type === "shared-object-subscribe" &&
+      typeof payload.key === "string"
+    );
+  }
+
+  /**
+   * 同一个 key 的重复订阅不需要再走网络。
+   * gateway 的 Electron main 进程已经在首次订阅时注册了推送，
+   * 后续的 WS shared-object-updated 会持续更新本地快照，重复订阅只需本地回放。
+   */
+  function handleDuplicateSharedObjectSubscribe(payload, diagnosticSummary) {
+    sharedObjectSubscribeInterceptedCount += 1;
+    // 如果本地快照已有该 key 的值，立即派发一次 shared-object-updated，满足 renderer 对初始值的期望。
+    if (
+      sharedObjectSnapshot.has(payload.key) ||
+      payload.key === STATSIG_DEFAULT_FEATURES_CONFIG ||
+      payload.key === STATSIG_I18N_LAYER_CONFIG
+    ) {
+      emitSharedObjectSnapshotValue(payload.key);
+    }
+    if (sharedObjectSubscribeInterceptedCount === 1 || sharedObjectSubscribeInterceptedCount % 20 === 0) {
+      clientDiagnostic("shared-object-subscribe-intercepted", {
+        ...diagnosticSummary,
+        count: sharedObjectSubscribeInterceptedCount,
+      });
+    }
+    return Promise.resolve(true);
+  }
+
+  const READ_ONLY_APP_SERVER_METHODS = new Set([
+    "app/list",
+    "mcpServerStatus/list",
+    "plugin/list",
+  ]);
+
+  /** 提取官方 app-server 只读方法名；这些方法多次并发调用时结果可短时间复用。 */
+  function readOnlyAppServerMethod(payload) {
+    if (!payload || typeof payload !== "object") return "";
+    const directMethod = typeof payload.method === "string" ? payload.method : "";
+    if (READ_ONLY_APP_SERVER_METHODS.has(directMethod)) return directMethod;
+    const requestMethod =
+      payload.request && typeof payload.request === "object" && typeof payload.request.method === "string"
+        ? payload.request.method
+        : "";
+    if (READ_ONLY_APP_SERVER_METHODS.has(requestMethod)) return requestMethod;
+    const paramsMethod =
+      payload.params && typeof payload.params === "object" && typeof payload.params.method === "string"
+        ? payload.params.method
+        : "";
+    // 官方 JSON-RPC 有时把真实 app-server 方法放在 params.method，统一识别后才能做页内去重。
+    return READ_ONLY_APP_SERVER_METHODS.has(paramsMethod) ? paramsMethod : "";
+  }
+
+  function appServerMethod(payload) {
+    if (!payload || typeof payload !== "object") return "";
+    if (typeof payload.method === "string") return payload.method;
+    if (payload.request && typeof payload.request === "object" && typeof payload.request.method === "string") {
+      return payload.request.method;
+    }
+    if (payload.params && typeof payload.params === "object" && typeof payload.params.method === "string") {
+      return payload.params.method;
+    }
+    return "";
+  }
+
+  /** locale-info 只依赖本地语言配置，直接短路可避免官方 app-server 尚未就绪时落回英文。 */
+  function invokeLocaleInfoLocal(payload, diagnosticSummary) {
+    if (appServerMethod(payload) !== "locale-info") return null;
+    clientDiagnostic("locale-info-local-response", {
+      ...diagnosticSummary,
+      locale: OPENCODEX_LOCALE,
+    });
+    return Promise.resolve(browserLocaleInfo());
+  }
+
+  /** 去掉每次请求都会变化的 id 字段，让同一只读请求能命中同一个缓存 key。 */
+  function stableReadOnlyAppServerKeyPart(value, seen = new WeakSet()) {
+    if (value == null || typeof value !== "object") return value;
+    if (seen.has(value)) return "[Circular]";
+    seen.add(value);
+    if (Array.isArray(value)) return value.map((item) => stableReadOnlyAppServerKeyPart(item, seen));
+    const result = {};
+    for (const key of Object.keys(value).sort()) {
+      if (key === "id" || key === "requestId") continue;
+      result[key] = stableReadOnlyAppServerKeyPart(value[key], seen);
+    }
+    return result;
+  }
+
+  function readOnlyAppServerCacheKey(channel, ipcArgs, payload, method) {
+    try {
+      return stringifyForIpc({
+        channel,
+        method,
+        args: stableReadOnlyAppServerKeyPart(ipcArgs),
+      });
+    } catch {
+      return `${channel}:${method}:${payloadShape(payload)}`;
+    }
+  }
+
+  function cloneReadOnlyAppServerValue(value) {
+    if (value == null || typeof value !== "object") return value;
+    try {
+      return clonePlainPayload(value);
+    } catch {
+      return value;
+    }
+  }
+
+  function pruneReadOnlyAppServerCache(nowMs) {
+    for (const [key, entry] of readOnlyAppServerCache) {
+      if (!entry || entry.expiresAtMs <= nowMs) readOnlyAppServerCache.delete(key);
+    }
+  }
+
+  /**
+   * plugin/app/MCP 状态属于首屏辅助信息，在弱网或 DERP 中继下会重复请求且单次很慢。
+   * 这里对完全相同的只读请求做页内 in-flight 去重和短 TTL 缓存，避免它们阻塞会话列表与输入框。
+   */
+  function invokeReadOnlyAppServerCached(channel, ipcArgs, payload, diagnosticSummary) {
+    const method = readOnlyAppServerMethod(payload);
+    if (!method) return null;
+    const cacheKey = readOnlyAppServerCacheKey(channel, ipcArgs, payload, method);
+    const nowMs = Date.now();
+    pruneReadOnlyAppServerCache(nowMs);
+    const cached = readOnlyAppServerCache.get(cacheKey);
+    if (cached && cached.expiresAtMs > nowMs) {
+      clientDiagnostic("read-only-app-server-cache-hit", {
+        ...diagnosticSummary,
+        cacheSize: readOnlyAppServerCache.size,
+        method,
+      });
+      return Promise.resolve(cloneReadOnlyAppServerValue(cached.value));
+    }
+    const inFlight = readOnlyAppServerInFlight.get(cacheKey);
+    if (inFlight) {
+      clientDiagnostic("read-only-app-server-inflight-join", {
+        ...diagnosticSummary,
+        inFlightCount: readOnlyAppServerInFlight.size,
+        method,
+      });
+      return inFlight.then(cloneReadOnlyAppServerValue);
+    }
+    const startedAtMs = Date.now();
+    const promise = invokeGatewayImmediate(channel, ipcArgs, payload)
+      .then((value) => {
+        readOnlyAppServerCache.set(cacheKey, {
+          expiresAtMs: Date.now() + READ_ONLY_APP_SERVER_CACHE_TTL_MS,
+          value: cloneReadOnlyAppServerValue(value),
+        });
+        clientDiagnostic("read-only-app-server-cache-store", {
+          ...diagnosticSummary,
+          elapsedMs: Date.now() - startedAtMs,
+          method,
+        });
+        return value;
+      })
+      .finally(() => {
+        if (readOnlyAppServerInFlight.get(cacheKey) === promise) {
+          readOnlyAppServerInFlight.delete(cacheKey);
+        }
+      });
+    readOnlyAppServerInFlight.set(cacheKey, promise);
+    return promise;
+  }
+
   /** 只负责把 IPC 请求发给 gateway，不做 web-shell 侧能力拦截。 */
   async function invokeGateway(channel, args) {
     const ipcArgs = Array.isArray(args) ? args : [args];
     const payload = payloadFromIpcArgs(ipcArgs);
     const diagnosticSummary = ipcDiagnosticSummary(channel, payload);
+    normalizeStatsigBootstrapRequest(payload);
+    // log-message 占首屏 IPC 约 25%，且是 fire-and-forget，本地拦截直接省掉全部网络开销。
+    if (isLogMessagePayload(payload)) {
+      return handleLocalLogMessage(payload, diagnosticSummary);
+    }
+    // shared-object-subscribe 重复 key 约占 5%，去重后只首次走网络。
+    if (isSharedObjectSubscribePayload(payload)) {
+      if (subscribedSharedObjectKeys.has(payload.key)) {
+        return handleDuplicateSharedObjectSubscribe(payload, diagnosticSummary);
+      }
+      // 首次订阅标记，后续同 key 直接本地回放快照。
+      subscribedSharedObjectKeys.add(payload.key);
+    }
+    const localLocaleInfoInvoke = invokeLocaleInfoLocal(payload, diagnosticSummary);
+    if (localLocaleInfoInvoke) return localLocaleInfoInvoke;
+    const cachedReadOnlyAppServerInvoke = invokeReadOnlyAppServerCached(channel, ipcArgs, payload, diagnosticSummary);
+    if (cachedReadOnlyAppServerInvoke) return cachedReadOnlyAppServerInvoke;
     if (isLowPriorityFetchPayload(payload)) {
       /**
        * connector logo 属于首屏非关键资产，但官方 renderer 会一次性发很多。
@@ -1945,10 +2460,53 @@
        */
       return handleConnectorLogoFetchInvoke(channel, ipcArgs, payload, diagnosticSummary);
     }
-    return invokeGatewayImmediate(channel, ipcArgs, payload);
+   return invokeGatewayImmediate(channel, ipcArgs, payload);
+ }
+
+  // ─── WS IPC 通道 ───────────────────────────────────────────────
+  // 把 IPC 请求复用到已建立的 WebSocket 连接上，省掉每次 IPC 的 HTTP 请求开销。
+  // requestId 用于把异步回包匹配到正确的 Promise，超时后自动降级。
+  const pendingWsIpcRequests = new Map();
+  let wsIpcRequestIdCounter = 0;
+
+  function canUseWsForIpc() {
+    return !!(ws && ws.readyState === w.WebSocket.OPEN && wsReady);
   }
 
+  /** 通过 WS 发送 IPC 请求并等待 ipc-result 回包，超时自动 reject。 */
+  function invokeViaWs(channel, ipcArgs, diagnosticSummary) {
+    return new Promise((resolve, reject) => {
+      const requestId = `wsipc-${Date.now()}-${wsIpcRequestIdCounter++}`;
+      const timeoutId = setTimeout(() => {
+        if (pendingWsIpcRequests.has(requestId)) {
+          pendingWsIpcRequests.delete(requestId);
+          reject(new Error("IPC via WebSocket timed out"));
+        }
+      }, 30000);
+      pendingWsIpcRequests.set(requestId, { resolve, reject, timeoutId });
+      try {
+        // WS 是首选 IPC 通道，序列化前再兜底一次，避免官方 i18n 请求带着英文 header 发出。
+        normalizeStatsigBootstrapArgs(ipcArgs);
+        ws.send(JSON.stringify({
+          type: "ipc-invoke",
+          clientId,
+          requestId,
+          channel,
+          args: ipcArgs,
+        }));
+      } catch (error) {
+        clearTimeout(timeoutId);
+        pendingWsIpcRequests.delete(requestId);
+        reject(error);
+      }
+    });
+  }
+  // ─── WS IPC 通道结束 ────────────────────────────────────────────
+
   async function invokeGatewayImmediate(channel, ipcArgs, payload) {
+    // HTTP fallback 也在序列化前兜底，保持与 WS 通道一致。
+    normalizeStatsigBootstrapArgs(ipcArgs);
+    normalizeStatsigBootstrapRequest(payload);
     const diagnosticSummary = ipcDiagnosticSummary(channel, payload);
     const invokeStartedAtMs = Date.now();
     const suppressRoutineDiagnostic = shouldSuppressRoutineIpcDiagnostic(payload);
@@ -1959,7 +2517,9 @@
         wsState: websocketStateName(ws),
       });
     }
-    if (shouldWaitForWsBeforeInvoke(channel)) {
+    if (shouldWaitForWsBeforeInvoke(channel) && !wsFirstConnectDone) {
+      // 整个页面生命周期只阻塞一次 WS 等待：首次 message-from-view IPC 等握手，
+      // 超时后 wsFirstConnectDone 置 true，后续不再阻塞，直接走 canUseWsForIpc 判断。
       const waitStartedAtMs = Date.now();
       if (!suppressRoutineDiagnostic) {
         clientDiagnostic("ipc-ws-wait-start", {
@@ -1969,18 +2529,52 @@
         });
       }
       const ready = await waitForGatewayWsReady();
+      wsFirstConnectDone = true;
       if (!suppressRoutineDiagnostic) {
-        clientDiagnostic("ipc-ws-wait-end", {
+       clientDiagnostic("ipc-ws-wait-end", {
+         ...diagnosticSummary,
+         ready,
+         waitMs: Date.now() - waitStartedAtMs,
+         wsReady,
+        wsState: websocketStateName(ws),
+      });
+    }
+  }
+  // WS 已就绪则直接复用（省掉每次 IPC 的 HTTP RTT）。
+  // wsFirstConnectDone 确保整个页面生命周期只阻塞等待一次 WS 握手：
+  // 如果首次等待超时（网络差/DERP 中继慢），后续 IPC 全部走 HTTP，不再重复阻塞。
+   if (canUseWsForIpc()) {
+      try {
+        const wsValue = await invokeViaWs(channel, ipcArgs, diagnosticSummary);
+        if (!suppressRoutineDiagnostic) {
+          clientDiagnostic("ipc-invoke-success", {
+            ...diagnosticSummary,
+            elapsedMs: Date.now() - invokeStartedAtMs,
+            ok: true,
+            transport: "ws",
+            responseType: payloadShape(wsValue),
+          });
+        }
+        if (
+          channel === "open-file" &&
+          wsValue &&
+          typeof wsValue === "object" &&
+          typeof wsValue.url === "string"
+        ) {
+          openPreviewInCodexSidePanel(wsValue);
+        }
+        return wsValue;
+      } catch (error) {
+        // WS 传输失败时降级到 HTTP，保证功能可用性。
+        clientDiagnostic("ipc-ws-fallback", {
           ...diagnosticSummary,
-          ready,
-          waitMs: Date.now() - waitStartedAtMs,
-          wsReady,
-          wsState: websocketStateName(ws),
+          error: error instanceof Error ? error.message : String(error),
+          transport: "ws",
         });
       }
     }
-    // args 是新的自适应传输格式；payload 保留给旧 gateway 或调试工具读取。
-    const body = stringifyForIpc({ channel, args: ipcArgs, payload, clientId });
+   // args 是新的自适应传输格式；payload 保留给旧 gateway 或调试工具读取。
+   const body = stringifyForIpc({ channel, args: ipcArgs, payload, clientId });
     const retryDelays = shouldRetryGatewayInvoke(channel, payload) ? [0, 80, 250] : [0];
     let res = null;
     let lastFetchError = null;
@@ -2285,6 +2879,13 @@
 
   /** shared-object snapshot 写入前补齐 Web 必需 feature flag。 */
   function normalizeSharedObjectSnapshotValue(key, value) {
+    if (key === STATSIG_I18N_LAYER_CONFIG) {
+      // 官方 i18n provider 依赖 Statsig layer 决定是否启用语言包；这里强制使用 IDE 中文。
+      return {
+        ...(isPlainObject(value) ? value : {}),
+        ...STATSIG_I18N_LAYER_VALUES,
+      };
+    }
     if (key !== STATSIG_DEFAULT_FEATURES_CONFIG) return value;
     return {
       ...(isPlainObject(value) ? value : {}),
@@ -2302,7 +2903,11 @@
 
   /** 读取 shared-object snapshot，特定 key 会懒补默认值。 */
   function getSharedObjectSnapshotValue(key) {
-    if (key === STATSIG_DEFAULT_FEATURES_CONFIG || sharedObjectSnapshot.has(key)) {
+    if (
+      key === STATSIG_DEFAULT_FEATURES_CONFIG ||
+      key === STATSIG_I18N_LAYER_CONFIG ||
+      sharedObjectSnapshot.has(key)
+    ) {
       return setSharedObjectSnapshotValue(key, sharedObjectSnapshot.get(key));
     }
     return null;
@@ -2326,9 +2931,12 @@
       setSharedObjectSnapshotValue(key, value);
     }
     getSharedObjectSnapshotValue(STATSIG_DEFAULT_FEATURES_CONFIG);
+    getSharedObjectSnapshotValue(STATSIG_I18N_LAYER_CONFIG);
   }
 
   initializeSharedObjectSnapshot();
+
+  // 多环境入口已撤回：前端不再写 remote SSH，也不再向新建对话 footer 注入环境按钮。
 
   /** Desktop 的 prompt-history 可能是分组对象，renderer 的 persisted atom 只消费字符串数组。 */
   function normalizePromptHistoryForRenderer(value) {
@@ -2367,6 +2975,11 @@
 
   function persistedAtomSnapshotObject() {
     return Object.fromEntries(persistedAtomSnapshot.entries());
+  }
+
+  function isDomainIsolationRemoteAtomKey(key) {
+    // OpenCodex 现在按域名隔离 Mac/Win，不保留官方 Desktop 的远程 host 选择和远程摘要缓存。
+    return key === "selected-remote-host-id" || String(key || "").startsWith("remote-thread-summaries:");
   }
 
   /** 初始化 persisted atom 快照，保证 renderer 的启动同步不依赖过早建立的 WebSocket。 */
@@ -2455,6 +3068,10 @@
     };
     target.sendMessageFromView = async (payload) =>
       Promise.resolve().then(() => {
+        if (payload && typeof payload === "object") {
+          // 官方 i18n 的 Statsig bootstrap 必须尽早携带中文语言环境，后续无论走本地短路还是 gateway 都能复用同一份 payload。
+          normalizeStatsigBootstrapRequest(payload);
+        }
         if (payload && typeof payload === "object" && payload.type === "persisted-atom-sync-request") {
           // 官方 renderer 首屏会很早请求 persisted atom；这里先本地回包，避免 WS 未连接导致回包丢失。
           emitPersistedAtomSync();
@@ -2464,6 +3081,12 @@
           return true;
         }
         if (payload && typeof payload === "object" && payload.type === "persisted-atom-update" && payload.key) {
+          if (isDomainIsolationRemoteAtomKey(payload.key)) {
+            // 丢弃远程 host atom，避免官方 renderer 把上一次的 remote-control 选择再次写回 CODEX_HOME。
+            setPersistedAtomSnapshotValue(payload.key, null, true);
+            emitPersistedAtomUpdated(payload.key, null, true);
+            return true;
+          }
           // 更新先写本页快照并广播，后续再交给官方 main 按 Desktop 原逻辑落盘。
           const value = setPersistedAtomSnapshotValue(payload.key, payload.value, !!payload.deleted);
           emitPersistedAtomUpdated(payload.key, value, !!payload.deleted);
@@ -2483,12 +3106,16 @@
         if (handlePickFilesFetchMessage(payload)) {
           return true;
         }
+        if (handleDomainIsolationGlobalStateFetch(payload)) {
+          return true;
+        }
+        if (handleLocaleInfoFetchMessage(payload)) {
+          return true;
+        }
         if (handleIdeContextFetchMessage(payload)) {
           return true;
         }
         emitOpenCodexPluginEvent("view:message", payload);
-        const workspaceRootResult = handleRemoteWorkspaceRootOption(payload);
-        if (workspaceRootResult) return workspaceRootResult;
         if (
           payload &&
           typeof payload === "object" &&
@@ -2655,7 +3282,10 @@
     try {
       const parsed = new URL(url, location.href);
       const pathname = parsed.pathname.replace(/\/+$/, "");
-      return parsed.hostname === "chatgpt.com" && (pathname === "/ces/v1/rgstr" || pathname === "/ces/v1/log_event");
+      return (
+        (parsed.hostname === "chatgpt.com" && (pathname === "/ces/v1/rgstr" || pathname === "/ces/v1/log_event")) ||
+        (parsed.hostname === "ab.chatgpt.com" && pathname === "/v1/rgstr")
+      );
     } catch {
       return false;
     }
@@ -2692,6 +3322,45 @@
       return originalFetch(input, init);
     };
     w.__codexWebFetchPatched = true;
+  }
+
+  // Statsig SDK 可能绕过 fetch 使用 XHR；同样只短路遥测注册，不碰业务接口。
+  if (typeof w.XMLHttpRequest === "function" && !w.__codexWebXhrPatched) {
+    const NativeXMLHttpRequest = w.XMLHttpRequest;
+    w.XMLHttpRequest = function OpenCodexXMLHttpRequest() {
+      const xhr = new NativeXMLHttpRequest();
+      let telemetryUrl = "";
+      const originalOpen = xhr.open;
+      const originalSend = xhr.send;
+      xhr.open = function open(method, url, ...rest) {
+        telemetryUrl = isTelemetryRegisterUrl(String(url || "")) ? String(url || "") : "";
+        if (telemetryUrl) return undefined;
+        return originalOpen.call(xhr, method, url, ...rest);
+      };
+      xhr.send = function send(...args) {
+        if (!telemetryUrl) return originalSend.apply(xhr, args);
+        w.setTimeout(() => {
+          try {
+            Object.defineProperty(xhr, "readyState", { configurable: true, value: 4 });
+            Object.defineProperty(xhr, "status", { configurable: true, value: 200 });
+            Object.defineProperty(xhr, "responseText", { configurable: true, value: "{}" });
+            Object.defineProperty(xhr, "response", { configurable: true, value: "{}" });
+          } catch {}
+          try {
+            if (typeof xhr.onreadystatechange === "function") xhr.onreadystatechange(new Event("readystatechange"));
+            xhr.dispatchEvent(new Event("readystatechange"));
+            if (typeof xhr.onload === "function") xhr.onload(new Event("load"));
+            xhr.dispatchEvent(new Event("load"));
+            if (typeof xhr.onloadend === "function") xhr.onloadend(new Event("loadend"));
+            xhr.dispatchEvent(new Event("loadend"));
+          } catch {}
+        }, 0);
+        return undefined;
+      };
+      return xhr;
+    };
+    w.XMLHttpRequest.prototype = NativeXMLHttpRequest.prototype;
+    w.__codexWebXhrPatched = true;
   }
 
   // 官方 bundle 仍可能 require("electron"/"path"/"os")，这里提供浏览器安全替身。
@@ -2756,18 +3425,12 @@
       setSharedObjectSnapshotValue(message.key, message.value);
     }
   });
+  // 各自域名只操作各自本机，不再安装 OpenCodex 多环境入口或远程环境同步。
 
   w.__codexWebSubscribe = subscribe;
   w.__codexWebUnsubscribe = unsubscribe;
   w.__codexWebDispatch = dispatch;
   w.__codexWebPayloadShape = payloadShape;
-  // 独立 Web 能力模块通过这个最小 helper 面访问 bridge，避免把业务弹窗继续塞进 polyfill。
-  w.__codexWebBridgeHelpers = {
-    invoke,
-    normalizeErrorMessage,
-    showToast: showBridgeToast,
-    t,
-  };
 
   /** 建立到 gateway 的 WebSocket，接收 app-server/业务广播事件。 */
   function connect() {
@@ -2844,6 +3507,19 @@
           }
           return;
         }
+        if (msg && msg.type === "opencodex:sync-nudge") {
+          scheduleCrossClientSyncRefresh(msg);
+          if (WS_DEBUG_ENABLED) {
+            maybeLogLargeOrSlowWsInbound({
+              handledBy: "sync-nudge",
+              handleMs: Math.max(0, Date.now() - parseStartedAtMs - parseMs),
+              parseMs,
+              rawChars,
+              summary: gatewayWsInboundSummary(msg),
+            });
+          }
+          return;
+        }
         const appHostStartedAtMs = WS_DEBUG_ENABLED ? Date.now() : 0;
         if (handleAppHostGatewayMessage(msg)) {
           if (WS_DEBUG_ENABLED) {
@@ -2867,16 +3543,38 @@
               summary: gatewayWsInboundSummary(msg),
             });
           }
+         return;
+       }
+        // ipc-result 是 WS IPC 通道的回包：按 requestId 匹配到 pending Promise 并 resolve/reject。
+        if (msg && msg.type === "ipc-result" && typeof msg.requestId === "string") {
+          const pending = pendingWsIpcRequests.get(msg.requestId);
+          if (pending) {
+            pendingWsIpcRequests.delete(msg.requestId);
+            clearTimeout(pending.timeoutId);
+            if (msg.ok) {
+              pending.resolve(msg.value);
+            } else {
+              const error = new Error(msg.error || "IPC failed");
+              if (typeof msg.status === "number") error.status = msg.status;
+              pending.reject(error);
+            }
+          }
           return;
         }
-        if (msg && typeof msg.channel === "string") {
+       if (msg && typeof msg.channel === "string") {
           // handleStartedAtMs 只包住前端分发阶段，用来和服务端 sendCallbackMs 区分。
           const handleStartedAtMs = WS_DEBUG_ENABLED ? Date.now() : 0;
           const messageArgs = Array.isArray(msg.args) ? msg.args : [msg.payload];
-          const messagePayload = Object.prototype.hasOwnProperty.call(msg, "payload")
+          let messagePayload = Object.prototype.hasOwnProperty.call(msg, "payload")
             ? msg.payload
             : payloadFromIpcArgs(messageArgs);
           const effectiveChannel = effectiveGatewayMessageChannel(msg.channel, messagePayload);
+          if (effectiveChannel === "fetch-response") {
+            messagePayload = patchStatsigBootstrapFetchResponse(messagePayload);
+            if (Object.prototype.hasOwnProperty.call(msg, "payload")) {
+              msg.payload = messagePayload;
+            }
+          }
           const trackedConnectorLogoResponse =
             effectiveChannel === "fetch-response" && isTrackedConnectorLogoResponse(messagePayload);
           if (!trackedConnectorLogoResponse) {
@@ -2944,9 +3642,15 @@
         });
       }
     });
-    socket.addEventListener("close", (event) => {
-      if (ws === socket) wsReady = false;
-      clientDiagnostic("ws-close", {
+   socket.addEventListener("close", (event) => {
+     if (ws === socket) wsReady = false;
+      // WS 断开时立即 reject 所有在途的 WS IPC 请求，让调用方降级到 HTTP 而不是等 30s 超时。
+      for (const [reqId, pending] of pendingWsIpcRequests) {
+        clearTimeout(pending.timeoutId);
+        pending.reject(new Error("WebSocket closed during IPC"));
+        pendingWsIpcRequests.delete(reqId);
+      }
+     clientDiagnostic("ws-close", {
         status: event && typeof event.code === "number" ? event.code : 0,
         wsReady,
         wsState: websocketStateName(socket),

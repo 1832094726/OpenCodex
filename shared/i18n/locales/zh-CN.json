@@ -4,7 +4,6 @@
   "common.notCreated": "未创建",
   "common.notRunning": "未运行",
   "common.save": "保存",
-  "common.cancel": "取消",
   "common.clear": "清空",
   "common.choose": "选择",
   "launcher.status.ready": "已就绪",
@@ -90,19 +89,5 @@
   "web.settings.notificationTestBody": "后续官方通知将通过当前浏览器显示。",
   "web.settings.notificationUnsupported": "当前浏览器不支持",
   "web.settings.about": "关于",
-  "web.settings.star": "如果觉得有用，欢迎 Star 支持",
-  "web.workspaceRoot.dialog.title": "使用现有文件夹",
-  "web.workspaceRoot.dialog.description": "输入运行 OpenCodex 的机器上的文件夹路径",
-  "web.workspaceRoot.dialog.pathLabel": "文件夹路径",
-  "web.workspaceRoot.dialog.placeholder": "/Users/name/project",
-  "web.workspaceRoot.dialog.close": "关闭",
-  "web.workspaceRoot.dialog.confirm": "使用",
-  "web.workspaceRoot.dialog.confirming": "正在使用...",
-  "web.workspaceRoot.error.empty": "请输入文件夹路径。",
-  "web.workspaceRoot.error.relative": "请输入绝对路径。",
-  "web.workspaceRoot.error.notFound": "路径不存在。",
-  "web.workspaceRoot.error.notDirectory": "该路径不是文件夹。",
-  "web.workspaceRoot.error.noAccess": "没有权限访问该路径。",
-  "web.workspaceRoot.error.unavailable": "无法使用该文件夹路径。",
-  "web.workspaceRoot.error.addFailed": "添加文件夹失败：{error}"
+  "web.settings.star": "如果觉得有用，欢迎 Star 支持"
 }

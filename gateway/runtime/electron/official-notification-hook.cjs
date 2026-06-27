@@ -7,6 +7,10 @@ const NOTIFICATION_EVENT_TYPE = "opencodex:notification-event";
 const NOTIFICATION_SHOW_TYPE = "opencodex:notification";
 const NOTIFICATION_CLOSE_TYPE = "opencodex:notification-close";
 
+// 通知节流：DERP 中继下通知洪泛会挤占 WS 通道导致 IPC 超时，同 tag 500ms 内只发最新一条。
+const NOTIFICATION_THROTTLE_MS = 500;
+const notificationThrottleMap = new Map();
+
 const state = {
   installed: false,
   createdCount: 0,
@@ -89,6 +93,17 @@ function browserNotificationPayload(notification) {
 function publish(payload) {
   if (typeof publishNotification !== "function") return 0;
   try {
+    // 节流：DERP 中继环境下通知洪泛会挤占 WS 通道，导致 IPC 请求超时。
+    // 同 tag 的通知 500ms 内只发最新一条；无 tag 的按 title 聚合。
+    const dedupeKey = payload.tag || payload.title || "untagged";
+    const now = Date.now();
+    const lastSent = notificationThrottleMap.get(dedupeKey) || 0;
+    if (now - lastSent < NOTIFICATION_THROTTLE_MS) {
+      state.droppedCount += 1;
+      state.lastDroppedAt = new Date().toISOString();
+      return 0;
+    }
+    notificationThrottleMap.set(dedupeKey, now);
     return Number(publishNotification(payload)) || 0;
   } catch (error) {
     state.lastError = error instanceof Error ? error.message : String(error);

@@ -19,6 +19,7 @@ const officialUserDataDir = path.resolve(
   process.env.CODEX_WEB_OFFICIAL_USER_DATA_DIR || path.join(DATA_DIR, "official-user-data")
 );
 const gatewayEntry = path.join(APP_ROOT, "gateway", "main.cjs");
+const serviceMode = process.env.OPENCODEX_GATEWAY_SERVICE_MODE === "1";
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
@@ -42,25 +43,30 @@ async function main() {
   });
 
   const officialRuntimeArgs = [`--user-data-dir=${officialUserDataDir}`];
+  const childEnv = {
+    ...process.env,
+    OPENCODEX_GATEWAY_ENTRY: gatewayEntry,
+    // 命令行调试也保持和 launcher 一致：系统级隐藏 runner，不再触碰 Electron Dock API。
+    OPENCODEX_GATEWAY_AGENT_MODE: "1",
+    CODEX_WEB_RUNTIME_DIR: runtimeDir,
+    // dev 入口固定使用 package.json 同级的 config.yaml；只有显式 CODEX_WEB_CONFIG_PATH 才允许覆盖。
+    CODEX_WEB_CONFIG_PATH: configPath,
+    CODEX_WEB_REPORTS_DIR: reportsDir,
+    CODEX_WEB_OFFICIAL_BUNDLE_DIR: officialBundleDir,
+    CODEX_WEB_OFFICIAL_USER_DATA_DIR: officialUserDataDir,
+    CODEX_ELECTRON_USER_DATA_PATH: officialUserDataDir,
+  };
+  if (!serviceMode) {
+    // 交互式开发入口保留生命周期 pipe；服务模式不能依赖父进程存活，
+    // 否则 Windows 计划任务或 SSH 启动器退出时会把网关一起带走。
+    childEnv.OPENCODEX_GATEWAY_LIFECYCLE_FD = "3";
+  }
+
   const child = spawn(officialRuntime.executablePath, officialRuntimeArgs, {
     cwd: APP_ROOT,
-    env: {
-      ...process.env,
-      OPENCODEX_GATEWAY_ENTRY: gatewayEntry,
-      // 命令行调试也保持和 launcher 一致：系统级隐藏 runner，不再触碰 Electron Dock API。
-      OPENCODEX_GATEWAY_AGENT_MODE: "1",
-      // 第 4 个 stdio fd 是生命周期 pipe；父进程退出后 gateway 会主动结束。
-      OPENCODEX_GATEWAY_LIFECYCLE_FD: "3",
-      CODEX_WEB_RUNTIME_DIR: runtimeDir,
-      // dev 入口固定使用 package.json 同级的 config.yaml；只有显式 CODEX_WEB_CONFIG_PATH 才允许覆盖。
-      CODEX_WEB_CONFIG_PATH: configPath,
-      CODEX_WEB_REPORTS_DIR: reportsDir,
-      CODEX_WEB_OFFICIAL_BUNDLE_DIR: officialBundleDir,
-      CODEX_WEB_OFFICIAL_USER_DATA_DIR: officialUserDataDir,
-      CODEX_ELECTRON_USER_DATA_PATH: officialUserDataDir,
-    },
-    // 继承终端输出，同时保留生命周期 pipe，便于 gateway 在父进程退出后主动结束。
-    stdio: ["inherit", "inherit", "inherit", "pipe"],
+    env: childEnv,
+    // 交互式模式继承终端输出并保留生命周期 pipe；服务模式只继承日志输出。
+    stdio: serviceMode ? ["ignore", "inherit", "inherit"] : ["inherit", "inherit", "inherit", "pipe"],
   });
 
   const stopChild = (signal) => {

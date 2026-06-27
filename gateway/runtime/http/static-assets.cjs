@@ -1,4 +1,5 @@
 const fs = require("fs");
+const crypto = require("crypto");
 const path = require("path");
 const {
   PATCHED_OFFICIAL_PREFIX,
@@ -24,8 +25,6 @@ const OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH = "/codex-token-usage-capability.js"
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH = "/codex-window-controls-overlay.css";
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH = "/codex-window-controls-overlay.js";
 const CODEX_BRIDGE_POLYFILL_PATH = "/codex-bridge-polyfill.js";
-const CODEX_WORKSPACE_ROOT_PICKER_CSS_PATH = "/codex-workspace-root-picker.css";
-const CODEX_WORKSPACE_ROOT_PICKER_PATH = "/codex-workspace-root-picker.js";
 const CODEX_TOOLTIP_DISMISS_GUARD_PATH = "/codex-tooltip-dismiss-guard.js";
 const FAVICON_PATH = "/favicon.ico";
 const PWA_MANIFEST_PATH = "/manifest.webmanifest";
@@ -39,9 +38,8 @@ const WEB_SHELL_STATIC_FILES = new Map([
   [OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.css")],
   [OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.js")],
   [CODEX_BRIDGE_POLYFILL_PATH, path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js")],
-  [CODEX_WORKSPACE_ROOT_PICKER_CSS_PATH, path.join(WEB_SHELL_DIR, "codex-workspace-root-picker.css")],
-  [CODEX_WORKSPACE_ROOT_PICKER_PATH, path.join(WEB_SHELL_DIR, "codex-workspace-root-picker.js")],
   [CODEX_TOOLTIP_DISMISS_GUARD_PATH, path.join(WEB_SHELL_DIR, "codex-tooltip-dismiss-guard.js")],
+  ["/sw-cache.js", path.join(WEB_SHELL_DIR, "sw-cache.js")],
 ]);
 
 // 静态资源层把官方 renderer/web-shell 的路径差异统一隐藏起来，server 只需要按 URL 取文件。
@@ -64,6 +62,21 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     if (!prefix) return "";
     const assetPrefix = `${prefix}assets/`;
     return reqPath.startsWith(assetPrefix) ? reqPath.slice(assetPrefix.length) : "";
+  }
+
+  function isCurrentPatchedOfficialAsset(reqPath) {
+    return reqPath.startsWith(`${PATCHED_OFFICIAL_PREFIX}assets/`);
+  }
+
+  function webShellStaticVersion(reqPath) {
+    const file = WEB_SHELL_STATIC_FILES.get(reqPath);
+    if (!file) return OPENCODEX_VERSION_LABEL;
+    try {
+      // 开发和手机端刷新时用文件 mtime 做版本号，避免旧 Service Worker/浏览器缓存继续执行过期 bridge。
+      return String(Math.floor(fs.statSync(file).mtimeMs));
+    } catch {
+      return OPENCODEX_VERSION_LABEL;
+    }
   }
 
   /** 给官方 renderer HTML 注入 web-shell polyfill 和运行时配置。 */
@@ -105,14 +118,12 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       '<meta name="apple-mobile-web-app-capable" content="yes">',
       '<meta name="apple-mobile-web-app-status-bar-style" content="default">',
       `<link id="codex-web-window-controls-overlay-styles" rel="stylesheet" href="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH}">`,
-      `<link id="codex-web-workspace-root-picker-styles" rel="stylesheet" href="${CODEX_WORKSPACE_ROOT_PICKER_CSS_PATH}">`,
       '<script src="/codex-web-config.js"></script>',
       `<script src="${OPENCODEX_PLUGIN_SYSTEM_PATH}"></script>`,
       `<script src="${OPENCODEX_PLUGIN_LOADER_PATH}"></script>`,
       `<script src="${OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH}"></script>`,
       `<script src="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH}"></script>`,
-      `<script src="${CODEX_BRIDGE_POLYFILL_PATH}"></script>`,
-      `<script src="${CODEX_WORKSPACE_ROOT_PICKER_PATH}"></script>`,
+      `<script src="${CODEX_BRIDGE_POLYFILL_PATH}?v=${webShellStaticVersion(CODEX_BRIDGE_POLYFILL_PATH)}"></script>`,
       `<script src="${CODEX_TOOLTIP_DISMISS_GUARD_PATH}"></script>`,
     ].join("\n    ");
     if (/<head[^>]*>/i.test(html)) {
@@ -130,16 +141,37 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     );
   }
 
-  /** desktop HTML 的 CSP 会拦截浏览器里部分依赖的 Function/eval 探测，需要在 gateway 层放开。 */
+  /** desktop HTML 的 CSP 会拦截浏览器里部分依赖的 Function/eval 探测，需要在 gateway 层放开；同时补上 manifest-src 让 PWA 安装正常工作。 */
   function patchOfficialCspForWeb(rawHtml) {
-    if (rawHtml.includes("&#39;unsafe-eval&#39;") || rawHtml.includes("'unsafe-eval'")) return rawHtml;
-    return rawHtml
-      .replace("&#39;wasm-unsafe-eval&#39;", "&#39;wasm-unsafe-eval&#39; &#39;unsafe-eval&#39;")
-      .replace("'wasm-unsafe-eval'", "'wasm-unsafe-eval' 'unsafe-eval'");
+    let html = rawHtml;
+    // 补充 manifest-src 'self'，避免 default-src 'none' 拦截 manifest.webmanifest
+    if (!html.includes("manifest-src")) {
+      html = html.replace(
+        /(Content-Security-Policy"\s+content=")/,
+        "$1manifest-src 'self'; "
+      );
+    }
+    // 放开 unsafe-eval，官方 renderer 依赖 Function/eval 探测
+    if (!html.includes("&#39;unsafe-eval&#39;") && !html.includes("'unsafe-eval'")) {
+      html = html
+        .replace("&#39;wasm-unsafe-eval&#39;", "&#39;wasm-unsafe-eval&#39; &#39;unsafe-eval&#39;")
+        .replace("'wasm-unsafe-eval'", "'wasm-unsafe-eval' 'unsafe-eval'");
+    }
+    return html;
   }
 
   function patchOfficialHtmlForWeb(rawHtml) {
-    return patchOfficialCspForWeb(patchOfficialAssetUrls(rawHtml));
+    let html = patchOfficialCspForWeb(patchOfficialAssetUrls(rawHtml));
+    // 注入 modulepreload 提示：仅预加载入口 chunk，避免洪泛 HTTP/2 连接
+    // nginx proxy_cache 保证这些资源从服务器缓存秒回，浏览器 Cache-Control 保证二次访问命中
+    const preloadHints = `
+    <link rel="modulepreload" href="${PATCHED_OFFICIAL_PREFIX}assets/app-main-Dldh3K_n.js">
+    <link rel="modulepreload" href="${PATCHED_OFFICIAL_PREFIX}assets/app-shell-0b-x_r3Z.js">
+    <link rel="modulepreload" href="${PATCHED_OFFICIAL_PREFIX}assets/index-4bSY0Qgs.js">
+    <link rel="modulepreload" href="${PATCHED_OFFICIAL_PREFIX}assets/modulepreload-polyfill-Cf3xff8G.js">
+    <link rel="modulepreload" href="${PATCHED_OFFICIAL_PREFIX}assets/preload-helper-BmHspSiq.js">`;
+    html = html.replace("</head>", preloadHints + "\n  </head>");
+    return html;
   }
 
   function locateOfficialIndex() {
@@ -361,14 +393,28 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   /** 静态资源缓存策略：hash asset 长缓存，入口 HTML/no-store 保持可更新。 */
   function cacheControlForRequestPath(reqPath) {
     if (process.env.CODEX_WEB_DISABLE_ASSET_CACHE === "1") return "no-store";
-    if (patchedOfficialAssetName(reqPath)) {
+    const patchedAssetName = patchedOfficialAssetName(reqPath);
+    if (patchedAssetName) {
+      if (isCurrentPatchedOfficialAsset(reqPath)) {
+        // 当前 patched 前缀本身包含 OpenCodex 响应期 patch 版本；官方文件名也带 hash。
+        // 允许手机浏览器长缓存，避免弱网下每次刷新都重新下载几十个 chunk。
+        return "public, max-age=31536000, immutable";
+      }
       // patched chunk 的内容由 gateway 响应期生成，旧前缀也必须 no-store，避免跨版本继续吃旧模块图。
       return "no-store";
     }
     if (reqPath.startsWith("/official/assets/")) return "public, max-age=31536000, immutable";
     if (reqPath.startsWith(WEB_SHELL_ASSETS_PREFIX)) return "public, max-age=86400";
     if (reqPath.startsWith("/official/")) return "public, max-age=3600";
+    if (reqPath === CODEX_BRIDGE_POLYFILL_PATH) {
+      // 手机远程访问链路吞吐低，no-cache + ETag 可在刷新时复用本地副本，同时仍能在文件变化后重新拉取。
+      return "no-cache";
+    }
     return "no-store";
+  }
+
+  function etagForResponseBody(body) {
+    return `W/"${crypto.createHash("sha256").update(body).digest("base64url")}"`;
   }
 
   /** 发送静态文件，并按路径套用合适的缓存策略。 */
@@ -379,7 +425,13 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       { "content-type": mimeType(file), "cache-control": cacheControlForRequestPath(reqPath) },
       data
     );
-    send(res, status, response.headers, response.body);
+    const etag = etagForResponseBody(response.body);
+    const headers = { ...response.headers, etag };
+    if (String(req.headers["if-none-match"] || "") === etag) {
+      send(res, 304, headers, "");
+      return;
+    }
+    send(res, status, headers, response.body);
   }
 
   function serveWebShellIndex(res) {
@@ -401,7 +453,60 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     );
   }
 
+  /** 扫描官方 assets 目录，返回所有 JS/CSS 资源的完整 URL 路径，供 SW 预缓存。 */
+  function createPrecacheManifest() {
+    const officialBundle = getOfficialBundle();
+    const manifest = [];
+    if (officialBundle && officialBundle.webviewDir) {
+      const assetsDir = path.join(officialBundle.webviewDir, "assets");
+      if (exists(assetsDir)) {
+       const files = fs.readdirSync(assetsDir);
+       for (const file of files) {
+         if (!file.endsWith(".css") && !file.endsWith(".js")) continue;
+          // locale 文件（如 zh-CN-hash.js）是懒加载的，只有用户切换语言时才需要。
+          // 排除 53 个 locale 文件可减少 ~36MB 预缓存数据，大幅缩短首次预热时间。
+          if (/^[a-z]{2}-[A-Z]{2}-/.test(file)) continue;
+         // CSS 走 /official/assets/ 不变；JS 在 HTML 中被改写到 patched 命名空间
+          // 包含所有 chunk（含动态 import 的懒加载 chunk），供 prefetch 脚本预取
+          if (file.endsWith(".js")) {
+            manifest.push(`${PATCHED_OFFICIAL_PREFIX}assets/${file}`);
+          } else {
+            manifest.push(`/official/assets/${file}`);
+          }
+        }
+      }
+    }
+    // web-shell 自己的静态资源
+    for (const [urlPath] of WEB_SHELL_STATIC_FILES) {
+      if (urlPath !== FAVICON_PATH) manifest.push(urlPath);
+    }
+   return manifest;
+ }
+
+  /**
+   * 将全部预缓存资源打包成单个 gzip 压缩的 JSON，供 SW 一次性下载。
+   * 解决 HTTP/2 多路复用大量小文件时带宽利用率极低（~20%）的问题。
+   */
+  function createPrecacheBundle(req) {
+    const manifest = createPrecacheManifest();
+    const bundle = {};
+    for (const urlPath of manifest) {
+      const file = staticFile(urlPath);
+      if (!file || !exists(file)) continue;
+      const data = patchOfficialAsset(urlPath, fs.readFileSync(file));
+      bundle[urlPath] = data.toString("utf-8");
+    }
+    const buf = Buffer.from(JSON.stringify(bundle), "utf-8");
+    return gzipIfUseful(
+      req,
+      { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+      buf
+    );
+  }
+
   return {
+    createPrecacheBundle,
+    createPrecacheManifest,
     createRendererResponse,
     isAppShellRoute,
     isPublicStaticPath,

@@ -2,8 +2,12 @@ let WebSocketServer = null;
 try {
   ({ WebSocketServer } = require("ws"));
 } catch {}
+const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 const { diagnosticLog, diagnosticWarn, shortId } = require("../core/diagnostics.cjs");
-const { DEBUG_LOGS } = require("../core/config.cjs");
+const { DEBUG_LOGS, RUNTIME_DIR, ensureDir } = require("../core/config.cjs");
+const { resolveOpenCodexI18n } = require("../../../shared/i18n/index.cjs");
 
 // 下面这些阈值只服务于 OPENCODEX_DEBUG_WS=1 的链路排障；默认运行不会采样慢 WS 发送。
 const WS_LARGE_MESSAGE_BYTES = Number(process.env.OPENCODEX_WS_LARGE_LOG_BYTES || 256 * 1024);
@@ -18,6 +22,17 @@ const WS_DEFLATE_THRESHOLD = Number(process.env.OPENCODEX_WS_DEFLATE_THRESHOLD |
 const WS_DEFLATE_CONCURRENCY = Number(process.env.OPENCODEX_WS_DEFLATE_CONCURRENCY || 4);
 const WS_DEFLATE_LEVEL = Number(process.env.OPENCODEX_WS_DEFLATE_LEVEL || 3);
 const WS_DEBUG_ENABLED = process.env.OPENCODEX_DEBUG_WS === "1";
+const APP_HOST_READ_ONLY_CACHE_TTL_MS = Number(process.env.OPENCODEX_APP_HOST_READ_ONLY_CACHE_TTL_MS || 5 * 60 * 1000);
+const TARGET_RECONNECT_BUFFER_TTL_MS = Number(process.env.OPENCODEX_TARGET_RECONNECT_BUFFER_TTL_MS || 2 * 60 * 1000);
+const TARGET_RECONNECT_BUFFER_MAX_MESSAGES = Number(process.env.OPENCODEX_TARGET_RECONNECT_BUFFER_MAX_MESSAGES || 500);
+const ORPHAN_TARGET_RESPONSE_BUFFER_TTL_MS = Number(process.env.OPENCODEX_ORPHAN_TARGET_RESPONSE_BUFFER_TTL_MS || 30 * 1000);
+const ORPHAN_TARGET_RESPONSE_BUFFER_MAX_MESSAGES = Number(process.env.OPENCODEX_ORPHAN_TARGET_RESPONSE_BUFFER_MAX_MESSAGES || 100);
+const APP_HOST_READ_ONLY_METHODS = new Set(["app/list", "mcpServerStatus/list", "plugin/list"]);
+const appHostReadOnlyCache = new Map();
+const appHostReadOnlyInFlight = new Map();
+const APP_HOST_READ_ONLY_CACHE_FILE = path.join(RUNTIME_DIR, "cache", "app-host-read-only-cache.json");
+let appHostReadOnlyCacheLoaded = false;
+let appHostReadOnlyCacheSaveTimer = null;
 
 function byteLength(value) {
   // WebSocket bufferedAmount 用字节衡量；日志里也统一按 UTF-8 字节估算，方便对齐网络层现象。
@@ -81,7 +96,7 @@ function wsCompressionOptions() {
 
 // ws-hub 不理解官方 IPC 协议，只负责维护连接和按 clientId 投递 JSON 消息。
 /** 创建 WebSocket hub，负责浏览器连接管理和 gateway 事件分发。 */
-function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAuthed }) {
+function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAuthed, invokeIpc }) {
   if (!WebSocketServer) {
     throw new Error("The ws package is required for gateway websocket support.");
   }
@@ -101,6 +116,9 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   const clients = new Set();
   // clientsById 是定向回包索引；clients 是广播索引，二者都需要维护。
   const clientsById = new Map();
+  // 手机刷新/退后台时 WS 会短暂消失；定向事件先短时缓存，重连 hello 后再按原 clientId 回放。
+  const pendingTargetMessagesByClientId = new Map();
+  const pendingOrphanTargetResponses = [];
   let lastAuthRejectLogAtMs = 0;
   let suppressedAuthRejectCount = 0;
   const appHostTraffic = new Map();
@@ -178,6 +196,296 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     // 页面关闭时把该 client 的聚合窗口立即写出，方便复现后马上看完整统计。
     for (const [key, stat] of appHostTraffic.entries()) {
       if (stat.clientId === clientId) flushAppHostTraffic(key);
+    }
+  }
+
+  function parseAppHostRpcFrame(data) {
+    if (typeof data !== "string" || data.trim() === "") return null;
+    try {
+      const parsed = JSON.parse(data);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function stableAppHostCachePart(value, seen = new WeakSet()) {
+    if (value == null || typeof value !== "object") return value;
+    if (seen.has(value)) return "[Circular]";
+    seen.add(value);
+    if (Array.isArray(value)) return value.map((item) => stableAppHostCachePart(item, seen));
+    const result = {};
+    for (const key of Object.keys(value).sort()) {
+      if (key === "id" || key === "requestId") continue;
+      result[key] = stableAppHostCachePart(value[key], seen);
+    }
+    return result;
+  }
+
+  function appHostReadOnlyCacheKey(message) {
+    if (!message || typeof message !== "object") return "";
+    const method = appHostReadOnlyMethod(message);
+    if (!APP_HOST_READ_ONLY_METHODS.has(method)) return "";
+    if (!appHostRpcId(message)) return "";
+    try {
+      return JSON.stringify({
+        method,
+        params: stableAppHostCachePart(message.params),
+        request: stableAppHostCachePart(message.request),
+      });
+    } catch {
+      return method;
+    }
+  }
+
+  function appHostReadOnlyMethod(message) {
+    if (!message || typeof message !== "object") return "";
+    if (typeof message.method === "string") return message.method;
+    if (message.request && typeof message.request === "object" && typeof message.request.method === "string") {
+      return message.request.method;
+    }
+    if (message.payload && typeof message.payload === "object" && typeof message.payload.method === "string") {
+      return message.payload.method;
+    }
+    if (message.params && typeof message.params === "object" && typeof message.params.method === "string") {
+      // 官方 JSON-RPC 有些只读请求把方法包在 params.method，归一化后才能命中缓存。
+      return message.params.method;
+    }
+    return "";
+  }
+
+  function appHostRpcId(message) {
+    // 官方 app-host RPC 的 id 可能在顶层，也可能包在 request 里；统一转字符串便于映射回包。
+    const id = routeIdFromPayload(message);
+    return id ? String(id) : "";
+  }
+
+  function appHostRpcRawId(message) {
+    if (!message || typeof message !== "object") return null;
+    if (message.id != null) return message.id;
+    if (message.request && typeof message.request === "object" && message.request.id != null) return message.request.id;
+    return appHostRpcId(message) || null;
+  }
+
+  function appHostRpcResponseForRequest(message, result) {
+    const response = {
+      id: appHostRpcRawId(message),
+      result,
+    };
+    if (message && typeof message === "object" && message.jsonrpc != null) response.jsonrpc = message.jsonrpc;
+    return response;
+  }
+
+  function sendAppHostRpcResult(ws, portId, message, result) {
+    safeSend(
+      ws,
+      {
+        type: "app-host-port-message",
+        portId,
+        data: JSON.stringify(appHostRpcResponseForRequest(message, result)),
+      },
+      { suppressDiagnostic: true }
+    );
+  }
+
+  function maybeHandleAppHostLocalRequest(ws, portId, data) {
+    const message = parseAppHostRpcFrame(data);
+    const method = appHostReadOnlyMethod(message);
+    if (DEBUG_LOGS && method) {
+      diagnosticLog("ws-hub", "app_host_rpc_method", {
+        method,
+        portId: shortId(portId),
+      });
+    }
+    if (method !== "locale-info") return false;
+    const locale = resolveOpenCodexI18n().locale || "zh-CN";
+    // 官方 IntlProvider 会在启动期读取 locale-info；这里直接给中文，确保官方语言包按 zh-CN 加载。
+    sendAppHostRpcResult(ws, portId, message, {
+      ideLocale: locale,
+      systemLocale: locale,
+    });
+    if (DEBUG_LOGS) diagnosticLog("ws-hub", "app_host_locale_info_local_response", { locale });
+    return true;
+  }
+
+  function appHostReadOnlyCacheDiskKey(cacheKey) {
+    return crypto.createHash("sha256").update(String(cacheKey)).digest("base64url");
+  }
+
+  function loadAppHostReadOnlyCache() {
+    if (appHostReadOnlyCacheLoaded) return;
+    appHostReadOnlyCacheLoaded = true;
+    try {
+      const raw = fs.readFileSync(APP_HOST_READ_ONLY_CACHE_FILE, "utf-8");
+      const parsed = JSON.parse(raw);
+      const entries = parsed && typeof parsed === "object" && parsed.entries && typeof parsed.entries === "object"
+        ? parsed.entries
+        : {};
+      const nowMs = Date.now();
+      for (const entry of Object.values(entries)) {
+        if (!entry || typeof entry !== "object") continue;
+        if (typeof entry.cacheKey !== "string" || !entry.message || typeof entry.expiresAtMs !== "number") continue;
+        if (entry.expiresAtMs <= nowMs) continue;
+        appHostReadOnlyCache.set(entry.cacheKey, {
+          expiresAtMs: entry.expiresAtMs,
+          message: entry.message,
+        });
+      }
+      if (DEBUG_LOGS) {
+        diagnosticLog("ws-hub", "app_host_read_only_cache_loaded", {
+          count: appHostReadOnlyCache.size,
+        });
+      }
+    } catch (error) {
+      if (error && error.code !== "ENOENT" && DEBUG_LOGS) {
+        diagnosticWarn("ws-hub", "app_host_read_only_cache_load_failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  function saveAppHostReadOnlyCacheNow() {
+    appHostReadOnlyCacheSaveTimer = null;
+    try {
+      ensureDir(path.dirname(APP_HOST_READ_ONLY_CACHE_FILE));
+      const nowMs = Date.now();
+      const entries = {};
+      for (const [cacheKey, entry] of appHostReadOnlyCache) {
+        if (!entry || entry.expiresAtMs <= nowMs) continue;
+        entries[appHostReadOnlyCacheDiskKey(cacheKey)] = {
+          cacheKey,
+          expiresAtMs: entry.expiresAtMs,
+          message: entry.message,
+        };
+      }
+      const tmpFile = `${APP_HOST_READ_ONLY_CACHE_FILE}.tmp`;
+      fs.writeFileSync(tmpFile, JSON.stringify({ version: 1, entries }), "utf-8");
+      fs.renameSync(tmpFile, APP_HOST_READ_ONLY_CACHE_FILE);
+    } catch (error) {
+      if (DEBUG_LOGS) {
+        diagnosticWarn("ws-hub", "app_host_read_only_cache_save_failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  function scheduleAppHostReadOnlyCacheSave() {
+    if (appHostReadOnlyCacheSaveTimer) return;
+    appHostReadOnlyCacheSaveTimer = setTimeout(saveAppHostReadOnlyCacheNow, 500);
+    if (appHostReadOnlyCacheSaveTimer && typeof appHostReadOnlyCacheSaveTimer.unref === "function") {
+      appHostReadOnlyCacheSaveTimer.unref();
+    }
+  }
+
+  function cloneAppHostRpcWithId(value, oldId, nextId) {
+    if (value == null || typeof value !== "object") {
+      return String(value) === String(oldId) ? nextId : value;
+    }
+    if (Array.isArray(value)) return value.map((item) => cloneAppHostRpcWithId(item, oldId, nextId));
+    const cloned = {};
+    for (const [key, item] of Object.entries(value)) {
+      cloned[key] =
+        (key === "id" || key === "requestId") && String(item) === String(oldId)
+          ? nextId
+          : cloneAppHostRpcWithId(item, oldId, nextId);
+    }
+    return cloned;
+  }
+
+  function cloneAppHostRpcResponse(template, id) {
+    const oldId = appHostRpcId(template);
+    const cloned = cloneAppHostRpcWithId(template, oldId, id);
+    return JSON.stringify(cloned);
+  }
+
+  function pruneAppHostReadOnlyCache(nowMs) {
+    for (const [key, entry] of appHostReadOnlyCache) {
+      if (!entry || entry.expiresAtMs <= nowMs) appHostReadOnlyCache.delete(key);
+    }
+  }
+
+  function appHostRelayRequestMap(relay) {
+    if (!relay.__codexReadOnlyRequestKeys) relay.__codexReadOnlyRequestKeys = new Map();
+    return relay.__codexReadOnlyRequestKeys;
+  }
+
+  function sendAppHostCachedResponse(ws, portId, cachedMessage, id) {
+    safeSend(
+      ws,
+      {
+        type: "app-host-port-message",
+        portId,
+        data: cloneAppHostRpcResponse(cachedMessage, id),
+      },
+      { suppressDiagnostic: true }
+    );
+  }
+
+  function maybeHandleAppHostReadOnlyRequest(ws, portId, relay, data) {
+    const message = parseAppHostRpcFrame(data);
+    const cacheKey = appHostReadOnlyCacheKey(message);
+    if (!cacheKey) return false;
+    loadAppHostReadOnlyCache();
+    const nowMs = Date.now();
+    pruneAppHostReadOnlyCache(nowMs);
+    const cached = appHostReadOnlyCache.get(cacheKey);
+    if (cached && cached.expiresAtMs > nowMs) {
+      // 只读 RPC 命中短缓存时直接回给浏览器，避免在 DERP/弱网下重复穿透官方 app-server。
+      sendAppHostCachedResponse(ws, portId, cached.message, appHostRpcId(message));
+      if (DEBUG_LOGS) diagnosticLog("ws-hub", "app_host_read_only_cache_hit", { method: appHostReadOnlyMethod(message) });
+      return true;
+    }
+    const inFlight = appHostReadOnlyInFlight.get(cacheKey);
+    if (inFlight) {
+      // 同一页面启动期常会并发请求相同列表；复用首个请求的回包即可。
+      inFlight.waiters.push({ ws, portId, id: appHostRpcId(message) });
+      if (DEBUG_LOGS) {
+        diagnosticLog("ws-hub", "app_host_read_only_inflight_join", {
+          method: appHostReadOnlyMethod(message),
+          waiterCount: inFlight.waiters.length,
+        });
+      }
+      return true;
+    }
+    appHostReadOnlyInFlight.set(cacheKey, {
+      method: appHostReadOnlyMethod(message),
+      startedAtMs: nowMs,
+      waiters: [],
+    });
+    appHostRelayRequestMap(relay).set(appHostRpcId(message), cacheKey);
+    return false;
+  }
+
+  function maybeHandleAppHostReadOnlyResponse(ws, portId, relay, data) {
+    const message = parseAppHostRpcFrame(data);
+    const messageId = appHostRpcId(message);
+    if (!message || !messageId) return;
+    const requestMap = appHostRelayRequestMap(relay);
+    const cacheKey = requestMap.get(messageId);
+    if (!cacheKey) return;
+    requestMap.delete(messageId);
+    const inFlight = appHostReadOnlyInFlight.get(cacheKey);
+    if (inFlight) appHostReadOnlyInFlight.delete(cacheKey);
+    if (!message.error) {
+      // 只缓存成功响应；错误仍按官方原样透传，避免把瞬时失败固定住。
+      appHostReadOnlyCache.set(cacheKey, {
+        expiresAtMs: Date.now() + APP_HOST_READ_ONLY_CACHE_TTL_MS,
+        message,
+      });
+      scheduleAppHostReadOnlyCacheSave();
+    }
+    if (inFlight && inFlight.waiters.length > 0) {
+      for (const waiter of inFlight.waiters) {
+        sendAppHostCachedResponse(waiter.ws, waiter.portId, message, waiter.id);
+      }
+      diagnosticLog("ws-hub", "app_host_read_only_inflight_resolved", {
+        elapsedMs: Date.now() - inFlight.startedAtMs,
+        method: inFlight.method,
+        ok: !message.error,
+        waiterCount: inFlight.waiters.length,
+      });
     }
   }
 
@@ -281,6 +589,126 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     }
   }
 
+  function pendingTargetMessages(clientId) {
+    let queue = pendingTargetMessagesByClientId.get(clientId);
+    if (!queue) {
+      queue = [];
+      pendingTargetMessagesByClientId.set(clientId, queue);
+    }
+    return queue;
+  }
+
+  function prunePendingTargetMessages(clientId, nowMs = Date.now()) {
+    const queue = pendingTargetMessagesByClientId.get(clientId);
+    if (!queue) return [];
+    const fresh = queue.filter((entry) => entry && nowMs - entry.atMs <= TARGET_RECONNECT_BUFFER_TTL_MS);
+    if (fresh.length === 0) {
+      pendingTargetMessagesByClientId.delete(clientId);
+      return [];
+    }
+    if (fresh.length !== queue.length) pendingTargetMessagesByClientId.set(clientId, fresh);
+    return fresh;
+  }
+
+  function rememberPendingTargetMessage(clientId, payload, options = {}) {
+    if (!clientId || TARGET_RECONNECT_BUFFER_TTL_MS <= 0 || TARGET_RECONNECT_BUFFER_MAX_MESSAGES <= 0) return;
+    const queue = prunePendingTargetMessages(clientId);
+    queue.push({
+      atMs: Date.now(),
+      options: {
+        diagnosticSummary: options.diagnosticSummary,
+        suppressDiagnostic: true,
+      },
+      payload,
+    });
+    while (queue.length > TARGET_RECONNECT_BUFFER_MAX_MESSAGES) queue.shift();
+    pendingTargetMessagesByClientId.set(clientId, queue);
+  }
+
+  function isRouteableRendererResponse(payload) {
+    if (!payload || typeof payload !== "object") return false;
+    if (payload.channel !== "codex_desktop:message-for-view") return false;
+    return !!routeIdFromPayload(payload);
+  }
+
+  function pruneOrphanTargetResponses(nowMs = Date.now()) {
+    if (!pendingOrphanTargetResponses.length) return [];
+    let writeIndex = 0;
+    for (const entry of pendingOrphanTargetResponses) {
+      if (entry && nowMs - entry.atMs <= ORPHAN_TARGET_RESPONSE_BUFFER_TTL_MS) {
+        pendingOrphanTargetResponses[writeIndex] = entry;
+        writeIndex += 1;
+      }
+    }
+    pendingOrphanTargetResponses.length = writeIndex;
+    return pendingOrphanTargetResponses;
+  }
+
+  function rememberOrphanTargetResponse(clientId, payload, options = {}) {
+    if (
+      ORPHAN_TARGET_RESPONSE_BUFFER_TTL_MS <= 0 ||
+      ORPHAN_TARGET_RESPONSE_BUFFER_MAX_MESSAGES <= 0 ||
+      !isRouteableRendererResponse(payload)
+    ) {
+      return;
+    }
+    const queue = pruneOrphanTargetResponses();
+    queue.push({
+      atMs: Date.now(),
+      clientId,
+      options: {
+        diagnosticSummary: options.diagnosticSummary,
+        suppressDiagnostic: true,
+      },
+      payload,
+    });
+    while (queue.length > ORPHAN_TARGET_RESPONSE_BUFFER_MAX_MESSAGES) queue.shift();
+  }
+
+  function flushOrphanTargetResponses(socket, clientId) {
+    const queue = pruneOrphanTargetResponses();
+    if (!queue.length || !socket || socket.readyState !== socket.OPEN) return;
+    pendingOrphanTargetResponses.length = 0;
+    let sent = 0;
+    for (const entry of queue) {
+      const { message, stringifyMs } = stringifyForWs(entry.payload);
+      if (
+        sendPrepared(socket, entry.payload, message, {
+          ...entry.options,
+          route: "orphan_target_response_replay",
+          stringifyMs,
+        })
+      ) {
+        sent += 1;
+      }
+    }
+    diagnosticLog("ws-hub", "orphan_target_response_replay_flushed", {
+      clientId: shortId(clientId),
+      queued: queue.length,
+      sent,
+    });
+  }
+
+  function flushPendingTargetMessages(socket, clientId) {
+    const queue = prunePendingTargetMessages(clientId);
+    if (!queue.length) return;
+    pendingTargetMessagesByClientId.delete(clientId);
+    let sent = 0;
+    for (const entry of queue) {
+      if (!socket || socket.readyState !== socket.OPEN) {
+        rememberPendingTargetMessage(clientId, entry.payload, entry.options);
+        continue;
+      }
+      const { message, stringifyMs } = stringifyForWs(entry.payload);
+      if (sendPrepared(socket, entry.payload, message, { ...entry.options, route: "reconnect_replay", stringifyMs })) sent += 1;
+    }
+    diagnosticLog("ws-hub", "reconnect_replay_flushed", {
+      clientId: shortId(clientId),
+      queued: queue.length,
+      sent,
+    });
+  }
+
   function stringifyForWs(payload) {
     // JSON.stringify 是必须成本；只有 debug 模式才额外记录它用了多久。
     if (!WS_DEBUG_ENABLED) return { message: JSON.stringify(payload), stringifyMs: 0 };
@@ -370,10 +798,33 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return sent;
   }
 
+  /** 向除指定 clientId 之外的在线浏览器广播 gateway 消息。 */
+  function broadcastExcept(excludedClientId, payload, options = {}) {
+    const { message, stringifyMs } = stringifyForWs(payload);
+    let sent = 0;
+    for (const socket of clients) {
+      if (socket.readyState !== socket.OPEN) continue;
+      if (excludedClientId && socketClientId(socket) === excludedClientId) continue;
+      if (sendPrepared(socket, payload, message, { ...options, route: "broadcast_except", stringifyMs })) sent += 1;
+    }
+    if (DEBUG_LOGS && !options.suppressDiagnostic) {
+      // 跨端同步提示只发给其它屏幕，默认不写高频日志；排查多端同步时再打开 debug。
+      diagnosticLog("ws-hub", "broadcast_except", {
+        ...wsPayloadSummary(payload),
+        excludedClientId: shortId(excludedClientId),
+        clientCount: clients.size,
+        sent,
+      });
+    }
+    return sent;
+  }
+
   /** 向指定 clientId 的浏览器发送 gateway 消息。 */
   function sendTo(clientId, payload, options = {}) {
     const socket = clientsById.get(clientId);
     if (!socket || socket.readyState !== socket.OPEN) {
+      rememberPendingTargetMessage(clientId, payload, options);
+      rememberOrphanTargetResponse(clientId, payload, options);
       diagnosticWarn("ws-hub", "send_to_missing_client", {
         ...wsPayloadSummary(payload),
         clientId: shortId(clientId),
@@ -479,6 +930,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
         },
         onMessage(data) {
           // app-host RPC 是高频字符串流，只转发不逐条写日志，避免首屏日志刷屏和拖慢关键链路。
+          maybeHandleAppHostReadOnlyResponse(ws, portId, relay, data);
           safeSend(ws, { type: "app-host-port-message", portId, data }, { suppressDiagnostic: true });
         },
       });
@@ -542,14 +994,56 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       return true;
     }
     if (WS_DEBUG_ENABLED && typeof data === "string") recordAppHostTraffic(ws, "browser-to-official", portId, byteLength(data));
+    if (maybeHandleAppHostLocalRequest(ws, portId, data)) return true;
+    if (maybeHandleAppHostReadOnlyRequest(ws, portId, relay, data)) return true;
     relay.postMessage(data);
     // null 是关闭信号，发送给官方后即可从索引移除，后续 close 回调再到达也不会重复处理。
     if (data == null && relays.get(portId) === relay) relays.delete(portId);
+   return true;
+ }
+
+  /**
+   * 浏览器通过 WS 发起 IPC 调用，避免每次 IPC 都新建一次 HTTP 请求。
+   * 复用同一条已认证 WS 连接，结果通过 ipc-result 帧原路返回。
+   */
+  async function handleIpcInvokeViaWs(ws, message) {
+    const requestId = typeof message.requestId === "string" ? message.requestId : "";
+    const channel = typeof message.channel === "string" ? message.channel : "";
+    const args = Array.isArray(message.args) ? message.args : [];
+    const clientId = socketClientId(ws);
+    const remoteAddress = socketRemoteAddress(ws);
+    const startedAtMs = Date.now();
+    const resultPayload = { type: "ipc-result", requestId, clientId };
+    try {
+      const value = await invokeIpc({ channel, args, clientId, remoteAddress });
+      resultPayload.ok = true;
+      resultPayload.value = value;
+    } catch (error) {
+      resultPayload.ok = false;
+      resultPayload.error = error instanceof Error ? error.message : String(error);
+      if (error && typeof error.status === "number") resultPayload.status = error.status;
+    }
+    const elapsedMs = Date.now() - startedAtMs;
+    if (DEBUG_LOGS && elapsedMs >= 500) {
+      diagnosticLog("ws-hub", "ipc_invoke_slow", {
+        channel,
+        clientId: shortId(clientId),
+        elapsedMs,
+        ok: resultPayload.ok,
+        requestId,
+      });
+    }
+    const resultStr = JSON.stringify(resultPayload);
+    sendPrepared(ws, resultPayload, resultStr, { route: "ipc-result" });
     return true;
   }
 
   function handleWsControlMessage(ws, req, message) {
     if (!message || typeof message !== "object") return false;
+    if (message.type === "ipc-invoke" && typeof invokeIpc === "function") {
+      handleIpcInvokeViaWs(ws, message);
+      return true;
+    }
     if (message.type === "opencodex:notification-event") {
       // 通知 click/close 只从已认证 WS 回传；hub 不理解官方通知语义，直接交回 runtime 的 fake Notification。
       return typeof handleNotificationEvent === "function" ? handleNotificationEvent(message, ws, req) : true;
@@ -594,6 +1088,8 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
             // 后来重复 hello 时直接覆盖映射，保证同一 clientId 指向最新连接。
             ws.__codexWebClientId = clientId;
             clientsById.set(clientId, ws);
+            flushPendingTargetMessages(ws, clientId);
+            flushOrphanTargetResponses(ws, clientId);
             if (DEBUG_LOGS) {
               diagnosticLog("ws-hub", "hello", {
                 clientId: shortId(clientId),
@@ -648,7 +1144,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     });
   });
 
-  return { broadcast, clients, sendTo, hasClient };
+  return { broadcast, broadcastExcept, clients, sendTo, hasClient };
 }
 
 module.exports = { createWsHub };

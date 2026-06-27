@@ -1,4 +1,5 @@
 const childProcess = require("child_process");
+const crypto = require("crypto");
 const electron = require("electron");
 const fs = require("fs");
 const os = require("os");
@@ -46,6 +47,16 @@ const requestContext = new AsyncLocalStorage();
 const requestRoutes = new Map();
 // requestRouteSummaries 保存 requestId 对应的入站摘要，让出站 fetch-response 日志也能带上原始 URL。
 const requestRouteSummaries = new Map();
+const APP_SERVER_READ_ONLY_CACHE_TTL_MS = Number(process.env.OPENCODEX_APP_SERVER_READ_ONLY_CACHE_TTL_MS || 5 * 60 * 1000);
+const APP_SERVER_READ_ONLY_METHODS = new Set(["app/list", "mcpServerStatus/list", "plugin/list", "thread/list"]);
+const APP_SERVER_STALE_READ_ONLY_METHODS = new Set(["app/list", "mcpServerStatus/list", "plugin/list"]);
+const APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS = Number(
+  process.env.OPENCODEX_APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS || 24 * 60 * 60 * 1000
+);
+const APP_SERVER_READ_ONLY_CACHE_FILE = path.join(RUNTIME_DIR, "cache", "app-server-read-only-cache.json");
+const appServerReadOnlyCache = new Map();
+let appServerReadOnlyCacheLoaded = false;
+let appServerReadOnlyCacheSaveTimer = null;
 let officialBundle = null;
 let wsHub = null;
 
@@ -667,9 +678,265 @@ function incomingIpcDiagnosticSummary(channel, payload) {
     if (message.request && typeof message.request === "object") {
       if (message.request.id != null) summary.requestId = String(message.request.id);
       if (typeof message.request.method === "string") summary.requestMethod = message.request.method;
+      // 官方 app-host 兼容层有时把真实方法放在 request.method；缓存层统一看 summary.method。
+      if (!summary.method && typeof message.request.method === "string") summary.method = message.request.method;
+    }
+    if (message.params && typeof message.params === "object" && typeof message.params.method === "string") {
+      // 某些 JSON-RPC 包装会把 app-server 方法藏在 params.method，这里也归一化到 method。
+      if (!summary.method) summary.method = message.params.method;
     }
   }
   return summary;
+}
+
+function stableReadOnlyCachePart(value, seen = new WeakSet()) {
+  if (value == null || typeof value !== "object") return value;
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+  if (Array.isArray(value)) return value.map((item) => stableReadOnlyCachePart(item, seen));
+  const result = {};
+  for (const key of Object.keys(value).sort()) {
+    if (key === "id" || key === "requestId") continue;
+    result[key] = stableReadOnlyCachePart(value[key], seen);
+  }
+  return result;
+}
+
+function readOnlyAppServerMethodFromSummary(summary) {
+  const method = summary && typeof summary.method === "string" ? summary.method : "";
+  return APP_SERVER_READ_ONLY_METHODS.has(method) ? method : "";
+}
+
+function readOnlyAppServerMethodFromCacheKey(cacheKey) {
+  try {
+    const parsed = JSON.parse(String(cacheKey || ""));
+    const method = parsed && typeof parsed.method === "string" ? parsed.method : "";
+    return APP_SERVER_READ_ONLY_METHODS.has(method) ? method : "";
+  } catch {
+    for (const method of APP_SERVER_READ_ONLY_METHODS) {
+      if (String(cacheKey || "").includes(method)) return method;
+    }
+    return "";
+  }
+}
+
+function readOnlyAppServerCacheKey(channel, invokeArgs, summary) {
+  const method = readOnlyAppServerMethodFromSummary(summary);
+  if (!method) return "";
+  try {
+    return JSON.stringify({
+      channel,
+      method,
+      args: stableReadOnlyCachePart(invokeArgs),
+    });
+  } catch {
+    return `${channel}:${method}`;
+  }
+}
+
+function canServeStaleReadOnlyCache(method, entry, nowMs = Date.now()) {
+  if (!APP_SERVER_STALE_READ_ONLY_METHODS.has(method)) return false;
+  if (!entry || typeof entry.expiresAtMs !== "number") return false;
+  // app/plugin/MCP 状态只是辅助 UI。Win 上这些扫描可能十几秒，允许短期过期缓存先撑住对话加载。
+  return entry.expiresAtMs + APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS > nowMs;
+}
+
+function readOnlyCacheDiskKey(cacheKey) {
+  return crypto.createHash("sha256").update(String(cacheKey)).digest("base64url");
+}
+
+function loadReadOnlyAppServerCache() {
+  if (appServerReadOnlyCacheLoaded) return;
+  appServerReadOnlyCacheLoaded = true;
+  try {
+    const raw = fs.readFileSync(APP_SERVER_READ_ONLY_CACHE_FILE, "utf-8");
+    const parsed = JSON.parse(raw);
+    const entries = parsed && typeof parsed === "object" && parsed.entries && typeof parsed.entries === "object"
+      ? parsed.entries
+      : {};
+    const nowMs = Date.now();
+    for (const entry of Object.values(entries)) {
+      if (!entry || typeof entry !== "object") continue;
+      if (typeof entry.cacheKey !== "string" || typeof entry.expiresAtMs !== "number") continue;
+      if (!entry.response || typeof entry.response !== "object") continue;
+      const method = readOnlyAppServerMethodFromSummary({ method: entry.method || "" }) || readOnlyAppServerMethodFromCacheKey(entry.cacheKey);
+      if (entry.expiresAtMs <= nowMs && !canServeStaleReadOnlyCache(method, entry, nowMs)) continue;
+      appServerReadOnlyCache.set(entry.cacheKey, {
+        expiresAtMs: entry.expiresAtMs,
+        method,
+        response: entry.response,
+      });
+    }
+  } catch (error) {
+    if (error && error.code !== "ENOENT" && DEBUG_LOGS) {
+      diagnosticWarn("official-runtime", "read_only_cache_load_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
+function saveReadOnlyAppServerCacheNow() {
+  appServerReadOnlyCacheSaveTimer = null;
+  try {
+    ensureDir(path.dirname(APP_SERVER_READ_ONLY_CACHE_FILE));
+    const nowMs = Date.now();
+    const entries = {};
+    for (const [cacheKey, entry] of appServerReadOnlyCache) {
+      if (!entry) continue;
+      if (entry.expiresAtMs <= nowMs && !canServeStaleReadOnlyCache(entry.method || "", entry, nowMs)) continue;
+      entries[readOnlyCacheDiskKey(cacheKey)] = {
+        cacheKey,
+        expiresAtMs: entry.expiresAtMs,
+        method: entry.method || readOnlyAppServerMethodFromCacheKey(cacheKey),
+        response: entry.response,
+      };
+    }
+    const tmpFile = `${APP_SERVER_READ_ONLY_CACHE_FILE}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify({ version: 1, entries }), "utf-8");
+    fs.renameSync(tmpFile, APP_SERVER_READ_ONLY_CACHE_FILE);
+  } catch (error) {
+    if (DEBUG_LOGS) {
+      diagnosticWarn("official-runtime", "read_only_cache_save_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
+function scheduleReadOnlyAppServerCacheSave() {
+  if (appServerReadOnlyCacheSaveTimer) return;
+  appServerReadOnlyCacheSaveTimer = setTimeout(saveReadOnlyAppServerCacheNow, 500);
+  if (appServerReadOnlyCacheSaveTimer && typeof appServerReadOnlyCacheSaveTimer.unref === "function") {
+    appServerReadOnlyCacheSaveTimer.unref();
+  }
+}
+
+function cloneWithReplacement(value, oldRequestId, nextRequestId) {
+  if (value == null || typeof value !== "object") {
+    return value === oldRequestId ? nextRequestId : value;
+  }
+  if (Array.isArray(value)) return value.map((item) => cloneWithReplacement(item, oldRequestId, nextRequestId));
+  const result = {};
+  for (const [key, item] of Object.entries(value)) {
+    result[key] =
+      (key === "id" || key === "requestId") && String(item) === String(oldRequestId)
+        ? nextRequestId
+        : cloneWithReplacement(item, oldRequestId, nextRequestId);
+  }
+  return result;
+}
+
+function cachedResponseForRequest(entry, requestId) {
+  const response = entry && entry.response;
+  if (!response || typeof response !== "object") return null;
+  return {
+    channel: response.channel,
+    args: cloneWithReplacement(response.args, response.requestId, requestId),
+  };
+}
+
+function maybeSendFallbackMcpResponse(channel, invokeArgs, context, summary, result) {
+  if (!wsHub || !context || !context.clientId) return false;
+  const requestId = requestRouteIdFromIncoming(channel, invokeArgs);
+  if (!requestId) return false;
+  const incoming = payloadFromArgs(invokeArgs);
+  const args = [
+    {
+      type: "mcp-response",
+      hostId: (incoming && typeof incoming === "object" && incoming.hostId) || "local",
+      message: {
+        id: requestId,
+        result,
+      },
+    },
+  ];
+  const payload = payloadFromArgs(args);
+  const routeBase = {
+    ...outgoingIpcDiagnosticSummary(MESSAGE_FOR_VIEW_CHANNEL, args, summary),
+    fallback: true,
+    mapped: true,
+    targetClientId: shortId(context.clientId),
+  };
+  return wsHub.sendTo(
+    context.clientId,
+    { channel: MESSAGE_FOR_VIEW_CHANNEL, payload, args },
+    { suppressDiagnostic: shouldSuppressRoutineRouteDiagnostic(routeBase), diagnosticSummary: routeBase }
+  );
+}
+
+function cloneCacheableResponseArgs(args) {
+  try {
+    // 缓存只保存可序列化的回包快照，避免后续路由过程意外改动内存对象。
+    return JSON.parse(JSON.stringify(args));
+  } catch {
+    return null;
+  }
+}
+
+function maybeServeReadOnlyAppServerCache(channel, invokeArgs, context, summary, cacheKey) {
+  if (!cacheKey || !wsHub || !context || !context.clientId) return false;
+  loadReadOnlyAppServerCache();
+  const method = readOnlyAppServerMethodFromSummary(summary);
+  const cached = appServerReadOnlyCache.get(cacheKey);
+  const nowMs = Date.now();
+  const isFresh = cached && cached.expiresAtMs > nowMs;
+  const isStaleUsable = cached && canServeStaleReadOnlyCache(method, cached, nowMs);
+  if (!cached || (!isFresh && !isStaleUsable)) {
+    if (method === "mcpServerStatus/list") {
+      // MCP 状态只是工具面板辅助信息；没有缓存时用空列表兜底，避免 Win 慢扫描阻塞会话正文。
+      return maybeSendFallbackMcpResponse(channel, invokeArgs, context, summary, { data: [], nextCursor: null });
+    }
+    return false;
+  }
+  const requestId = requestRouteIdFromIncoming(channel, invokeArgs);
+  if (!requestId) return false;
+  const response = cachedResponseForRequest(cached, requestId);
+  if (!response || typeof response.channel !== "string" || !Array.isArray(response.args)) return false;
+  const payload = payloadFromArgs(response.args);
+  const routeBase = {
+    ...outgoingIpcDiagnosticSummary(response.channel, response.args, summary),
+    cached: true,
+    mapped: true,
+    targetClientId: shortId(context.clientId),
+  };
+  const sent = wsHub.sendTo(
+    context.clientId,
+    { channel: response.channel, payload, args: response.args },
+    { suppressDiagnostic: shouldSuppressRoutineRouteDiagnostic(routeBase), diagnosticSummary: routeBase }
+  );
+  if (sent) {
+    if (DEBUG_LOGS) {
+      diagnosticLog("official-runtime", "read_only_cache_hit", {
+        method: summary.method,
+        requestId: shortId(requestId),
+        stale: !isFresh,
+      });
+    }
+    return true;
+  }
+  return false;
+}
+
+function rememberReadOnlyAppServerResponse(channel, args, requestSummary, requestId) {
+  const method = readOnlyAppServerMethodFromSummary(requestSummary);
+  if (!method || !requestId) return;
+  const cacheKey = requestSummary && requestSummary.cacheKey;
+  if (!cacheKey) return;
+  const payload = payloadFromArgs(args);
+  if (payload && typeof payload === "object" && payload.error) return;
+  const cacheableArgs = cloneCacheableResponseArgs(args);
+  if (!cacheableArgs) return;
+  appServerReadOnlyCache.set(cacheKey, {
+    expiresAtMs: Date.now() + APP_SERVER_READ_ONLY_CACHE_TTL_MS,
+    method,
+    response: {
+      args: cacheableArgs,
+      channel,
+      requestId,
+    },
+  });
+  scheduleReadOnlyAppServerCacheSave();
 }
 
 function fetchMessageFromIpcArgs(args) {
@@ -677,6 +944,91 @@ function fetchMessageFromIpcArgs(args) {
   if (!payload || typeof payload !== "object") return null;
   if (payload.type !== "fetch") return null;
   return typeof payload.url === "string" ? payload : null;
+}
+
+function isStatsigBootstrapFetchMessage(message) {
+  if (!message || typeof message !== "object") return false;
+  return String(message.url || "").replace(/^vscode:\/\/codex/i, "") === "/wham/statsig/bootstrap";
+}
+
+function isLocaleInfoFetchMessage(message) {
+  if (!message || typeof message !== "object") return false;
+  return /(?:^|\/)locale-info$/i.test(String(message.url || ""));
+}
+
+function nonCriticalFetchBodyForUrl(url) {
+  try {
+    const parsed = new URL(String(url || ""), "https://chatgpt.com");
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    if (parsed.hostname === "ab.chatgpt.com" && pathname === "/v1/initialize") {
+      return {
+        has_updates: false,
+        time: Date.now(),
+        feature_gates: {},
+        dynamic_configs: {},
+        layer_configs: {},
+        param_stores: {},
+        exposures: {},
+        sdk_flags: {},
+      };
+    }
+    if (parsed.hostname === "chatgpt.com" && (pathname === "/ces/v1/rgstr" || pathname === "/ces/v1/log_event")) {
+      return {};
+    }
+    if (pathname === "/beacons/home") return {};
+    if (pathname === "/wham/usage") return {};
+    if (pathname === "/wham/tasks/list") {
+      return {
+        items: [],
+        tasks: [],
+      };
+    }
+  } catch {}
+  return null;
+}
+
+function sendFetchJsonResponse(message, body) {
+  const requestId = stringRouteId(message && message.requestId);
+  if (!requestId) return false;
+  routeOfficialWebContentsSend(MESSAGE_FOR_VIEW_CHANNEL, [
+    {
+      type: "fetch-response",
+      responseType: "success",
+      requestId,
+      status: 200,
+      headers: { "content-type": "application/json" },
+      bodyJsonString: JSON.stringify(body && typeof body === "object" ? body : {}),
+    },
+  ]);
+  return true;
+}
+
+function maybeHandleNonCriticalFetch(channel, args) {
+  if (channel !== MESSAGE_FROM_VIEW_CHANNEL) return false;
+  const message = fetchMessageFromIpcArgs(args);
+  const body = nonCriticalFetchBodyForUrl(message && message.url);
+  if (body === null) return false;
+  // 这些请求只影响遥测、实验和首页辅助信息；弱网下本地短路，避免它们挤占会话读取和发消息的 IPC 通道。
+  return sendFetchJsonResponse(message, body);
+}
+
+function normalizeOfficialI18nFetchRequest(channel, args) {
+  if (channel !== MESSAGE_FROM_VIEW_CHANNEL) return;
+  const message = fetchMessageFromIpcArgs(args);
+  if (!isStatsigBootstrapFetchMessage(message)) return;
+  const locale = getI18nSnapshot().locale || "zh-CN";
+  // 这里修改的是即将交给官方 fetch handler 的真实请求，确保官方 Statsig 服务按中文策略返回 i18n layer。
+  message.headers = {
+    ...(message.headers && typeof message.headers === "object" ? message.headers : {}),
+    "OAI-Language": locale,
+  };
+  try {
+    const body = message.body ? JSON.parse(message.body) : {};
+    if (body && typeof body === "object") {
+      body.locale = locale;
+      message.body = JSON.stringify(body);
+    }
+  } catch {}
 }
 
 function parseJsonLike(value) {
@@ -789,6 +1141,76 @@ function getI18nSnapshot() {
   return resolveOpenCodexI18n();
 }
 
+function sendLocaleInfoFetchResponse(message) {
+  const requestId = stringRouteId(message && message.requestId);
+  if (!requestId) return false;
+  const locale = getI18nSnapshot().locale || "zh-CN";
+  routeOfficialWebContentsSend(MESSAGE_FOR_VIEW_CHANNEL, [
+    {
+      type: "fetch-response",
+      responseType: "success",
+      requestId,
+      status: 200,
+      headers: { "content-type": "application/json" },
+      bodyJsonString: JSON.stringify({ ideLocale: locale, systemLocale: locale }),
+    },
+  ]);
+  return true;
+}
+
+function maybeHandleLocaleInfoFetch(channel, args) {
+  if (channel !== MESSAGE_FROM_VIEW_CHANNEL) return false;
+  const message = fetchMessageFromIpcArgs(args);
+  if (!isLocaleInfoFetchMessage(message)) return false;
+  /**
+   * 官方 renderer 的 i18n provider 通过 vscode://codex/locale-info 获取 IDE/系统语言。
+   * OpenCodex 没有外部 IDE 宿主，这里用官方 fetch-response 形状返回本地语言，让官方语言包解析继续走原生路径。
+   */
+  return sendLocaleInfoFetchResponse(message);
+}
+
+function fetchUrlPath(message) {
+  try {
+    return new URL(String(message && message.url ? message.url : ""), "vscode://codex").pathname.replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function fetchParamValue(message, name) {
+  try {
+    const parsed = new URL(String(message && message.url ? message.url : ""), "vscode://codex");
+    const value = parsed.searchParams.get(name);
+    if (value != null) return value;
+  } catch {}
+  const body = parseJsonLike(message && message.body) || parseJsonLike(message && message.bodyJsonString);
+  const params = body && typeof body.params === "object" ? body.params : null;
+  return String((params && params[name]) || (body && body[name]) || "");
+}
+
+function isDomainIsolationRemoteStateKey(key) {
+  // OpenCodex 使用域名隔离，不能把官方 Desktop 上次选择的 remote-control host 带进网页入口。
+  return key === "selected-remote-host-id" || String(key || "").startsWith("remote-thread-summaries:");
+}
+
+function maybeHandleDomainIsolationGlobalStateFetch(channel, args) {
+  if (channel !== MESSAGE_FROM_VIEW_CHANNEL) return false;
+  const message = fetchMessageFromIpcArgs(args);
+  if (!message) return false;
+  const pathname = fetchUrlPath(message);
+  const key = fetchParamValue(message, "key");
+  if (pathname === "/get-global-state" && isDomainIsolationRemoteStateKey(key)) {
+    return sendFetchJsonResponse(message, { value: null });
+  }
+  if (pathname === "/set-global-state" && isDomainIsolationRemoteStateKey(key)) {
+    return sendFetchJsonResponse(message, {});
+  }
+  if (pathname === "/set-remote-control-connections-enabled") {
+    return sendFetchJsonResponse(message, { enabled: false });
+  }
+  return false;
+}
+
 function logComputerUseAuthResponse(routeBase, payload) {
   const action = computerUseAuthActionFromUrl(routeBase && routeBase.url);
   if (!action || !payload || typeof payload !== "object") return;
@@ -840,6 +1262,34 @@ function shouldSuppressRoutineRouteDiagnostic(summary) {
   return summary && summary.type === "fetch-response" && isConnectorLogoUrl(summary.url);
 }
 
+function isCrossClientSyncCandidate(summary, payload) {
+  if (!summary || !payload || typeof payload !== "object") return false;
+  const type = String(payload.type || summary.type || "");
+  if (!/fetch-(?:response|stream-event)|stream/i.test(type)) return false;
+  const method = String(summary.method || payload.method || "").toUpperCase();
+  const url = String(summary.url || payload.url || "");
+  // 只把会改变会话状态的请求作为跨屏同步源；静态资源、i18n、logo 和只读 GET 不触发刷新。
+  if (method === "GET") return false;
+  if (/\/(?:wham|locale-info|aip\/connectors\/[^/]+\/logo)(?:[/?#]|$)/i.test(url)) return false;
+  return /vscode:\/\/codex|\/api\/|\/backend-api\/|\/conversation|\/thread|\/message|\/chat|\/run/i.test(url);
+}
+
+function notifyOtherClientsForSync(sourceClientId, summary, payload) {
+  if (!sourceClientId || !wsHub || typeof wsHub.broadcastExcept !== "function") return;
+  if (!isCrossClientSyncCandidate(summary, payload)) return;
+  wsHub.broadcastExcept(
+    sourceClientId,
+    {
+      type: "opencodex:sync-nudge",
+      sourceClientId,
+      reason: "conversation-mutated",
+      requestId: summary.requestId || "",
+      at: Date.now(),
+    },
+    { suppressDiagnostic: true }
+  );
+}
+
 function shouldKeepRequestRoute(channel, args) {
   const type = responsePayloadType(channel, args);
   // 只有流式中间事件保留路由；complete/error 或普通响应到达后即可释放映射。
@@ -866,12 +1316,12 @@ function isTargetedOutgoing(channel, payload) {
   return TARGETED_MESSAGE_TYPES.has(channel);
 }
 
-function rememberRequestRoute(channel, payload, clientId) {
+function rememberRequestRoute(channel, payload, clientId, summary = null) {
   if (!clientId) return;
   const requestId = requestRouteIdFromIncoming(channel, payload);
   if (requestId) {
     requestRoutes.set(requestId, clientId);
-    requestRouteSummaries.set(requestId, incomingIpcDiagnosticSummary(channel, payload));
+    requestRouteSummaries.set(requestId, summary || incomingIpcDiagnosticSummary(channel, payload));
   }
 }
 
@@ -917,6 +1367,8 @@ function routeOfficialWebContentsSend(channel, args) {
     mapped: !!mappedClientId,
     targetClientId: shortId(targetClientId),
   };
+  // 这些 app-server 列表是只读初始化数据；成功回包落盘后，重启网关也能先用热缓存撑住弱网首屏。
+  rememberReadOnlyAppServerResponse(channel, args, requestSummary, requestId);
   // 只对锁屏授权相关回包做结构化摘要，避免把大图标 dataURL 打进日志。
   logComputerUseAuthResponse(routeBase, payload);
   const suppressRouteDiagnostic = shouldSuppressRoutineRouteDiagnostic(routeBase);
@@ -930,6 +1382,8 @@ function routeOfficialWebContentsSend(channel, args) {
     diagnosticSummary: routeBase,
   };
   if (targetClientId && wsHub.sendTo(targetClientId, { channel, payload, args }, wsDiagnosticOptions)) {
+    // 发送端使用自己的 requestId 接流；其它屏幕只收到同步提示，由前端主动刷新当前会话状态。
+    notifyOtherClientsForSync(targetClientId, routeBase, payload);
     if (DEBUG_LOGS && !suppressRouteDiagnostic) {
       // 官方 IPC 定向成功投递会随每个请求回包出现，默认不落盘；DEBUG 时用于确认 requestId/clientId 路由。
       diagnosticLog("official-ipc-route", "send_to_client", { ...routeBase, route: "target" });
@@ -1113,8 +1567,17 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   await waitForOfficialBridgeReady();
   const event = createOfficialIpcEvent(context);
   const invokeArgs = normalizeIpcArgs(args);
+  normalizeOfficialI18nFetchRequest(channel, invokeArgs);
+  const requestSummary = incomingIpcDiagnosticSummary(channel, invokeArgs);
+  const readOnlyCacheKey = readOnlyAppServerCacheKey(channel, invokeArgs, requestSummary);
+  if (readOnlyCacheKey) requestSummary.cacheKey = readOnlyCacheKey;
+  if (maybeServeReadOnlyAppServerCache(channel, invokeArgs, context, requestSummary, readOnlyCacheKey)) return true;
   // 先记录请求归属，再调用官方 handler，这样同步和异步回包都能找到目标 client。
-  rememberRequestRoute(channel, invokeArgs, context.clientId || "");
+  rememberRequestRoute(channel, invokeArgs, context.clientId || "", requestSummary);
+  // 会话列表保持官方原生链路，避免跨环境实验影响 Win/Mac 本地历史显示。
+  if (maybeHandleDomainIsolationGlobalStateFetch(channel, invokeArgs)) return true;
+  if (maybeHandleNonCriticalFetch(channel, invokeArgs)) return true;
+  if (maybeHandleLocaleInfoFetch(channel, invokeArgs)) return true;
   // Computer Use 锁屏授权由官方 Installer 决定；这里额外记录同进程直接 status，方便和官方回包对照。
   logComputerUseAuthRequest(channel, invokeArgs);
   if (maybeHandleComputerUseAuthWriteNoop(channel, invokeArgs)) return true;
@@ -1351,7 +1814,14 @@ async function webConfigScript() {
     // OPENCODEX_DEBUG_WS=1 时才开启 WS 大包/慢解析诊断，平时不采集。
     debugWs: ${JSON.stringify(process.env.OPENCODEX_DEBUG_WS === "1")},
     appServer: ${JSON.stringify({ kind: "official-electron-ipc", spawnHook: appServerSpawnHookStatus() })},
-    sharedObjectSnapshot: ${JSON.stringify({ host_config: { id: "local", kind: "local" } })},
+    sharedObjectSnapshot: ${JSON.stringify({
+      host_config: { id: "local", kind: "local" },
+      // 各自域名只服务各自机器，避免官方 runtime 在 Win/Mac 页面里自动恢复远程环境。
+      remote_ssh_connections: [],
+      remote_control_connections: [],
+      // 官方 renderer 的 i18n 开关来自 Statsig layer；首帧注入可避免弱网下订阅回包太晚。
+      "72216192": { enable_i18n: true, locale_source: "IDE" },
+    })},
     // persistedAtomSnapshot 用于首屏同步：renderer 会很早请求它，此时 WebSocket 可能还没连上。
     persistedAtomSnapshot: ${JSON.stringify(persistedAtomSnapshotForRenderer())}
   };

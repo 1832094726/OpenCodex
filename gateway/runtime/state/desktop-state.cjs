@@ -7,6 +7,7 @@ const DESKTOP_GLOBAL_STATE_PATH = path.join(CODEX_HOME, ".codex-global-state.jso
 const DESKTOP_GLOBAL_STATE_BACKUP_PATH = `${DESKTOP_GLOBAL_STATE_PATH}.bak`;
 const DESKTOP_PERSISTED_ATOMS_KEY = "electron-persisted-atom-state";
 const COMPOSER_PERMISSION_MODE_VISIBILITY_KEY = "composer-permission-mode-visibility";
+const SELECTED_REMOTE_HOST_ID_KEY = "selected-remote-host-id";
 const DEFAULT_COMPOSER_PERMISSION_MODE_VISIBILITY = {
   "guardian-approvals": true,
   "full-access": true,
@@ -58,9 +59,17 @@ function desktopPersistedAtoms() {
 }
 
 function persistedAtomSnapshotForRenderer() {
-  return Object.fromEntries(
+  const snapshot = Object.fromEntries(
     Object.entries(desktopPersistedAtoms()).map(([key, value]) => [key, normalizePersistedAtomForRenderer(key, value)])
   );
+  // 不注入 localeOverride：官方 i18n 在该 atom 存在时会跳过语言包解析，导致 locale 为中文但文案仍是英文。
+  delete snapshot.localeOverride;
+  // OpenCodex 采用域名隔离模型；清理官方 Desktop 里遗留的远程 host 状态，避免 Win/Mac 页面互相恢复。
+  delete snapshot[SELECTED_REMOTE_HOST_ID_KEY];
+  for (const key of Object.keys(snapshot)) {
+    if (key.startsWith("remote-thread-summaries:")) delete snapshot[key];
+  }
+  return snapshot;
 }
 
 module.exports = {

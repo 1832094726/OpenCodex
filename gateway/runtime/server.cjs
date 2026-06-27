@@ -43,7 +43,6 @@ const {
 const { createPickedFilesService } = require("./ipc/picked-files.cjs");
 const { createStaticAssetService } = require("./http/static-assets.cjs");
 const { createWsHub } = require("./ipc/ws-hub.cjs");
-const { createWorkspaceRootsService } = require("./ipc/workspace-roots.cjs");
 const { diagnosticError, diagnosticLog, diagnosticWarn, sanitizeDiagnosticValue, shortId } = require("./core/diagnostics.cjs");
 const { markGatewaySilentQuit } = require("./lifecycle/quit-confirmation-suppressor.cjs");
 
@@ -230,7 +229,7 @@ async function listen(server) {
   });
 }
 
-function createRequestHandler({ localFiles, pickedFiles, staticAssets, workspaceRoots }) {
+function createRequestHandler({ localFiles, pickedFiles, staticAssets }) {
   /**
    * 路由顺序很关键：
    * 1. 认证和 launcher 探活先处理。
@@ -259,6 +258,15 @@ function createRequestHandler({ localFiles, pickedFiles, staticAssets, workspace
     if (pathname === "/opencodex-plugin-loader.js" && req.method === "GET") {
       // loader 是目录扫描结果，登录页设置面板也依赖它，所以必须在 auth gate 前动态生成。
       return staticAssets.servePluginLoader(res);
+    }
+    if (pathname === "/api/precache-manifest" && req.method === "GET") {
+      // SW install 阶段需要匿名获取资源列表，不能放在 auth gate 后面。
+     return sendJson(res, 200, staticAssets.createPrecacheManifest(), { "cache-control": "no-store" });
+   }
+    if (pathname === "/api/precache-bundle" && req.method === "GET") {
+      // SW 一次性下载全部静态资源，避免 1700+ 个 HTTP/2 请求导致带宽利用率过低
+      const bundle = staticAssets.createPrecacheBundle(req);
+      return send(res, 200, bundle.headers, bundle.body);
     }
     if (staticAssets.isPublicStaticPath(pathname)) {
       const file = staticAssets.staticFile(pathname);
@@ -318,7 +326,7 @@ function createRequestHandler({ localFiles, pickedFiles, staticAssets, workspace
     }
 
     if (pathname === "/api/ipc/invoke" && req.method === "POST") {
-      return handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots);
+      return handleIpcInvoke(req, res, localFiles, pickedFiles);
     }
 
     if (pathname === "/api/client-log" && req.method === "POST") {
@@ -352,7 +360,7 @@ function createRequestHandler({ localFiles, pickedFiles, staticAssets, workspace
   };
 }
 
-async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots) {
+async function handleIpcInvoke(req, res, localFiles, pickedFiles) {
   /**
    * 浏览器把 Electron ipcRenderer.invoke/send 折叠成 HTTP POST。
    * gateway 在这里恢复 channel/args，并伪造 IpcMainEvent 交给官方 handler。
@@ -396,15 +404,6 @@ async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots
       }
       return sendJson(res, 200, { ok: true, value });
     }
-    if (channel === "opencodex:validate-workspace-root") {
-      // 远端浏览器无法打开 Electron 目录选择器，只允许用户显式输入并在 gateway 侧校验本机路径。
-      const value = workspaceRoots.handleValidateWorkspaceRootPayload(payload);
-      const elapsedMs = Date.now() - startedAtMs;
-      if (DEBUG_LOGS && !suppressRoutineLog) {
-        diagnosticLog("gateway-ipc", "invoke_end", { ...diagnosticBase, elapsedMs, ok: true });
-      }
-      return sendJson(res, 200, { ok: true, value });
-    }
     // AsyncLocalStorage 让后续官方 webContents.send 能知道这次 HTTP IPC 属于哪个浏览器 client。
     const value = await requestContext.run({ clientId, remoteAddress }, () =>
       invokeOfficialIpc(channel, args, {
@@ -434,12 +433,10 @@ async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots
       ok: false,
     });
     const status = error && typeof error.status === "number" ? error.status : 500;
-    const response = {
+    return sendJson(res, status, {
       ok: false,
       error: error instanceof Error ? error.message : String(error),
-    };
-    if (error && typeof error.errorKey === "string" && error.errorKey) response.errorKey = error.errorKey;
-    return sendJson(res, status, response);
+    });
   }
 }
 
@@ -455,11 +452,10 @@ async function createGateway() {
   // 先启动官方 runtime，确保后续 health/IPC 路由能看到官方 handler 注册状态。
   await startOfficialRuntime();
 
-  const workspaceRoots = createWorkspaceRootsService();
-  const localFiles = createLocalFileService({ getWorkspaceRoots: workspaceRoots.workspaceRoots });
+  const localFiles = createLocalFileService();
   const pickedFiles = createPickedFilesService();
   const staticAssets = createStaticAssetService({ getI18nSnapshot, getOfficialBundle });
-  const requestHandler = createRequestHandler({ localFiles, pickedFiles, staticAssets, workspaceRoots });
+  const requestHandler = createRequestHandler({ localFiles, pickedFiles, staticAssets });
   const server = http.createServer((req, res) => {
     requestHandler(req, res).catch((error) => {
       diagnosticError("gateway", "request_failed", {
@@ -471,11 +467,36 @@ async function createGateway() {
     });
   });
 
-  // 注入 app-host relay 工厂：WS hub 只管理浏览器连接，真正的官方 MessagePort 仍由 official-runtime 创建。
+ // 注入 app-host relay 工厂：WS hub 只管理浏览器连接，真正的官方 MessagePort 仍由 official-runtime 创建。
+
+  /**
+   * 从 HTTP handleIpcInvoke 中提取的核心调用逻辑，WS 通道复用同一段代码。
+   * 省掉了 HTTP body 解析和 res 写回，只保留 channel → invokeOfficialIpc 的核心路径。
+   */
+  async function invokeIpcCore({ channel, args, clientId, remoteAddress }) {
+    if (channel === "pick-files") {
+      // pick-files 必须在浏览器侧选文件，再由 gateway 落盘；两条通道共用同一逻辑。
+      return pickedFiles.handlePickFilesPayload(payloadFromArgs(args));
+    }
+    return requestContext.run({ clientId, remoteAddress }, () =>
+      invokeOfficialIpc(channel, args, {
+        clientId,
+        remoteAddress,
+        setTitle: () => true,
+        openExternal: (urlToOpen) => {
+          if (urlToOpen) console.log(`[openExternal] ${urlToOpen}`);
+          return true;
+        },
+        openFile: (filePath) => localFiles.createLocalFilePreview(filePath),
+      })
+    );
+  }
+
   const webSocketHub = createWsHub(server, {
     createAppHostRelay: createOfficialAppHostRelay,
     handleNotificationEvent: handleOfficialNotificationEvent,
     isAuthed,
+    invokeIpc: invokeIpcCore,
   });
   // official-runtime 通过这个 hub 把官方 renderer 的异步消息转发给浏览器。
   setWsHub(webSocketHub);
@@ -486,7 +507,7 @@ async function createGateway() {
   diagnosticLog("gateway", "health_endpoint", { url: `http://${HOST}:${PORT}/api/health` });
   diagnosticLog("gateway", "unknown_ipc_log", { path: path.relative(PROJECT_ROOT, UNKNOWN_IPC_PATH) });
 
-  return { localFiles, server, staticAssets, workspaceRoots, wsHub: webSocketHub };
+  return { localFiles, server, staticAssets, wsHub: webSocketHub };
 }
 
 module.exports = { createGateway, createRequestHandler };

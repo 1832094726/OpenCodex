@@ -428,6 +428,9 @@ function handleAuthStatus(req, res, url) {
       ok: true,
       authRequired: !!AUTH_PASSWORD_HASH,
       authenticated: auth.authenticated,
+      // 已认证刷新时把短期 token 回传给 web-shell，供 WebSocket query 认证使用。
+      // 登录接口本身也会把同一类短期 token 暴露给前端，这里只补齐刷新后的启动路径。
+      token: auth.authenticated ? auth.token : "",
       expiresAtMs: auth.expiresAtMs,
       ttlMs: AUTH_PASSWORD_HASH ? AUTH_TOKEN_TTL_MS : null,
     },

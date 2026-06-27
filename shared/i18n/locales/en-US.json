@@ -4,7 +4,6 @@
   "common.notCreated": "Not created",
   "common.notRunning": "Not running",
   "common.save": "Save",
-  "common.cancel": "Cancel",
   "common.clear": "Clear",
   "common.choose": "Choose",
   "launcher.status.ready": "Ready",
@@ -90,19 +89,5 @@
   "web.settings.notificationTestBody": "Future official notifications will be shown by this browser.",
   "web.settings.notificationUnsupported": "Not supported by this browser",
   "web.settings.about": "About",
-  "web.settings.star": "Star OpenCodex on GitHub",
-  "web.workspaceRoot.dialog.title": "Use Existing Folder",
-  "web.workspaceRoot.dialog.description": "Enter a folder path on the machine running OpenCodex",
-  "web.workspaceRoot.dialog.pathLabel": "Folder path",
-  "web.workspaceRoot.dialog.placeholder": "/Users/name/project",
-  "web.workspaceRoot.dialog.close": "Close",
-  "web.workspaceRoot.dialog.confirm": "Use",
-  "web.workspaceRoot.dialog.confirming": "Using...",
-  "web.workspaceRoot.error.empty": "Enter a folder path.",
-  "web.workspaceRoot.error.relative": "Enter an absolute path.",
-  "web.workspaceRoot.error.notFound": "Path does not exist.",
-  "web.workspaceRoot.error.notDirectory": "That path is not a folder.",
-  "web.workspaceRoot.error.noAccess": "You do not have permission to access that path.",
-  "web.workspaceRoot.error.unavailable": "That folder path cannot be used.",
-  "web.workspaceRoot.error.addFailed": "Failed to add folder: {error}"
+  "web.settings.star": "Star OpenCodex on GitHub"
 }

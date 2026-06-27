@@ -18,6 +18,15 @@
     <title>OpenCodex</title>
     <!-- codex-official-styles -->
     <!-- opencodex-runtime-config -->
+    <!-- Service Worker 早期注册，在登录前就开始预缓存静态资源 -->
+    <script>
+      if ("serviceWorker" in navigator && location.protocol === "https:") {
+        navigator.serviceWorker.register("/sw-cache.js", { scope: "/" }).catch(function (e) {
+          console.warn("[sw-cache] 早期注册失败", e);
+        });
+      }
+    </script>
+
     <script src="/codex-window-controls-overlay.js"></script>
     <script src="/opencodex-plugin-system.js"></script>
     <script src="/opencodex-plugin-loader.js"></script>
@@ -735,9 +744,28 @@
           return res.json();
         }
 
-        async function bootRenderer() {
-          showBoot(t("web.auth.starting"));
-          const res = await fetch("/official-index.patched.html", {
+       async function bootRenderer() {
+         showBoot(t("web.auth.starting"));
+         // 短暂等待 SW 预缓存：命中缓存可加速冷启动，但弱网/DERP 下不能为了预缓存阻塞首屏。
+         // 缓存未就绪时继续加载 renderer，缺失资源仍会由 SW cache-first 按需补齐。
+        if ("serviceWorker" in navigator && location.protocol === "https:") {
+          try {
+            const reg = await navigator.serviceWorker.ready;
+            // 通过 MessageChannel 询问 SW 缓存是否就绪；最多等 4 秒，避免缓存构建拖住主界面。
+            await new Promise((resolve) => {
+              const channel = new MessageChannel();
+              const timer = setTimeout(() => resolve({ ready: false, reason: "timeout" }), 4000);
+              channel.port1.onmessage = (e) => {
+                clearTimeout(timer);
+                resolve(e.data);
+              };
+              reg.active.postMessage({ type: "cache-status" }, [channel.port2]);
+            });
+          } catch (e) {
+            console.warn("[sw-cache] 等待缓存就绪失败，直接加载", e);
+          }
+         }
+         const res = await fetch("/official-index.patched.html", {
             cache: "no-store",
             credentials: "same-origin",
             headers: authHeaders({ accept: "text/html" }),
@@ -949,6 +977,9 @@
             }
             clearForceLogin();
             if (state.authenticated || state.authRequired === false) {
+              // 刷新页面时认证主要来自 HttpOnly cookie；这里把 status 回传的短期 token
+              // 写回运行时全局变量，确保后续 WebSocket 能通过 query token 完成认证。
+              if (state.token) storeToken(state.token);
               await bootRenderer();
               return;
             }
