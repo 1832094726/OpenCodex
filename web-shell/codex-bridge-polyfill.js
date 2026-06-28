@@ -1854,6 +1854,8 @@
   function markGatewayWsReady() {
     wsReady = true;
     settleWsReadyWaiters(true);
+    // WS 重连后 gateway 会释放旧 app-host relay；先重发 connect，后续端口消息才有目标可投递。
+    reconnectAppHostRelays();
     // hello-ack 到达后服务端才知道当前 clientId，此时再冲刷 app-host 队列才能保证定向路由正确。
     flushAllAppHostRelayMessages();
   }
@@ -2027,6 +2029,26 @@
   function flushAllAppHostRelayMessages() {
     for (const state of appHostPortRelays.values()) {
       flushAppHostRelayMessages(state);
+    }
+  }
+
+  function reconnectAppHostRelays() {
+    let reconnectedCount = 0;
+    for (const state of appHostPortRelays.values()) {
+      if (!state || state.closed) continue;
+      state.connected = false;
+      // 保留浏览器侧 MessagePort，但重建 gateway 侧 relay；connect 必须排在业务帧前面。
+      state.pending = state.pending.filter((item) => !item || item.type !== "app-host-connect");
+      state.pending.unshift(appHostWsPayload(state, { type: "app-host-connect" }));
+      reconnectedCount += 1;
+      flushAppHostRelayMessages(state);
+    }
+    if (reconnectedCount > 0) {
+      clientDiagnostic("app-host-relays-reconnected", {
+        count: reconnectedCount,
+        wsReady,
+        wsState: websocketStateName(ws),
+      });
     }
   }
 
