@@ -27,6 +27,8 @@ const TARGET_RECONNECT_BUFFER_TTL_MS = Number(process.env.OPENCODEX_TARGET_RECON
 const TARGET_RECONNECT_BUFFER_MAX_MESSAGES = Number(process.env.OPENCODEX_TARGET_RECONNECT_BUFFER_MAX_MESSAGES || 500);
 const ORPHAN_TARGET_RESPONSE_BUFFER_TTL_MS = Number(process.env.OPENCODEX_ORPHAN_TARGET_RESPONSE_BUFFER_TTL_MS || 30 * 1000);
 const ORPHAN_TARGET_RESPONSE_BUFFER_MAX_MESSAGES = Number(process.env.OPENCODEX_ORPHAN_TARGET_RESPONSE_BUFFER_MAX_MESSAGES || 100);
+const APP_HOST_MISSING_RELAY_BUFFER_TTL_MS = Number(process.env.OPENCODEX_APP_HOST_MISSING_RELAY_BUFFER_TTL_MS || 30 * 1000);
+const APP_HOST_MISSING_RELAY_BUFFER_MAX_MESSAGES = Number(process.env.OPENCODEX_APP_HOST_MISSING_RELAY_BUFFER_MAX_MESSAGES || 100);
 const APP_HOST_READ_ONLY_METHODS = new Set(["app/list", "mcpServerStatus/list", "plugin/list"]);
 const appHostReadOnlyCache = new Map();
 const appHostReadOnlyInFlight = new Map();
@@ -119,6 +121,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   // 手机刷新/退后台时 WS 会短暂消失；定向事件先短时缓存，重连 hello 后再按原 clientId 回放。
   const pendingTargetMessagesByClientId = new Map();
   const pendingOrphanTargetResponses = [];
+  const pendingAppHostMessagesByRelayKey = new Map();
   let lastAuthRejectLogAtMs = 0;
   let suppressedAuthRejectCount = 0;
   const appHostTraffic = new Map();
@@ -134,6 +137,10 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   function appHostTrafficKey(clientId, portId, direction) {
     // app-host 一个页面可能同时有多个 MessagePort，聚合 key 必须带 portId 才不会混在一起。
     return `${clientId || "unknown"}\n${portId || "unknown"}\n${direction || "unknown"}`;
+  }
+
+  function appHostRelayKey(clientId, portId) {
+    return `${clientId || ""}\n${portId || ""}`;
   }
 
   function flushAppHostTraffic(key) {
@@ -870,6 +877,71 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return typeof value === "string" && value.length > 0 && value.length <= 160;
   }
 
+  function prunePendingAppHostMessages(clientId, portId, nowMs = Date.now()) {
+    const key = appHostRelayKey(clientId, portId);
+    const queue = pendingAppHostMessagesByRelayKey.get(key);
+    if (!queue) return [];
+    const fresh = queue.filter((entry) => entry && nowMs - entry.atMs <= APP_HOST_MISSING_RELAY_BUFFER_TTL_MS);
+    if (fresh.length === 0) {
+      pendingAppHostMessagesByRelayKey.delete(key);
+      return [];
+    }
+    if (fresh.length !== queue.length) pendingAppHostMessagesByRelayKey.set(key, fresh);
+    return fresh;
+  }
+
+  function rememberPendingAppHostMessage(clientId, portId, data) {
+    if (
+      !clientId ||
+      !portId ||
+      APP_HOST_MISSING_RELAY_BUFFER_TTL_MS <= 0 ||
+      APP_HOST_MISSING_RELAY_BUFFER_MAX_MESSAGES <= 0
+    ) {
+      return;
+    }
+    const key = appHostRelayKey(clientId, portId);
+    const queue = prunePendingAppHostMessages(clientId, portId);
+    queue.push({ atMs: Date.now(), data });
+    while (queue.length > APP_HOST_MISSING_RELAY_BUFFER_MAX_MESSAGES) queue.shift();
+    pendingAppHostMessagesByRelayKey.set(key, queue);
+  }
+
+  function postAppHostPortData(ws, portId, relay, data) {
+    postAppHostPortData(ws, portId, relay, data);
+    // null 是 MessagePort 关闭信号，发送给官方后即可从索引移除。
+    if (data == null) {
+      const relays = appHostRelaysForSocket(ws);
+      if (relays.get(portId) === relay) relays.delete(portId);
+    }
+    return true;
+  }
+
+  function flushPendingAppHostMessages(ws, clientId, portId, relay) {
+    const queue = prunePendingAppHostMessages(clientId, portId);
+    if (!queue.length) return;
+    pendingAppHostMessagesByRelayKey.delete(appHostRelayKey(clientId, portId));
+    let sent = 0;
+    for (const entry of queue) {
+      try {
+        postAppHostPortData(ws, portId, relay, entry.data);
+        sent += 1;
+      } catch (error) {
+        diagnosticWarn("ws-hub", "app_host_pending_message_flush_failed", {
+          clientId: shortId(clientId),
+          error: error instanceof Error ? error.message : String(error),
+          portId: shortId(portId),
+        });
+        break;
+      }
+    }
+    diagnosticLog("ws-hub", "app_host_pending_messages_flushed", {
+      clientId: shortId(clientId),
+      portId: shortId(portId),
+      queued: queue.length,
+      sent,
+    });
+  }
+
   function handleAppHostConnect(ws, req, message) {
     // 浏览器发起 connect 后，gateway 才创建 Electron MessageChannelMain 并交给官方 listener。
     const clientId = normalizedWsClientId(ws, message);
@@ -936,6 +1008,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       });
       relays.set(portId, relay);
       safeSend(ws, { type: "app-host-port-connected", portId }, { suppressDiagnostic: true });
+      flushPendingAppHostMessages(ws, clientId, portId, relay);
       if (DEBUG_LOGS) {
         // app-host 端口连接/关闭是前端组件生命周期的一部分，默认只保留失败日志。
         diagnosticLog("ws-hub", "app_host_connect", {
@@ -987,9 +1060,11 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     const relays = appHostRelaysForSocket(ws);
     const relay = relays.get(portId);
     if (!relay) {
+      rememberPendingAppHostMessage(clientId, portId, data);
       diagnosticWarn("ws-hub", "app_host_message_missing_relay", {
         clientId: shortId(clientId),
         portId: shortId(portId),
+        queued: prunePendingAppHostMessages(clientId, portId).length,
       });
       return true;
     }

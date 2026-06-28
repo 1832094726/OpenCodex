@@ -452,6 +452,8 @@
   const wsReadyWaiters = new Set();
   let reconnectTimer = null;
   let reconnectDelay = 500;
+  const MOBILE_WS_RESUME_RECONNECT_AFTER_MS = 5000;
+  let lastPageHiddenAtMs = 0;
   const bridgeStartedAtMs = Date.now();
   const clientDiagnosticQueue = [];
   let clientDiagnosticFlushTimer = null;
@@ -1853,11 +1855,16 @@
 
   function markGatewayWsReady() {
     wsReady = true;
+    wsFirstConnectDone = true;
     settleWsReadyWaiters(true);
     // WS 重连后 gateway 会释放旧 app-host relay；先重发 connect，后续端口消息才有目标可投递。
     reconnectAppHostRelays();
     // hello-ack 到达后服务端才知道当前 clientId，此时再冲刷 app-host 队列才能保证定向路由正确。
     flushAllAppHostRelayMessages();
+    // 移动端恢复连接后主动补一轮本地快照，避免 UI 停在断线前的半同步状态。
+    emitPersistedAtomSync();
+    emitSharedObjectSnapshotValue(STATSIG_DEFAULT_FEATURES_CONFIG);
+    emitSharedObjectSnapshotValue(STATSIG_I18N_LAYER_CONFIG);
   }
 
   function hasEditableFocus() {
@@ -3457,6 +3464,7 @@
   /** 建立到 gateway 的 WebSocket，接收 app-server/业务广播事件。 */
   function connect() {
     if (!cfg.gatewayWsUrl || !("WebSocket" in w)) return;
+    if (ws && (ws.readyState === w.WebSocket.OPEN || ws.readyState === w.WebSocket.CONNECTING)) return;
     wsReady = false;
     let socket = null;
     clientDiagnostic("ws-connect-start", {
@@ -3665,19 +3673,26 @@
       }
     });
    socket.addEventListener("close", (event) => {
-     if (ws === socket) wsReady = false;
-      // WS 断开时立即 reject 所有在途的 WS IPC 请求，让调用方降级到 HTTP 而不是等 30s 超时。
-      for (const [reqId, pending] of pendingWsIpcRequests) {
-        clearTimeout(pending.timeoutId);
-        pending.reject(new Error("WebSocket closed during IPC"));
-        pendingWsIpcRequests.delete(reqId);
+     const isCurrentSocket = ws === socket;
+     if (isCurrentSocket) {
+       wsReady = false;
+       wsFirstConnectDone = false;
+     }
+      if (isCurrentSocket) {
+        // WS 断开时立即 reject 所有在途的 WS IPC 请求，让调用方降级到 HTTP 而不是等 30s 超时。
+        for (const [reqId, pending] of pendingWsIpcRequests) {
+          clearTimeout(pending.timeoutId);
+          pending.reject(new Error("WebSocket closed during IPC"));
+          pendingWsIpcRequests.delete(reqId);
+        }
       }
      clientDiagnostic("ws-close", {
+        current: isCurrentSocket,
         status: event && typeof event.code === "number" ? event.code : 0,
         wsReady,
         wsState: websocketStateName(socket),
       });
-      scheduleReconnect();
+      if (isCurrentSocket) scheduleReconnect();
     });
     socket.addEventListener("error", (event) => {
       clientDiagnostic("ws-error", {
@@ -3706,5 +3721,85 @@
     }, reconnectDelay);
   }
 
+  function isMobileResumeSensitiveBrowser() {
+    try {
+      return (
+        w.matchMedia?.("(pointer: coarse)")?.matches === true ||
+        w.matchMedia?.("(max-width: 820px)")?.matches === true ||
+        Number(w.navigator?.maxTouchPoints || 0) > 0
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function forceGatewayWebSocketReconnect(reason) {
+    if (!cfg.gatewayWsUrl || !("WebSocket" in w)) return;
+    if (reconnectTimer) {
+      w.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    const wasReady = wsReady;
+    wsReady = false;
+    wsFirstConnectDone = false;
+    const oldSocket = ws;
+    ws = null;
+    if (oldSocket && oldSocket.readyState !== w.WebSocket.CLOSED) {
+      try {
+        oldSocket.close(4000, "opencodex_mobile_resume");
+      } catch {}
+    }
+    clientDiagnostic("ws-force-reconnect", {
+      reason,
+      wasReady,
+      wsState: websocketStateName(oldSocket),
+    });
+    connect();
+  }
+
+  function ensureGatewayWebSocket(reason, options = {}) {
+    if (!cfg.gatewayWsUrl || !("WebSocket" in w)) return;
+    const force = options.force === true;
+    if (force) {
+      forceGatewayWebSocketReconnect(reason);
+      return;
+    }
+    if (!ws || ws.readyState === w.WebSocket.CLOSED || ws.readyState === w.WebSocket.CLOSING) {
+      wsReady = false;
+      wsFirstConnectDone = false;
+      clientDiagnostic("ws-resume-connect", { reason, wsState: websocketStateName(ws) });
+      connect();
+      return;
+    }
+    if (ws.readyState === w.WebSocket.OPEN && !wsReady) {
+      // OPEN 但没有 hello-ack 通常是手机恢复后的半连接，直接换线比继续等更可靠。
+      forceGatewayWebSocketReconnect(`${reason}:open-without-ack`);
+    }
+  }
+
+  function installGatewayWebSocketResumeHooks() {
+    const handleResume = (reason) => {
+      const hiddenForMs = lastPageHiddenAtMs > 0 ? Date.now() - lastPageHiddenAtMs : 0;
+      const shouldRefreshMobileSocket =
+        isMobileResumeSensitiveBrowser() && hiddenForMs >= MOBILE_WS_RESUME_RECONNECT_AFTER_MS;
+      ensureGatewayWebSocket(reason, { force: shouldRefreshMobileSocket });
+    };
+    w.addEventListener("online", () => handleResume("online"), { passive: true });
+    w.addEventListener("focus", () => handleResume("focus"), { passive: true });
+    w.addEventListener("pageshow", () => handleResume("pageshow"), { passive: true });
+    document.addEventListener(
+      "visibilitychange",
+      () => {
+        if (document.visibilityState === "hidden") {
+          lastPageHiddenAtMs = Date.now();
+          return;
+        }
+        handleResume("visibilitychange");
+      },
+      true
+    );
+  }
+
+  installGatewayWebSocketResumeHooks();
   connect();
 })();

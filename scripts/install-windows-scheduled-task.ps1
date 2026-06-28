@@ -38,7 +38,12 @@ $WrapperContent = @(
   "  set `"ALL_PROXY=!OPENCODEX_PROXY_URL!`"",
   "  set `"NO_PROXY=localhost,127.0.0.1,::1,100.64.0.0/10,.ts.net`"",
   ")",
-  "`"$Node`" `"$GatewayScript`" >> .data\logs\scheduled-gateway.log 2>&1"
+  ":opencodex_loop",
+  "echo [%DATE% %TIME%] starting OpenCodex gateway >> .data\logs\scheduled-gateway.log",
+  "`"$Node`" `"$GatewayScript`" >> .data\logs\scheduled-gateway.log 2>&1",
+  "echo [%DATE% %TIME%] OpenCodex gateway exited with !ERRORLEVEL!, restarting in 5s >> .data\logs\scheduled-gateway.log",
+  "timeout /t 5 /nobreak >nul",
+  "goto opencodex_loop"
 ) -join "`r`n"
 Set-Content -Path $WrapperScript -Value $WrapperContent -Encoding ASCII
 
