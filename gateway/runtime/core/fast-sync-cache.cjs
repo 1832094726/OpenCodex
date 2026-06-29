@@ -13,17 +13,15 @@ const CACHEABLE_METHODS = new Set([
   "thread/turns/list",
 ]);
 const REDACTED_VALUE = "[redacted]";
-const SENSITIVE_FIELD_NAMES = new Set([
+const SENSITIVE_FIELD_PARTS = [
   "token",
-  "accesstoken",
-  "refreshtoken",
   "authorization",
   "password",
   "secret",
   "apikey",
   "cookie",
   "setcookie",
-]);
+];
 
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
@@ -77,6 +75,11 @@ function normalizedFieldName(key) {
   return String(key).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+function isSensitiveFieldName(key) {
+  const normalized = normalizedFieldName(key);
+  return SENSITIVE_FIELD_PARTS.some((part) => normalized.includes(part));
+}
+
 function redactSensitiveFields(value) {
   if (value == null || typeof value !== "object") return value;
   if (Array.isArray(value)) return value.map((item) => redactSensitiveFields(item));
@@ -84,7 +87,7 @@ function redactSensitiveFields(value) {
   const result = {};
   for (const [key, item] of Object.entries(value)) {
     // 快照会落盘，常见凭证字段统一替换，避免弱网快速恢复缓存泄露敏感信息。
-    result[key] = SENSITIVE_FIELD_NAMES.has(normalizedFieldName(key)) ? REDACTED_VALUE : redactSensitiveFields(item);
+    result[key] = isSensitiveFieldName(key) ? REDACTED_VALUE : redactSensitiveFields(item);
   }
   return result;
 }

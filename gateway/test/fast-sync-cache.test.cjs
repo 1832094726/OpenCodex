@@ -77,10 +77,17 @@ test("redacts sensitive fields before writing snapshots", () => {
       value: {
         threadId: "t1",
         title: "Hello",
+        model: "gpt-test",
+        socketId: "socket-1",
         token: "token-value",
         nested: {
           password: "password-value",
           ordinary: "kept",
+          clientSecret: "client-secret-camel-value",
+          client_secret: "client-secret-snake-value",
+          "client-secret": "client-secret-kebab-value",
+          authorizationHeader: "authorization-header-camel-value",
+          authorization_header: "authorization-header-snake-value",
           access_token: "access-token-value",
           headers: [
             { cookie: "cookie-value" },
@@ -96,10 +103,17 @@ test("redacts sensitive fields before writing snapshots", () => {
   assert.deepEqual(cache.readSnapshot({ key })?.value, {
     threadId: "t1",
     title: "Hello",
+    model: "gpt-test",
+    socketId: "socket-1",
     token: "[redacted]",
     nested: {
       password: "[redacted]",
       ordinary: "kept",
+      clientSecret: "[redacted]",
+      client_secret: "[redacted]",
+      "client-secret": "[redacted]",
+      authorizationHeader: "[redacted]",
+      authorization_header: "[redacted]",
       access_token: "[redacted]",
       headers: [
         { cookie: "[redacted]" },
