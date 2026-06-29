@@ -33,6 +33,7 @@
   const READ_ONLY_APP_SERVER_CACHE_TTL_MS = 15000;
   const FAST_SYNC_BROWSER_READ_TIMEOUT_MS = Number(cfg.fastSyncBrowserReadTimeoutMs || 120);
   const FAST_SYNC_GATEWAY_READ_TIMEOUT_MS = Number(cfg.fastSyncGatewayReadTimeoutMs || 250);
+  const FAST_SYNC_PENDING_CREATE_TIMEOUT_MS = Number(cfg.fastSyncPendingCreateTimeoutMs || 120);
   // debugWs 由 gateway 的 OPENCODEX_DEBUG_WS 注入；默认关闭，避免每条 WS 消息都额外计时/算长度。
   const WS_DEBUG_ENABLED = cfg.debugWs === true || cfg.debugWs === "1";
   // 下面三个阈值只在 debugWs 开启时生效，用来定位“远端首个会话打开慢”的浏览器侧瓶颈。
@@ -2760,12 +2761,29 @@
     clientDiagnostic("fast-sync-flow", turnStartFlowData(payload, method, stage, localSendId, error));
   }
 
+  function pendingCreateTimeout(method, payload) {
+    return new Promise((resolve) => {
+      const timeoutMs = fastSyncTimeoutMs(FAST_SYNC_PENDING_CREATE_TIMEOUT_MS, 120);
+      w.setTimeout(() => {
+        // pending 只是本地体验增强，不能因为 IndexedDB 或 localStorage 卡住而延迟真实 turn/start。
+        clientDiagnostic("fast-sync-refresh-failed", {
+          ...turnStartFlowData(payload, method, "send_pending_create_timeout", "", "timeout"),
+          reason: "pending-send-create-timeout",
+        });
+        resolve(null);
+      }, timeoutMs);
+    });
+  }
+
   async function createTurnStartPendingSend(payload, method) {
     if (method !== "turn/start") return null;
     const store = fastSyncStore();
     if (!store || typeof store.createPendingSend !== "function") return null;
     try {
-      const record = await store.createPendingSend(payload);
+      const record = await Promise.race([
+        Promise.resolve(store.createPendingSend(payload)),
+        pendingCreateTimeout(method, payload),
+      ]);
       const localSendId = record && typeof record.localSendId === "string" ? record.localSendId : "";
       if (localSendId) emitTurnStartFlow(payload, method, "send_pending_created", localSendId);
       return localSendId ? record : null;

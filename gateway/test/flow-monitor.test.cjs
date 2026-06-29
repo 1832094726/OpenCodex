@@ -35,6 +35,7 @@ test("client diagnostics feed fast sync flow events safely", () => {
   assert.match(serverSource, /event !== "fast-sync-flow"/);
   assert.match(serverSource, /recordFlowEvent\(flowEvent\)/);
   assert.match(serverSource, /safeFastSyncFlowData/);
+  assert.match(serverSource, /typeof rawValue === "object"/);
   assert.match(wsHubSource, /message\.type !== "client-diagnostic"/);
   assert.match(wsHubSource, /message\.event !== "fast-sync-flow"/);
   assert.match(wsHubSource, /recordFlowEvent\(flowEvent\)/);

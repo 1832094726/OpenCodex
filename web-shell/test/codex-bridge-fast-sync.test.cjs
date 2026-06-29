@@ -66,6 +66,8 @@ test("turn starts create pending sends and flow diagnostics", () => {
     "send_turn_accepted",
     "send_pending_failed",
     "localSendId",
+    "FAST_SYNC_PENDING_CREATE_TIMEOUT_MS",
+    "pending-send-create-timeout",
   ]) {
     assert.match(source, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }

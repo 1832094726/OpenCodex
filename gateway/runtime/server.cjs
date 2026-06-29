@@ -176,6 +176,8 @@ function safeFastSyncFlowData(value, fallbackClientId = "") {
     scope: "turn",
   };
   for (const key of ["clientId", "error", "localSendId", "method", "requestId", "stage", "threadId", "turnId"]) {
+    const rawValue = value[key];
+    if (rawValue != null && typeof rawValue === "object") continue;
     const sanitized = sanitizeDiagnosticValue(key, value[key]);
     if (sanitized !== undefined) result[key] = key === "clientId" ? shortId(String(sanitized)) : sanitized;
   }
