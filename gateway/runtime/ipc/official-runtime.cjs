@@ -1612,11 +1612,12 @@ function logComputerUseAuthResponse(routeBase, payload) {
   });
 }
 
-function rememberFastSyncSnapshot(channel, _args, requestSummary, responseValue, context = {}) {
+function rememberFastSyncSnapshot(channel, _args, requestSummary, responseResult, context = {}) {
   void channel;
   const method = fastSyncMethodFromRequestSummary(requestSummary);
   const key = requestSummary && typeof requestSummary.fastSyncSnapshotKey === "string" ? requestSummary.fastSyncSnapshotKey : "";
-  if (!method || !key || responseValue == null) return;
+  if (!method || !key || !responseResult || responseResult.ok !== true) return;
+  const responseValue = responseResult.value;
   if (!fastSyncCache.writeSnapshot({ key, method, value: responseValue })) return;
   recordFlowEvent({
     clientId: context.clientId || "",

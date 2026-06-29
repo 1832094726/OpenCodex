@@ -45,3 +45,12 @@ test("fast sync snapshot diagnostics are wired in the polyfill", () => {
     assert.match(source, new RegExp(JSON.stringify(eventName)));
   }
 });
+
+test("fast sync snapshot reads have short miss timeouts", () => {
+  const source = readPolyfillSource();
+  // 弱网下冷缓存 miss 不能长期卡住真实 IPC，浏览器本地和 gateway 快照读取都要有短超时。
+  assert.match(source, /FAST_SYNC_BROWSER_READ_TIMEOUT_MS/);
+  assert.match(source, /FAST_SYNC_GATEWAY_READ_TIMEOUT_MS/);
+  assert.match(source, /browser-read-timeout/);
+  assert.match(source, /gateway-read-timeout/);
+});

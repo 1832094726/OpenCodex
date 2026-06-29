@@ -76,17 +76,18 @@ function parseFastSyncSnapshotArgsJson(argsJson) {
 }
 
 function valueFromFastSyncFetchResponsePayload(payload) {
-  if (!payload || typeof payload !== "object") return null;
-  if (payload.type !== "fetch-response") return null;
-  if (payload.responseType !== "success") return null;
+  if (!payload || typeof payload !== "object") return { ok: false };
+  if (payload.type !== "fetch-response") return { ok: false };
+  if (payload.responseType !== "success") return { ok: false };
   // 只有明确 2xx 的成功响应才写快照；缺失 status、重定向和错误响应都交给官方实时链路处理。
-  if (!Number.isFinite(payload.status) || payload.status < 200 || payload.status >= 300) return null;
+  if (!Number.isFinite(payload.status) || payload.status < 200 || payload.status >= 300) return { ok: false };
   const raw = typeof payload.bodyJsonString === "string" ? payload.bodyJsonString : "";
-  if (!raw) return null;
+  if (!raw) return { ok: false };
   try {
-    return JSON.parse(raw);
+    // null 是合法 JSON 响应，不能和“不可缓存”共用同一个 sentinel。
+    return { ok: true, value: JSON.parse(raw) };
   } catch {
-    return null;
+    return { ok: false };
   }
 }
 

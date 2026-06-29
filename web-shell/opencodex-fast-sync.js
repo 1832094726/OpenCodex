@@ -95,10 +95,11 @@
   function safeSnapshotValue(value) {
     try {
       const serialized = JSON.stringify(value);
-      if (typeof serialized !== "string") return null;
-      return redactSensitiveFields(JSON.parse(serialized));
+      if (typeof serialized !== "string") return { ok: false };
+      // null 是合法快照值，必须用 ok 标记和不可序列化状态区分。
+      return { ok: true, value: redactSensitiveFields(JSON.parse(serialized)) };
     } catch {
-      return null;
+      return { ok: false };
     }
   }
 
@@ -210,7 +211,7 @@
 
   async function writeSnapshot(method, args, value) {
     const safeValue = safeSnapshotValue(value);
-    if (safeValue === null) return false;
+    if (!safeValue.ok) return false;
 
     const key = cacheKey(method, args);
     const record = {
@@ -219,7 +220,7 @@
       method: String(method || ""),
       schemaVersion: 1,
       sourceHost: hostKey(),
-      value: safeValue,
+      value: safeValue.value,
     };
     const wroteDb = await withStore(SNAPSHOT_STORE, "readwrite", (store) => store.put(record));
     if (wroteDb) return true;
@@ -290,13 +291,13 @@
 
   async function createPendingSend(payload) {
     const safePayload = safeSnapshotValue(payload);
-    if (safePayload === null) return null;
+    if (!safePayload.ok) return null;
 
     const localSendId = `local-${nowMs()}-${Math.random().toString(36).slice(2, 10)}`;
     const record = {
       createdAtMs: nowMs(),
       localSendId,
-      payload: safePayload,
+      payload: safePayload.value,
       schemaVersion: 1,
       sourceHost: hostKey(),
       status: "pending",
@@ -315,15 +316,15 @@
     if (!current) return null;
 
     const safePatch = safeSnapshotValue(patch || {});
-    if (safePatch === null) return null;
+    if (!safePatch.ok) return null;
     const next = {
       ...current,
-      ...safePatch,
+      ...safePatch.value,
       completedAtMs: nowMs(),
       createdAtMs: current.createdAtMs,
       localSendId: current.localSendId,
       payload: current.payload,
-      status: safePatch.status || "completed",
+      status: safePatch.value.status || "completed",
     };
     const wroteDb = await withStore(PENDING_STORE, "readwrite", (store) => store.put(next));
     if (!wroteDb) localStorageSet(pendingStorageKey(localSendId), next);

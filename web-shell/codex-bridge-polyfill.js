@@ -26,11 +26,13 @@
  // 解决冷启动矛盾：首批 IPC 需 WS 注册 clientId 才能收异步回包，但 DERP 下 WS 握手可能 >3s。
  // 超时后后续 IPC 直接走 HTTP，WS 在后台异步建立成功后自动接管。
  let wsFirstConnectDone = false;
- const CLIENT_DIAGNOSTIC_FLUSH_DELAY_MS = 120;
+  const CLIENT_DIAGNOSTIC_FLUSH_DELAY_MS = 120;
   const CLIENT_DIAGNOSTIC_MAX_BATCH = 40;
   const LOW_PRIORITY_IPC_CONCURRENCY = 2;
   const LOW_PRIORITY_IPC_LOG_EVERY = 25;
   const READ_ONLY_APP_SERVER_CACHE_TTL_MS = 15000;
+  const FAST_SYNC_BROWSER_READ_TIMEOUT_MS = Number(cfg.fastSyncBrowserReadTimeoutMs || 120);
+  const FAST_SYNC_GATEWAY_READ_TIMEOUT_MS = Number(cfg.fastSyncGatewayReadTimeoutMs || 250);
   // debugWs 由 gateway 的 OPENCODEX_DEBUG_WS 注入；默认关闭，避免每条 WS 消息都额外计时/算长度。
   const WS_DEBUG_ENABLED = cfg.debugWs === true || cfg.debugWs === "1";
   // 下面三个阈值只在 debugWs 开启时生效，用来定位“远端首个会话打开慢”的浏览器侧瓶颈。
@@ -2735,6 +2737,31 @@
     return { hit: true, value };
   }
 
+  function fastSyncTimeoutMs(value, fallbackMs) {
+    const timeoutMs = Number(value);
+    return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : fallbackMs;
+  }
+
+  function withFastSyncTimeout(promise, timeoutMs, label, diagnosticSummary, method) {
+    const safeTimeoutMs = fastSyncTimeoutMs(timeoutMs, 0);
+    if (!safeTimeoutMs) return promise;
+    let timeoutId = null;
+    const timeout = new Promise((resolve) => {
+      timeoutId = setTimeout(() => {
+        clientDiagnostic("fast-sync-refresh-failed", {
+          ...diagnosticSummary,
+          error: "timeout",
+          method,
+          reason: label,
+        });
+        resolve(null);
+      }, safeTimeoutMs);
+    });
+    return Promise.race([promise, timeout]).finally(() => {
+      if (timeoutId) clearTimeout(timeoutId);
+    });
+  }
+
   function writeFastSyncBrowserSnapshot(method, ipcArgs, value, diagnosticSummary, reason) {
     const store = fastSyncStore();
     if (!store || typeof store.writeSnapshot !== "function") return;
@@ -2775,7 +2802,13 @@
     const store = fastSyncStore();
     if (!store || typeof store.readSnapshot !== "function") return null;
     try {
-      const snapshot = await store.readSnapshot(method, ipcArgs);
+      const snapshot = await withFastSyncTimeout(
+        Promise.resolve(store.readSnapshot(method, ipcArgs)),
+        FAST_SYNC_BROWSER_READ_TIMEOUT_MS,
+        "browser-read-timeout",
+        diagnosticSummary,
+        method
+      );
       if (!snapshotHasValue(snapshot)) return null;
       clientDiagnostic("fast-sync-browser-hit", {
         ...diagnosticSummary,
@@ -2796,6 +2829,9 @@
 
   async function readGatewayFastSyncSnapshot(method, ipcArgs, diagnosticSummary) {
     let url = "";
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timeoutMs = fastSyncTimeoutMs(FAST_SYNC_GATEWAY_READ_TIMEOUT_MS, 250);
+    let abortTimer = null;
     try {
       const parsed = new URL("/api/fast-sync/snapshot", location.origin);
       parsed.searchParams.set("method", method);
@@ -2805,10 +2841,24 @@
       return null;
     }
     try {
+      if (controller && timeoutMs > 0) {
+        abortTimer = setTimeout(() => {
+          clientDiagnostic("fast-sync-refresh-failed", {
+            ...diagnosticSummary,
+            error: "timeout",
+            method,
+            reason: "gateway-read-timeout",
+          });
+          try {
+            controller.abort();
+          } catch {}
+        }, timeoutMs);
+      }
       const res = await w.fetch(url, {
         cache: "no-store",
         credentials: "same-origin",
         headers: gatewayAuthHeaders({ accept: "application/json" }),
+        signal: controller ? controller.signal : undefined,
       });
       if (!res.ok) return null;
       const body = await res.json().catch(() => null);
@@ -2822,6 +2872,7 @@
       writeFastSyncBrowserSnapshot(method, ipcArgs, snapshot.value, diagnosticSummary, "gateway-hit");
       return fastSyncSnapshotHit(snapshot.value);
     } catch (error) {
+      if (error && error.name === "AbortError") return null;
       clientDiagnostic("fast-sync-refresh-failed", {
         ...diagnosticSummary,
         error: error instanceof Error ? error.message : String(error),
@@ -2829,6 +2880,8 @@
         reason: "gateway-read",
       });
       return null;
+    } finally {
+      if (abortTimer) clearTimeout(abortTimer);
     }
   }
 

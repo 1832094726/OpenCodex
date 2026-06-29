@@ -81,7 +81,12 @@ test("only successful fetch responses produce fast-sync snapshot values", () => 
     status: 200,
     bodyJsonString: JSON.stringify(body),
   };
-  assert.deepEqual(valueFromFastSyncFetchResponsePayload(success), body);
+  assert.deepEqual(valueFromFastSyncFetchResponsePayload(success), { ok: true, value: body });
+  // null 是合法 JSON 响应，不能和“不可缓存”混在同一个返回值里。
+  assert.deepEqual(valueFromFastSyncFetchResponsePayload({ ...success, bodyJsonString: "null" }), {
+    ok: true,
+    value: null,
+  });
 
   for (const patch of [
     { responseType: undefined },
@@ -90,7 +95,7 @@ test("only successful fetch responses produce fast-sync snapshot values", () => 
     { status: 400, error: "bad" },
     { responseType: "error", status: 200 },
   ]) {
-    assert.equal(valueFromFastSyncFetchResponsePayload({ ...success, ...patch }), null);
+    assert.deepEqual(valueFromFastSyncFetchResponsePayload({ ...success, ...patch }), { ok: false });
   }
 });
 
