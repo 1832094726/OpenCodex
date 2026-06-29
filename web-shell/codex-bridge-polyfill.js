@@ -2761,10 +2761,12 @@
     clientDiagnostic("fast-sync-flow", turnStartFlowData(payload, method, stage, localSendId, error));
   }
 
-  function pendingCreateTimeout(method, payload) {
-    return new Promise((resolve) => {
-      const timeoutMs = fastSyncTimeoutMs(FAST_SYNC_PENDING_CREATE_TIMEOUT_MS, 120);
-      w.setTimeout(() => {
+  function withPendingCreateTimeout(promise, method, payload) {
+    const timeoutMs = fastSyncTimeoutMs(FAST_SYNC_PENDING_CREATE_TIMEOUT_MS, 120);
+    let timeoutId = null;
+    const timeout = new Promise((resolve) => {
+      timeoutId = w.setTimeout(() => {
+        timeoutId = null;
         // pending 只是本地体验增强，不能因为 IndexedDB 或 localStorage 卡住而延迟真实 turn/start。
         clientDiagnostic("fast-sync-refresh-failed", {
           ...turnStartFlowData(payload, method, "send_pending_create_timeout", "", "timeout"),
@@ -2773,6 +2775,9 @@
         resolve(null);
       }, timeoutMs);
     });
+    return Promise.race([promise, timeout]).finally(() => {
+      if (timeoutId) w.clearTimeout(timeoutId);
+    });
   }
 
   async function createTurnStartPendingSend(payload, method) {
@@ -2780,10 +2785,7 @@
     const store = fastSyncStore();
     if (!store || typeof store.createPendingSend !== "function") return null;
     try {
-      const record = await Promise.race([
-        Promise.resolve(store.createPendingSend(payload)),
-        pendingCreateTimeout(method, payload),
-      ]);
+      const record = await withPendingCreateTimeout(Promise.resolve(store.createPendingSend(payload)), method, payload);
       const localSendId = record && typeof record.localSendId === "string" ? record.localSendId : "";
       if (localSendId) emitTurnStartFlow(payload, method, "send_pending_created", localSendId);
       return localSendId ? record : null;
