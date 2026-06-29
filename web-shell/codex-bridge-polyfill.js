@@ -2677,6 +2677,14 @@
     "app/list",
     "mcpServerStatus/list",
   ]);
+  const FAST_SYNC_SNAPSHOT_METHODS = new Set([
+    "account/read",
+    "config/read",
+    "model/list",
+    "thread/list",
+    "thread/read",
+    "thread/turns/list",
+  ]);
 
   /** 提取官方 app-server 只读方法名；这些方法多次并发调用时结果可短时间复用。 */
   function readOnlyAppServerMethod(payload) {
@@ -2706,6 +2714,148 @@
       return payload.params.method;
     }
     return "";
+  }
+
+  function fastSyncSnapshotMethod(payload) {
+    const method = appServerMethod(payload);
+    return FAST_SYNC_SNAPSHOT_METHODS.has(method) ? method : "";
+  }
+
+  function fastSyncStore() {
+    const store = w.__opencodexFastSync;
+    return store && typeof store === "object" ? store : null;
+  }
+
+  function snapshotHasValue(snapshot) {
+    return !!snapshot && typeof snapshot === "object" && Object.prototype.hasOwnProperty.call(snapshot, "value");
+  }
+
+  function fastSyncSnapshotHit(value) {
+    // null 也可能是官方只读接口的合法返回值，所以用显式包装区分“命中空值”和“未命中”。
+    return { hit: true, value };
+  }
+
+  function writeFastSyncBrowserSnapshot(method, ipcArgs, value, diagnosticSummary, reason) {
+    const store = fastSyncStore();
+    if (!store || typeof store.writeSnapshot !== "function") return;
+    Promise.resolve(store.writeSnapshot(method, ipcArgs, value))
+      .then((ok) => {
+        if (!ok) return;
+        clientDiagnostic("fast-sync-refresh-store", {
+          ...diagnosticSummary,
+          method,
+          reason,
+        });
+      })
+      .catch((error) => {
+        clientDiagnostic("fast-sync-refresh-failed", {
+          ...diagnosticSummary,
+          error: error instanceof Error ? error.message : String(error),
+          method,
+          reason,
+        });
+      });
+  }
+
+  function refreshFastSyncSnapshot(channel, ipcArgs, payload, method, diagnosticSummary, reason) {
+    // 命中旧快照后仍在后台刷新真实官方链路；失败只记录诊断，不影响用户已经拿到的首屏数据。
+    invokeGatewayImmediate(channel, ipcArgs, payload)
+      .then((value) => writeFastSyncBrowserSnapshot(method, ipcArgs, value, diagnosticSummary, reason))
+      .catch((error) => {
+        clientDiagnostic("fast-sync-refresh-failed", {
+          ...diagnosticSummary,
+          error: error instanceof Error ? error.message : String(error),
+          method,
+          reason,
+        });
+      });
+  }
+
+  async function readBrowserFastSyncSnapshot(method, ipcArgs, diagnosticSummary) {
+    const store = fastSyncStore();
+    if (!store || typeof store.readSnapshot !== "function") return null;
+    try {
+      const snapshot = await store.readSnapshot(method, ipcArgs);
+      if (!snapshotHasValue(snapshot)) return null;
+      clientDiagnostic("fast-sync-browser-hit", {
+        ...diagnosticSummary,
+        method,
+        source: snapshot.source || "browser",
+      });
+      return fastSyncSnapshotHit(snapshot.value);
+    } catch (error) {
+      clientDiagnostic("fast-sync-refresh-failed", {
+        ...diagnosticSummary,
+        error: error instanceof Error ? error.message : String(error),
+        method,
+        reason: "browser-read",
+      });
+      return null;
+    }
+  }
+
+  async function readGatewayFastSyncSnapshot(method, ipcArgs, diagnosticSummary) {
+    let url = "";
+    try {
+      const parsed = new URL("/api/fast-sync/snapshot", location.origin);
+      parsed.searchParams.set("method", method);
+      parsed.searchParams.set("args", JSON.stringify(ipcArgs));
+      url = parsed.toString();
+    } catch {
+      return null;
+    }
+    try {
+      const res = await w.fetch(url, {
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: gatewayAuthHeaders({ accept: "application/json" }),
+      });
+      if (!res.ok) return null;
+      const body = await res.json().catch(() => null);
+      const snapshot = body && body.ok !== false ? body.snapshot : null;
+      if (!snapshotHasValue(snapshot)) return null;
+      clientDiagnostic("fast-sync-gateway-hit", {
+        ...diagnosticSummary,
+        method,
+        source: snapshot.source || "gateway",
+      });
+      writeFastSyncBrowserSnapshot(method, ipcArgs, snapshot.value, diagnosticSummary, "gateway-hit");
+      return fastSyncSnapshotHit(snapshot.value);
+    } catch (error) {
+      clientDiagnostic("fast-sync-refresh-failed", {
+        ...diagnosticSummary,
+        error: error instanceof Error ? error.message : String(error),
+        method,
+        reason: "gateway-read",
+      });
+      return null;
+    }
+  }
+
+  async function invokeFastSyncSnapshot(channel, ipcArgs, payload, diagnosticSummary) {
+    const method = fastSyncSnapshotMethod(payload);
+    if (!method) return null;
+
+    const browserValue = await readBrowserFastSyncSnapshot(method, ipcArgs, diagnosticSummary);
+    if (browserValue && browserValue.hit) {
+      refreshFastSyncSnapshot(channel, ipcArgs, payload, method, diagnosticSummary, "browser-hit");
+      return browserValue;
+    }
+
+    const gatewayValue = await readGatewayFastSyncSnapshot(method, ipcArgs, diagnosticSummary);
+    if (gatewayValue && gatewayValue.hit) {
+      refreshFastSyncSnapshot(channel, ipcArgs, payload, method, diagnosticSummary, "gateway-hit");
+      return gatewayValue;
+    }
+
+    clientDiagnostic("fast-sync-miss", {
+      ...diagnosticSummary,
+      method,
+    });
+    return {
+      hit: false,
+      method,
+    };
   }
 
   /** locale-info 只依赖本地语言配置，直接短路可避免官方 app-server 尚未就绪时落回英文。 */
@@ -2832,6 +2982,8 @@
     if (localLocaleInfoInvoke) return localLocaleInfoInvoke;
     const cachedReadOnlyAppServerInvoke = invokeReadOnlyAppServerCached(channel, ipcArgs, payload, diagnosticSummary);
     if (cachedReadOnlyAppServerInvoke) return cachedReadOnlyAppServerInvoke;
+    const fastSyncInvoke = await invokeFastSyncSnapshot(channel, ipcArgs, payload, diagnosticSummary);
+    if (fastSyncInvoke && fastSyncInvoke.hit) return fastSyncInvoke.value;
     if (isLowPriorityFetchPayload(payload)) {
       /**
        * connector logo 属于首屏非关键资产，但官方 renderer 会一次性发很多。
@@ -2839,8 +2991,12 @@
        */
       return handleConnectorLogoFetchInvoke(channel, ipcArgs, payload, diagnosticSummary);
     }
-   return invokeGatewayImmediate(channel, ipcArgs, payload);
- }
+    const value = await invokeGatewayImmediate(channel, ipcArgs, payload);
+    if (fastSyncInvoke && fastSyncInvoke.method) {
+      writeFastSyncBrowserSnapshot(fastSyncInvoke.method, ipcArgs, value, diagnosticSummary, "miss");
+    }
+    return value;
+  }
 
   // ─── WS IPC 通道 ───────────────────────────────────────────────
   // 把 IPC 请求复用到已建立的 WebSocket 连接上，省掉每次 IPC 的 HTTP 请求开销。
