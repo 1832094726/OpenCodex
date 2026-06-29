@@ -29,6 +29,7 @@ const {
   cacheKeyForSnapshot,
   createFastSyncCache,
   isFastSyncCacheableMethod,
+  parseFastSyncSnapshotArgsJson,
 } = require("./core/fast-sync-cache.cjs");
 const { createLocalFileService } = require("./http/local-files.cjs");
 const { handleTokenUsageRequest } = require("./http/token-usage.cjs");
@@ -338,15 +339,13 @@ function createRequestHandler({ localFiles, pickedFiles, staticAssets }) {
         return sendJson(res, 400, { ok: false, error: "Method is not fast-sync cacheable" }, { "cache-control": "no-store" });
       }
 
-      let args = [];
-      try {
-        // args 与官方 IPC 入站参数保持同形，确保浏览器读取和 gateway 写入使用同一个快照 key。
-        args = JSON.parse(argsJson);
-      } catch {
-        return sendJson(res, 400, { ok: false, error: "Invalid args JSON" }, { "cache-control": "no-store" });
+      // args 与官方 IPC 入站参数保持同形，确保浏览器读取和 gateway 写入使用同一个快照 key。
+      const parsedArgs = parseFastSyncSnapshotArgsJson(argsJson);
+      if (!parsedArgs.ok) {
+        return sendJson(res, 400, { ok: false, error: parsedArgs.error }, { "cache-control": "no-store" });
       }
 
-      const key = cacheKeyForSnapshot(method, args);
+      const key = cacheKeyForSnapshot(method, parsedArgs.args);
       const snapshot = fastSyncCache.readSnapshot({ key });
       return sendJson(res, 200, { ok: true, snapshot }, { "cache-control": "no-store" });
     }

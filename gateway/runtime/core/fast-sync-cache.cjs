@@ -65,6 +65,31 @@ function cacheKeyForSnapshot(method, args) {
   return hashText(JSON.stringify({ method, args: stablePart(args || []) }));
 }
 
+function parseFastSyncSnapshotArgsJson(argsJson) {
+  try {
+    const args = JSON.parse(String(argsJson || "[]"));
+    // 读取端必须和 IPC 写入端同样使用数组参数，避免对象/数组形状不同导致 key 漂移。
+    return Array.isArray(args) ? { args, ok: true } : { error: "Invalid args JSON", ok: false };
+  } catch {
+    return { error: "Invalid args JSON", ok: false };
+  }
+}
+
+function valueFromFastSyncFetchResponsePayload(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  if (payload.type !== "fetch-response") return null;
+  if (payload.responseType !== "success") return null;
+  // 只有明确 2xx 的成功响应才写快照；缺失 status、重定向和错误响应都交给官方实时链路处理。
+  if (!Number.isFinite(payload.status) || payload.status < 200 || payload.status >= 300) return null;
+  const raw = typeof payload.bodyJsonString === "string" ? payload.bodyJsonString : "";
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 function safeClone(value) {
   if (value == null || typeof value !== "object") return value;
   // 只缓存可 JSON 序列化的数据，避免把运行时对象引用或函数写入磁盘。
@@ -161,4 +186,6 @@ module.exports = {
   cacheKeyForSnapshot,
   createFastSyncCache,
   isFastSyncCacheableMethod,
+  parseFastSyncSnapshotArgsJson,
+  valueFromFastSyncFetchResponsePayload,
 };

@@ -8,6 +8,8 @@ const {
   cacheKeyForSnapshot,
   createFastSyncCache,
   isFastSyncCacheableMethod,
+  parseFastSyncSnapshotArgsJson,
+  valueFromFastSyncFetchResponsePayload,
 } = require("../runtime/core/fast-sync-cache.cjs");
 
 const cacheModulePath = require.resolve("../runtime/core/fast-sync-cache.cjs");
@@ -54,6 +56,42 @@ test("request-shaped thread cache keys are stable", () => {
   const first = cacheKeyForSnapshot("thread/turns/list", [{ request: { id: "1", params: { threadId: "t1" } } }]);
   const second = cacheKeyForSnapshot("thread/turns/list", [{ request: { id: "2", params: { threadId: "t1" } } }]);
   assert.equal(first, second);
+});
+
+test("snapshot API args must parse to an array", () => {
+  assert.deepEqual(parseFastSyncSnapshotArgsJson('[{"threadId":"t1"}]'), {
+    args: [{ threadId: "t1" }],
+    ok: true,
+  });
+  assert.deepEqual(parseFastSyncSnapshotArgsJson('{"threadId":"t1"}'), {
+    error: "Invalid args JSON",
+    ok: false,
+  });
+  assert.deepEqual(parseFastSyncSnapshotArgsJson("{not-json"), {
+    error: "Invalid args JSON",
+    ok: false,
+  });
+});
+
+test("only successful fetch responses produce fast-sync snapshot values", () => {
+  const body = { items: [{ id: "turn-1" }] };
+  const success = {
+    type: "fetch-response",
+    responseType: "success",
+    status: 200,
+    bodyJsonString: JSON.stringify(body),
+  };
+  assert.deepEqual(valueFromFastSyncFetchResponsePayload(success), body);
+
+  for (const patch of [
+    { responseType: undefined },
+    { status: undefined },
+    { status: 302 },
+    { status: 400, error: "bad" },
+    { responseType: "error", status: 200 },
+  ]) {
+    assert.equal(valueFromFastSyncFetchResponsePayload({ ...success, ...patch }), null);
+  }
 });
 
 test("cache keys handle non-json args without throwing", () => {

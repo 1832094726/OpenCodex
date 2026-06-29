@@ -34,6 +34,7 @@ const {
   cacheKeyForSnapshot,
   createFastSyncCache,
   isFastSyncCacheableMethod,
+  valueFromFastSyncFetchResponsePayload,
 } = require("../core/fast-sync-cache.cjs");
 const { resolveOpenCodexI18n } = require("../../../shared/i18n/index.cjs");
 const { withPluginI18nMessages } = require("../core/plugin-assets.cjs");
@@ -1611,15 +1612,6 @@ function logComputerUseAuthResponse(routeBase, payload) {
   });
 }
 
-function fastSyncResponseValueFromPayload(payload) {
-  if (!payload || typeof payload !== "object") return null;
-  if (payload.type !== "fetch-response") return null;
-  if (payload.responseType && payload.responseType !== "success") return null;
-  const status = Number(payload.status || 0);
-  if (status >= 400) return null;
-  return parseFetchResponseBodyJson(payload);
-}
-
 function rememberFastSyncSnapshot(channel, _args, requestSummary, responseValue, context = {}) {
   void channel;
   const method = fastSyncMethodFromRequestSummary(requestSummary);
@@ -1784,7 +1776,7 @@ function routeOfficialWebContentsSend(channel, args) {
   // 这些 app-server 列表是只读初始化数据；成功回包落盘后，重启网关也能先用热缓存撑住弱网首屏。
   rememberReadOnlyAppServerResponse(channel, args, requestSummary, requestId);
   // fast-sync 快照只记录 allowlist 的官方成功只读回包，供浏览器首屏独立读取。
-  rememberFastSyncSnapshot(channel, args, requestSummary, fastSyncResponseValueFromPayload(payload), {
+  rememberFastSyncSnapshot(channel, args, requestSummary, valueFromFastSyncFetchResponsePayload(payload), {
     clientId: mappedClientId || targetClientId,
   });
   recordOfficialFlowResponse(mappedClientId || targetClientId, routeBase, payload, requestSummary);
