@@ -48,12 +48,14 @@ const requestRoutes = new Map();
 // requestRouteSummaries 保存 requestId 对应的入站摘要，让出站 fetch-response 日志也能带上原始 URL。
 const requestRouteSummaries = new Map();
 const APP_SERVER_READ_ONLY_CACHE_TTL_MS = Number(process.env.OPENCODEX_APP_SERVER_READ_ONLY_CACHE_TTL_MS || 5 * 60 * 1000);
-const APP_SERVER_READ_ONLY_METHODS = new Set(["app/list", "mcpServerStatus/list", "plugin/list", "thread/list"]);
-const APP_SERVER_STALE_READ_ONLY_METHODS = new Set(["app/list", "mcpServerStatus/list", "plugin/list"]);
+// plugin/list 会直接影响插件管理页和 agent 可见能力，安装/启用后必须实时读取，不能走只读缓存。
+const APP_SERVER_READ_ONLY_METHODS = new Set(["app/list", "mcpServerStatus/list", "thread/list"]);
+const APP_SERVER_STALE_READ_ONLY_METHODS = new Set(["app/list", "mcpServerStatus/list"]);
 const APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS = Number(
   process.env.OPENCODEX_APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS || 24 * 60 * 60 * 1000
 );
 const APP_SERVER_READ_ONLY_CACHE_FILE = path.join(RUNTIME_DIR, "cache", "app-server-read-only-cache.json");
+const DEFAULT_BROWSER_USE_AVAILABLE_BACKENDS = "chrome";
 const appServerReadOnlyCache = new Map();
 let appServerReadOnlyCacheLoaded = false;
 let appServerReadOnlyCacheSaveTimer = null;
@@ -67,6 +69,7 @@ const officialIpc = {
   hiddenWindow: null,
   hiddenWebContents: null,
 };
+let browserUseWindowCreationDepth = 0;
 
 const appServerSpawnHook = {
   installed: false,
@@ -79,7 +82,6 @@ const appServerSpawnHook = {
   replacementBinaryPath: null,
   lastError: null,
 };
-
 const COMPUTER_USE_AUTH_URLS = new Set([
   "computer-use-background-auth-read",
   "computer-use-background-auth-write",
@@ -192,6 +194,32 @@ function execFileCallbackFromArgs(args, options, callback) {
   return callback;
 }
 
+function appServerSpawnOptions(spawnOptions) {
+  /**
+   * hidden Electron runtime 需要隔离 TMPDIR 来避免抢官方 Desktop 的 live IPC owner；
+   * app-server 也必须留在同一个隔离 TMPDIR，Browser 技能才会连接 OpenCodex 自己的 Browser backend，
+   * 避免误控正在承载 OpenCodex 网页的官方 Codex 应用内浏览器标签页。
+   */
+  const env = { ...((spawnOptions && spawnOptions.env) || process.env) };
+  // Browser native pipe 会校验调用方 build flavor；官方传入精简 env 时需要补回这组生产环境标识。
+  env.BUILD_FLAVOR = env.BUILD_FLAVOR || process.env.BUILD_FLAVOR || "prod";
+  env.npm_package_codexBuildFlavor =
+    env.npm_package_codexBuildFlavor || process.env.npm_package_codexBuildFlavor || env.BUILD_FLAVOR;
+  env.BROWSER_USE_CODEX_APP_BUILD_FLAVOR = env.BROWSER_USE_CODEX_APP_BUILD_FLAVOR || env.npm_package_codexBuildFlavor;
+  // Web 入口不能把宿主 OpenCodex 页面暴露成 IAB 控制目标；默认仅开放 Chrome，仍允许环境变量显式启用 iab 调试。
+  env.BROWSER_USE_AVAILABLE_BACKENDS =
+    env.BROWSER_USE_AVAILABLE_BACKENDS ||
+    process.env.OPENCODEX_BROWSER_USE_AVAILABLE_BACKENDS ||
+    DEFAULT_BROWSER_USE_AVAILABLE_BACKENDS;
+  if (officialBundle && officialBundle.version && officialBundle.version !== "unknown") {
+    env.BROWSER_USE_CODEX_APP_VERSION = env.BROWSER_USE_CODEX_APP_VERSION || String(officialBundle.version);
+  }
+  if (process.env.npm_package_codexBuildNumber && !env.npm_package_codexBuildNumber) {
+    env.npm_package_codexBuildNumber = process.env.npm_package_codexBuildNumber;
+  }
+  return { ...(spawnOptions || {}), env };
+}
+
 function looksLikeOfficialCodexBinary(command, bundle, spawnOptions) {
   if (!bundle || typeof command !== "string" || !bundle.codexBinaryPath) return false;
   if (sameRealpath(command, bundle.codexBinaryPath)) return true;
@@ -264,7 +292,7 @@ function redirectHiddenAppServerSpawn(originalSpawn, bundle, self, command, args
   const normalizedArgs = spawnArgList(args);
   if (looksLikeOfficialCodexBinary(command, bundle, spawnOptions) && isHiddenOfficialAppServerArgs(normalizedArgs)) {
     recordHiddenAppServerRedirect("spawn", command, normalizedArgs, bundle.codexBinaryPath);
-    return originalSpawn.call(self, bundle.codexBinaryPath, normalizedArgs, spawnOptions);
+    return originalSpawn.call(self, bundle.codexBinaryPath, normalizedArgs, appServerSpawnOptions(spawnOptions));
   }
   return originalSpawn.apply(self, rawArguments);
 }
@@ -275,7 +303,7 @@ function redirectHiddenAppServerExecFile(originalExecFile, bundle, self, command
   if (looksLikeOfficialCodexBinary(command, bundle, execOptions) && isHiddenOfficialAppServerArgs(normalizedArgs)) {
     const execCallback = execFileCallbackFromArgs(args, options, callback);
     recordHiddenAppServerRedirect("execFile", command, normalizedArgs, bundle.codexBinaryPath);
-    return originalExecFile.call(self, bundle.codexBinaryPath, normalizedArgs, execOptions, execCallback);
+    return originalExecFile.call(self, bundle.codexBinaryPath, normalizedArgs, appServerSpawnOptions(execOptions), execCallback);
   }
   if (looksLikeComputerUseInstaller(command)) {
     const execCallback = execFileCallbackFromArgs(args, options, callback);
@@ -416,6 +444,199 @@ function setOfficialPackagedMode() {
   } catch {}
 }
 
+function browserUseClientEnv(bundle) {
+  const buildFlavor = process.env.BROWSER_USE_CODEX_APP_BUILD_FLAVOR || process.env.npm_package_codexBuildFlavor || "prod";
+  const version =
+    process.env.BROWSER_USE_CODEX_APP_VERSION ||
+    (bundle && bundle.version && bundle.version !== "unknown" ? String(bundle.version) : "");
+  return {
+    BROWSER_USE_AVAILABLE_BACKENDS:
+      process.env.BROWSER_USE_AVAILABLE_BACKENDS ||
+      process.env.OPENCODEX_BROWSER_USE_AVAILABLE_BACKENDS ||
+      DEFAULT_BROWSER_USE_AVAILABLE_BACKENDS,
+    BROWSER_USE_CODEX_APP_BUILD_FLAVOR: buildFlavor,
+    ...(version ? { BROWSER_USE_CODEX_APP_VERSION: version } : {}),
+  };
+}
+
+function patchBrowserUseClientEnvInFile(filePath, env) {
+  if (!exists(filePath)) return false;
+  const original = fs.readFileSync(filePath, "utf-8");
+  let next = original;
+  const envLiteral = JSON.stringify(env);
+  // 官方 browser-client 在 node_repl 环境里会读 nodeRepl.env；OpenCodex 当前该对象为空，需要给模块自身兜底。
+  if (!next.includes("OPEN_CODEX_BROWSER_USE_ENV")) {
+    next = next.replace(
+      "const listeners = new Map();\n",
+      `const listeners = new Map();\nconst OPEN_CODEX_BROWSER_USE_ENV = ${envLiteral};\n`
+    );
+  } else {
+    next = next.replace(/const OPEN_CODEX_BROWSER_USE_ENV = \{[^;]*\};/, `const OPEN_CODEX_BROWSER_USE_ENV = ${envLiteral};`);
+  }
+  // process shim 保留给依赖 process.env 的第三方逻辑，但不再作为唯一 fallback。
+  next = next.replace("    env: {},\n    version:", `    env: ${envLiteral},\n    version:`);
+  next = next.replace(/    env: \{"BROWSER_USE_[^}]*\},\n    version:/, `    env: ${envLiteral},\n    version:`);
+  // Browser Use 的配置读取函数只看 nodeRepl.env；这里补 process.env 与模块常量 fallback，保持官方优先级不变。
+  const patchedCu =
+    'function cu(t){let e=globalThis.nodeRepl?.env?.[t]??globalThis.process?.env?.[t]??OPEN_CODEX_BROWSER_USE_ENV[t];return typeof e=="string"?e:void 0}';
+  next = next.replace(
+    'function cu(t){let e=globalThis.nodeRepl?.env?.[t];return typeof e=="string"?e:void 0}',
+    patchedCu
+  );
+  next = next.replace(
+    'function cu(t){let e=globalThis.nodeRepl?.env?.[t]??globalThis.process?.env?.[t];return typeof e=="string"?e:void 0}',
+    patchedCu
+  );
+  if (next === original) return false;
+  fs.writeFileSync(filePath, next, "utf-8");
+  return true;
+}
+
+function patchBrowserUsePluginClients(bundle) {
+  /**
+   * OpenCodex 复用官方 bundled Browser 插件，但官方 node_repl MCP 在 Web gateway 下没有填充 nodeRepl.env。
+   * Browser native pipe 需要 build flavor 才允许连接，因此启动时给本机插件缓存补一个可重复应用的小补丁。
+   */
+  const env = browserUseClientEnv(bundle);
+  const roots = [
+    path.join(CODEX_HOME, "plugins", "cache", "openai-bundled", "browser"),
+    path.join(CODEX_HOME, "plugins", "cache", "openai-bundled", "chrome"),
+  ];
+  for (const root of roots) {
+    if (!exists(root)) continue;
+    let versions = [];
+    try {
+      versions = fs.readdirSync(root);
+    } catch {
+      continue;
+    }
+    for (const version of versions) {
+      const clientPath = path.join(root, version, "scripts", "browser-client.mjs");
+      try {
+        if (patchBrowserUseClientEnvInFile(clientPath, env)) {
+          diagnosticLog("browser-use", "client_env_patch_applied", {
+            clientPath,
+            envKeys: Object.keys(env).sort(),
+          });
+        }
+      } catch (error) {
+        diagnosticWarn("browser-use", "client_env_patch_failed", {
+          clientPath,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+}
+
+function patchOfficialBrowserUsePeerAuthorization(bundle) {
+  /**
+   * 官方 macOS release 版会要求 native pipe 对端具备官方签名身份。
+   * OpenCodex 运行的是本机自托管 gateway，进程没有官方签名；这里仅补丁抽取后的官方 runtime 缓存，
+   * 让 Browser/Chrome 插件能在 OpenCodex 内连接同进程启动的 Browser Use pipe。
+   */
+  if (!bundle || !bundle.bundleDir || process.platform !== "darwin") return;
+  const buildDir = path.join(bundle.bundleDir, ".vite", "build");
+  if (!exists(buildDir)) return;
+  let files = [];
+  try {
+    files = fs.readdirSync(buildDir).filter((fileName) => /^main-.*\.js$/.test(fileName));
+  } catch {
+    return;
+  }
+  for (const fileName of files) {
+    const filePath = path.join(buildDir, fileName);
+    try {
+      const original = fs.readFileSync(filePath, "utf-8");
+      const marker = "/* OpenCodex: skip Browser Use peer code-signing authorization for local gateway runtime. */";
+      if (original.includes(marker)) continue;
+      const next = original.replace(
+        /function cd\(\)\{[\s\S]*?\}function ld\(e\)\{/,
+        `function cd(){${marker}return()=>({authorized:!0})}function ld(e){`
+      );
+      if (next === original) continue;
+      fs.writeFileSync(filePath, next, "utf-8");
+      diagnosticLog("browser-use", "peer_authorization_patch_applied", { filePath });
+    } catch (error) {
+      diagnosticWarn("browser-use", "peer_authorization_patch_failed", {
+        filePath,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
+function patchOfficialBrowserUseHeadlessWebview(bundle) {
+  /**
+   * Web 版没有 Electron <webview>，官方 Browser Use 打开标签时会一直等 did-attach-webview。
+   * 这里只补丁本地抽取出的官方 runtime：当 Browser Use 需要新页面时，直接创建一个隐藏 BrowserWindow，
+   * 作为真实可被 CDP 控制的后台页面交给官方 browser-sidebar manager。
+   */
+  if (!bundle || !bundle.bundleDir) return;
+  const buildDir = path.join(bundle.bundleDir, ".vite", "build");
+  if (!exists(buildDir)) return;
+  let files = [];
+  try {
+    files = fs.readdirSync(buildDir).filter((fileName) => /^main-.*\.js$/.test(fileName));
+  } catch {
+    return;
+  }
+  const marker = "/* OpenCodex: create hidden BrowserWindow for Browser Use web runtime. */";
+  const originalFragment =
+    "return i!=null&&JL(l)!==i&&e.navigatePageToUrl(l,i,`browser_use`,`browser_use`),e.syncThreadState(o,n,c),sR(o,n,l)??(qH().info(`IAB_LIFECYCLE waiting for browser sidebar webview attachment`,{safe:{conversationId:n,ownerWebContentsId:o.owner.id,windowId:a},sensitive:{}}),e.browserUseOpenRequests.waitForOpen(o.owner,n,s,t=>{eU(e,{conversationId:n,windowId:a},s,t)}))";
+  const patchedFragment =
+    `return i!=null&&JL(l)!==i&&e.navigatePageToUrl(l,i,\`browser_use\`,\`browser_use\`),${marker}(async()=>{e.syncThreadState(o,n,c);let u=sR(o,n,l);if(u!=null)return u;if(globalThis.__OPEN_CODEX_ENABLE_HEADLESS_BROWSER_USE__!==!1)try{let d=globalThis.__OPEN_CODEX_CREATE_BROWSER_USE_WINDOW__?.();if(d==null)throw Error(\`OpenCodex Browser Use window factory is unavailable\`);if(l.view==null)throw Error(\`OpenCodex Browser Use page route has no view\`);l.view.webContents=d.webContents,i!=null&&d.webContents.loadURL?.(i),e.syncThreadState(o,n,c),e.resolveBrowserUseOpenRequests?.(o),u=sR(o,n,l);if(u!=null)return u}catch(d){qH().warning(\`IAB_LIFECYCLE opencodex browser webview attach failed\`,{safe:{conversationId:n,windowId:a},sensitive:{error:d}})}return qH().info(\`IAB_LIFECYCLE waiting for browser sidebar webview attachment\`,{safe:{conversationId:n,ownerWebContentsId:o.owner.id,windowId:a},sensitive:{}}),e.browserUseOpenRequests.waitForOpen(o.owner,n,s,t=>{eU(e,{conversationId:n,windowId:a},s,t)})})()`;
+  const brokenFragment =
+    "return i!=null&&JL(l)!==i&&e.navigatePageToUrl(l,i,`browser_use`,`browser_use`),/* OpenCodex: create hidden BrowserWindow for Browser Use web runtime. */e.syncThreadState(o,n,c);let u=sR(o,n,l);";
+  for (const fileName of files) {
+    const filePath = path.join(buildDir, fileName);
+    try {
+      const original = fs.readFileSync(filePath, "utf-8");
+      let next = original;
+      if (next.includes(brokenFragment)) {
+        next = next.replace(
+          /return i!=null&&JL\(l\)!==i&&e\.navigatePageToUrl\(l,i,`browser_use`,`browser_use`\),\/\* OpenCodex: create hidden BrowserWindow for Browser Use web runtime\. \*\/e\.syncThreadState\(o,n,c\);let u=sR\(o,n,l\);if\(u!=null\)return u;if\(globalThis\.__OPEN_CODEX_ENABLE_HEADLESS_BROWSER_USE__!==!1\)try\{let d=new a\.BrowserWindow\(\{__opencodexBrowserUsePage:!0,show:!1,width:1280,height:720,webPreferences:\{sandbox:!0,contextIsolation:!0,nodeIntegration:!1,nodeIntegrationInSubFrames:!1,nodeIntegrationInWorker:!1,webSecurity:!0,devTools:!0,backgroundThrottling:!1\}\}\);d\.setSkipTaskbar\?\.\(!0\),d\.setPosition\?\.\(-32000,-32000,!1\),e\.attachPageWebContents\(o,l,d\.webContents,c\.themeVariant\),u=sR\(o,n,l\);if\(u!=null\)return u\}catch\(d\)\{qH\(\)\.warning\(`IAB_LIFECYCLE opencodex headless browser webview attach failed`,\{safe:\{conversationId:n,windowId:a\},sensitive:\{error:d\}\}\)\}return qH\(\)\.info\(`IAB_LIFECYCLE waiting for browser sidebar webview attachment`,\{safe:\{conversationId:n,ownerWebContentsId:o\.owner\.id,windowId:a\},sensitive:\{\}\}\),e\.browserUseOpenRequests\.waitForOpen\(o\.owner,n,s,t=>\{eU\(e,\{conversationId:n,windowId:a\},s,t\)\}\)/,
+          patchedFragment
+        );
+      } else if (!next.includes(marker)) {
+        next = next.replace(originalFragment, patchedFragment);
+      }
+      next = next.replace(
+        /let d=new a\.BrowserWindow\(\{__opencodexBrowserUsePage:!0,show:!1,width:1280,height:720,webPreferences:\{sandbox:!0,contextIsolation:!0,nodeIntegration:!1,nodeIntegrationInSubFrames:!1,nodeIntegrationInWorker:!1,webSecurity:!0,devTools:!0,backgroundThrottling:!1\}\}\);d\.setSkipTaskbar\?\.\(!0\),d\.setPosition\?\.\(-32000,-32000,!1\),/,
+        "let d=globalThis.__OPEN_CODEX_CREATE_BROWSER_USE_WINDOW__?.();if(d==null)throw Error(`OpenCodex Browser Use window factory is unavailable`);"
+      );
+      next = next.replace(
+        "e.attachPageWebContents(o,l,d.webContents,c.themeVariant),",
+        "vX(e,o,l,d.webContents,c.themeVariant),"
+      );
+      next = next.replace(
+        "vX(e,o,l,d.webContents,c.themeVariant),u=sR(o,n,l);",
+        "vX(e,o,l,d.webContents,c.themeVariant),e.resolveBrowserUseOpenRequests?.(o),u=sR(o,n,l);"
+      );
+      next = next.replace(
+        "if(d==null)throw Error(`OpenCodex Browser Use window factory is unavailable`);vX(e,o,l,d.webContents,c.themeVariant),",
+        "if(d==null)throw Error(`OpenCodex Browser Use window factory is unavailable`);e.onBrowserSidebarStateChanged??=()=>{};vX(e,o,l,d.webContents,c.themeVariant),"
+      );
+      next = next.replace(
+        "if(d==null)throw Error(`OpenCodex Browser Use window factory is unavailable`);e.onBrowserSidebarStateChanged??=()=>{};vX(e,o,l,d.webContents,c.themeVariant),e.resolveBrowserUseOpenRequests?.(o),u=sR(o,n,l);",
+        "if(d==null)throw Error(`OpenCodex Browser Use window factory is unavailable`);if(l.view==null)throw Error(`OpenCodex Browser Use page route has no view`);l.view.webContents=d.webContents,i!=null&&d.webContents.loadURL?.(i),e.syncThreadState(o,n,c),e.resolveBrowserUseOpenRequests?.(o),u=sR(o,n,l);"
+      );
+      next = next.replace(
+        "IAB_LIFECYCLE opencodex headless browser webview attach failed",
+        "IAB_LIFECYCLE opencodex browser webview attach failed"
+      );
+      if (next === original) continue;
+      fs.writeFileSync(filePath, next, "utf-8");
+      diagnosticLog("browser-use", "headless_webview_patch_applied", { filePath });
+    } catch (error) {
+      diagnosticWarn("browser-use", "headless_webview_patch_failed", {
+        filePath,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
 function alignOfficialElectronEnvironment(bundle) {
   /**
    * 官方 main 认为自己运行在已打包 Codex.app 中。
@@ -440,6 +661,16 @@ function alignOfficialElectronEnvironment(bundle) {
   // 官方 main 在开发态会从环境/package metadata 推导 build flavor；gateway 明确按 prod 对齐。
   process.env.BUILD_FLAVOR = process.env.BUILD_FLAVOR || "prod";
   process.env.npm_package_codexBuildFlavor = process.env.npm_package_codexBuildFlavor || "prod";
+  // Browser Use native pipe 的服务端和 node_repl 客户端都要看到同一组官方构建标识。
+  process.env.BROWSER_USE_CODEX_APP_BUILD_FLAVOR =
+    process.env.BROWSER_USE_CODEX_APP_BUILD_FLAVOR || process.env.npm_package_codexBuildFlavor;
+  process.env.BROWSER_USE_AVAILABLE_BACKENDS =
+    process.env.BROWSER_USE_AVAILABLE_BACKENDS ||
+    process.env.OPENCODEX_BROWSER_USE_AVAILABLE_BACKENDS ||
+    DEFAULT_BROWSER_USE_AVAILABLE_BACKENDS;
+  if (bundle.version && bundle.version !== "unknown") {
+    process.env.BROWSER_USE_CODEX_APP_VERSION = process.env.BROWSER_USE_CODEX_APP_VERSION || String(bundle.version);
+  }
   if (bundle.build && bundle.build !== "unknown") {
     process.env.npm_package_codexBuildNumber = process.env.npm_package_codexBuildNumber || String(bundle.build);
   }
@@ -614,6 +845,29 @@ function payloadFromArgs(args) {
 
 function normalizeIpcArgs(args) {
   return Array.isArray(args) ? args : [args];
+}
+
+function normalizeDesktopFeatureAvailabilityForBundledPlugins(channel, args) {
+  if (channel !== MESSAGE_FROM_VIEW_CHANNEL) return;
+  const message = payloadFromArgs(args);
+  if (!message || typeof message !== "object" || message.type !== "electron-desktop-features-changed") return;
+  /**
+   * 官方 bundled plugin 管理器根据 desktop feature 位决定哪些内置插件可见/可安装。
+   * Web gateway 没有完整 Electron renderer 宿主能力探测，这里补齐本机 runner 已承载的能力，
+   * 让 sites、Browser、Chrome、Computer Use、Record & Replay 等插件继续走官方 reconcile 流程。
+   */
+  Object.assign(message, {
+    browserPane: true,
+    computerUse: true,
+    computerUseNodeRepl: true,
+    externalBrowserUse: true,
+    externalBrowserUseAllowed: true,
+    inAppBrowserUse: true,
+    inAppBrowserUseAllowed: true,
+    multiBrowserTabs: true,
+    recordAndReplay: true,
+    sites: true,
+  });
 }
 
 function stringRouteId(value) {
@@ -1125,6 +1379,29 @@ function logDesktopFeatureAvailability(channel, args) {
   });
 }
 
+function maybeHandleBrowserUseWebShimLifecycle(channel, args) {
+  if (channel !== MESSAGE_FROM_VIEW_CHANNEL) return false;
+  const message = payloadFromArgs(args);
+  if (!message || typeof message !== "object") return false;
+  /**
+   * Web 入口里的 <webview> shim 只是 DOM/布局兼容层，没有 Electron guest webContents。
+   * Browser Use 现在由 gateway 后台真实 BrowserWindow 承载，因此不能把 shim 的 hidden-browser-use
+   * 生命周期交给官方 main，否则官方会把真实 route 当作前端伪 webview 的销毁流程关闭。
+   */
+  if (
+    message.hostKind === "hidden-browser-use" &&
+    message.type === "browser-sidebar-webview-destroyed"
+  ) {
+    diagnosticLog("browser-use", "web_shim_lifecycle_ignored", {
+      type: message.type,
+      conversationId: message.conversationId || "",
+      browserTabId: message.browserTabId || "",
+    });
+    return true;
+  }
+  return false;
+}
+
 function parseFetchResponseBodyJson(payload) {
   if (!payload || typeof payload !== "object") return null;
   const raw = typeof payload.bodyJsonString === "string" ? payload.bodyJsonString : "";
@@ -1457,6 +1734,7 @@ function patchOfficialWebContents(webContents) {
 
 function registerOfficialWindow(win) {
   if (!win || win.__opencodexOfficialGatewayRegistered) return;
+  if (win.__opencodexBrowserUsePage || browserUseWindowCreationDepth > 0) return;
   win.__opencodexOfficialGatewayRegistered = true;
   // 第一扇官方窗口作为 IPC event.sender；后续窗口仍统一隐藏，避免桌面上弹出界面。
   if (!officialIpc.hiddenWindow || officialIpc.hiddenWindow.isDestroyed()) {
@@ -1485,16 +1763,64 @@ function installBrowserWindowHooks() {
   electron.__opencodexOfficialGatewayBrowserWindowPatched = true;
   const NativeBrowserWindow = electron.BrowserWindow;
 
+  globalThis.__OPEN_CODEX_CREATE_BROWSER_USE_WINDOW__ = function createOpenCodexBrowserUseWindow() {
+    /**
+     * Browser 插件只需要一个真实 webContents 供 CDP/截图/DOM 操作使用。
+     * 这里用原生 BrowserWindow 创建可见窗口，保持官方 Browser 使用时会在 Mac 侧显示浏览器的体验。
+     */
+    browserUseWindowCreationDepth += 1;
+    let win;
+    try {
+      win = new NativeBrowserWindow({
+        show: true,
+        width: 1280,
+        height: 720,
+        webPreferences: {
+          sandbox: true,
+          contextIsolation: true,
+          nodeIntegration: false,
+          nodeIntegrationInSubFrames: false,
+          nodeIntegrationInWorker: false,
+          webSecurity: true,
+          devTools: true,
+          backgroundThrottling: false,
+        },
+      });
+    } finally {
+      browserUseWindowCreationDepth = Math.max(0, browserUseWindowCreationDepth - 1);
+    }
+    win.__opencodexBrowserUsePage = true;
+    win.show();
+    win.focus();
+    return win;
+  };
+
   function GatewayBrowserWindow(options = {}) {
+    const isOpenCodexBrowserUsePage = options && options.__opencodexBrowserUsePage === true;
+    const normalizedOptions = { ...options };
+    delete normalizedOptions.__opencodexBrowserUsePage;
     // 官方 main 仍创建真实 BrowserWindow，但默认不可见并放到屏幕外。
-    const win = new NativeBrowserWindow({
-      ...options,
-      show: false,
-      opacity: 0,
-      x: -32000,
-      y: -32000,
-    });
-    registerOfficialWindow(win);
+    if (isOpenCodexBrowserUsePage) browserUseWindowCreationDepth += 1;
+    let win;
+    try {
+      win = new NativeBrowserWindow({
+        ...normalizedOptions,
+        show: false,
+        opacity: 0,
+        x: -32000,
+        y: -32000,
+      });
+    } finally {
+      if (isOpenCodexBrowserUsePage) browserUseWindowCreationDepth = Math.max(0, browserUseWindowCreationDepth - 1);
+    }
+    if (isOpenCodexBrowserUsePage) {
+      // Browser Use 页面需要保留原生 webContents.send，不能套官方主窗口的 IPC 转发 shim。
+      win.__opencodexBrowserUsePage = true;
+      win.show();
+      win.focus();
+    } else {
+      registerOfficialWindow(win);
+    }
     return win;
   }
 
@@ -1568,6 +1894,7 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   const event = createOfficialIpcEvent(context);
   const invokeArgs = normalizeIpcArgs(args);
   normalizeOfficialI18nFetchRequest(channel, invokeArgs);
+  normalizeDesktopFeatureAvailabilityForBundledPlugins(channel, invokeArgs);
   const requestSummary = incomingIpcDiagnosticSummary(channel, invokeArgs);
   const readOnlyCacheKey = readOnlyAppServerCacheKey(channel, invokeArgs, requestSummary);
   if (readOnlyCacheKey) requestSummary.cacheKey = readOnlyCacheKey;
@@ -1578,6 +1905,7 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   if (maybeHandleDomainIsolationGlobalStateFetch(channel, invokeArgs)) return true;
   if (maybeHandleNonCriticalFetch(channel, invokeArgs)) return true;
   if (maybeHandleLocaleInfoFetch(channel, invokeArgs)) return true;
+  if (maybeHandleBrowserUseWebShimLifecycle(channel, invokeArgs)) return true;
   // Computer Use 锁屏授权由官方 Installer 决定；这里额外记录同进程直接 status，方便和官方回包对照。
   logComputerUseAuthRequest(channel, invokeArgs);
   if (maybeHandleComputerUseAuthWriteNoop(channel, invokeArgs)) return true;
@@ -1838,6 +2166,9 @@ function startOfficialRuntime() {
   const { ensureOfficialBundle } = requireOfficialBundleProvider();
   officialBundle = ensureOfficialBundle({ projectRoot: PROJECT_ROOT });
   alignOfficialElectronEnvironment(officialBundle);
+  patchOfficialBrowserUsePeerAuthorization(officialBundle);
+  patchOfficialBrowserUseHeadlessWebview(officialBundle);
+  patchBrowserUsePluginClients(officialBundle);
   installAppServerSpawnHook(officialBundle);
   installIpcMainHooks();
   installBrowserWindowHooks();
@@ -1846,6 +2177,11 @@ function startOfficialRuntime() {
   });
   installOfficialTrayHook(electron);
   patchOfficialAppSingleton();
+
+  // 官方 build-flavor 解析器会从 process.cwd()/package.json 读取构建元信息，需让 cwd 指向抽取后的官方 bundle。
+  if (officialBundle.bundleDir) {
+    process.chdir(officialBundle.bundleDir);
+  }
 
   // 官方 bootstrap 负责注册 IPC handler、创建隐藏 BrowserWindow 和启动自己的 app-server 连接。
   require(officialBundle.bootstrapPath);

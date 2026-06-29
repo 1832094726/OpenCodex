@@ -29,7 +29,8 @@ const ORPHAN_TARGET_RESPONSE_BUFFER_TTL_MS = Number(process.env.OPENCODEX_ORPHAN
 const ORPHAN_TARGET_RESPONSE_BUFFER_MAX_MESSAGES = Number(process.env.OPENCODEX_ORPHAN_TARGET_RESPONSE_BUFFER_MAX_MESSAGES || 100);
 const APP_HOST_MISSING_RELAY_BUFFER_TTL_MS = Number(process.env.OPENCODEX_APP_HOST_MISSING_RELAY_BUFFER_TTL_MS || 30 * 1000);
 const APP_HOST_MISSING_RELAY_BUFFER_MAX_MESSAGES = Number(process.env.OPENCODEX_APP_HOST_MISSING_RELAY_BUFFER_MAX_MESSAGES || 100);
-const APP_HOST_READ_ONLY_METHODS = new Set(["app/list", "mcpServerStatus/list", "plugin/list"]);
+// 插件列表会随安装/启用即时变化，转发层不缓存 plugin/list，避免管理页显示旧状态。
+const APP_HOST_READ_ONLY_METHODS = new Set(["app/list", "mcpServerStatus/list"]);
 const appHostReadOnlyCache = new Map();
 const appHostReadOnlyInFlight = new Map();
 const APP_HOST_READ_ONLY_CACHE_FILE = path.join(RUNTIME_DIR, "cache", "app-host-read-only-cache.json");

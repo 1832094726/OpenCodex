@@ -2325,7 +2325,6 @@
   const READ_ONLY_APP_SERVER_METHODS = new Set([
     "app/list",
     "mcpServerStatus/list",
-    "plugin/list",
   ]);
 
   /** 提取官方 app-server 只读方法名；这些方法多次并发调用时结果可短时间复用。 */
