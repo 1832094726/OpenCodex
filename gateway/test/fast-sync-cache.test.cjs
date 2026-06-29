@@ -10,6 +10,8 @@ const {
   isFastSyncCacheableMethod,
 } = require("../runtime/core/fast-sync-cache.cjs");
 
+const cacheModulePath = require.resolve("../runtime/core/fast-sync-cache.cjs");
+
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-fast-sync-test-"));
 }
@@ -88,6 +90,30 @@ test("invalid ttl options fall back to the default ttl", () => {
   const key = cacheKeyForSnapshot("thread/list", []);
   cache.writeSnapshot({ key, method: "thread/list", value: { items: [] } });
   assert.deepEqual(cache.readSnapshot({ key })?.value, { items: [] });
+});
+
+test("invalid env default ttl falls back to ten minutes", () => {
+  const dir = tempDir();
+  const previousTtl = process.env.OPENCODEX_FAST_SYNC_CACHE_TTL_MS;
+
+  try {
+    process.env.OPENCODEX_FAST_SYNC_CACHE_TTL_MS = "Infinity";
+    delete require.cache[cacheModulePath];
+
+    const freshModule = require("../runtime/core/fast-sync-cache.cjs");
+    const cache = freshModule.createFastSyncCache({ dir });
+    const key = freshModule.cacheKeyForSnapshot("thread/list", []);
+    cache.writeSnapshot({ key, method: "thread/list", value: { items: [] }, capturedAtMs: Date.now() - 11 * 60 * 1000 });
+
+    assert.equal(cache.readSnapshot({ key }), null);
+  } finally {
+    if (previousTtl == null) {
+      delete process.env.OPENCODEX_FAST_SYNC_CACHE_TTL_MS;
+    } else {
+      process.env.OPENCODEX_FAST_SYNC_CACHE_TTL_MS = previousTtl;
+    }
+    delete require.cache[cacheModulePath];
+  }
 });
 
 test("corrupt snapshots are deleted and treated as missing", () => {

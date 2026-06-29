@@ -2,7 +2,8 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const DEFAULT_TTL_MS = Number(process.env.OPENCODEX_FAST_SYNC_CACHE_TTL_MS || 10 * 60 * 1000);
+const FALLBACK_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_TTL_MS = normalizeTtlMs(process.env.OPENCODEX_FAST_SYNC_CACHE_TTL_MS, FALLBACK_TTL_MS);
 const CACHEABLE_METHODS = new Set([
   "account/read",
   "config/read",
@@ -16,9 +17,10 @@ function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
-function normalizeTtlMs(value) {
+function normalizeTtlMs(value, fallbackTtlMs = DEFAULT_TTL_MS) {
   const ttlMs = Number(value);
-  return Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : DEFAULT_TTL_MS;
+  // TTL 必须是有限正数；env 配错时回退到硬编码 10 分钟，避免 Infinity 让快照永不过期。
+  return Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : fallbackTtlMs;
 }
 
 function stablePart(value, seen = new WeakSet(), pathParts = []) {
