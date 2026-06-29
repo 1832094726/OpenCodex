@@ -43,11 +43,12 @@ function stablePart(value, seen = new WeakSet(), pathParts = []) {
   if (Array.isArray(value)) return value.map((item, index) => stablePart(item, seen, pathParts.concat(String(index))));
 
   const result = {};
+  const hasRequestEnvelope = Object.prototype.hasOwnProperty.call(value, "request");
   for (const key of Object.keys(value).sort()) {
     const nextPath = pathParts.concat(key);
     // 只忽略请求包络上的易变 id；业务对象里的 id 必须保留，避免不同业务对象误命中。
     const isTopLevelWrapper = pathParts.length === 1 && /^\d+$/.test(pathParts[0]);
-    if (isTopLevelWrapper && (key === "id" || key === "requestId")) continue;
+    if (isTopLevelWrapper && hasRequestEnvelope && (key === "id" || key === "requestId")) continue;
     if (pathParts.length === 2 && /^\d+$/.test(pathParts[0]) && pathParts[1] === "request" && key === "id") continue;
     result[key] = stablePart(value[key], seen, nextPath);
   }
@@ -72,6 +73,10 @@ function safeClone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function normalizedFieldName(key) {
+  return String(key).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
 function redactSensitiveFields(value) {
   if (value == null || typeof value !== "object") return value;
   if (Array.isArray(value)) return value.map((item) => redactSensitiveFields(item));
@@ -79,7 +84,7 @@ function redactSensitiveFields(value) {
   const result = {};
   for (const [key, item] of Object.entries(value)) {
     // 快照会落盘，常见凭证字段统一替换，避免弱网快速恢复缓存泄露敏感信息。
-    result[key] = SENSITIVE_FIELD_NAMES.has(key.toLowerCase()) ? REDACTED_VALUE : redactSensitiveFields(item);
+    result[key] = SENSITIVE_FIELD_NAMES.has(normalizedFieldName(key)) ? REDACTED_VALUE : redactSensitiveFields(item);
   }
   return result;
 }

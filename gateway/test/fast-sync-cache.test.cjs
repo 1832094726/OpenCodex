@@ -27,9 +27,15 @@ test("allows only first-screen read methods", () => {
 });
 
 test("cache keys ignore volatile request ids", () => {
-  const first = cacheKeyForSnapshot("thread/read", [{ id: "a", threadId: "t1" }]);
-  const second = cacheKeyForSnapshot("thread/read", [{ id: "b", threadId: "t1" }]);
+  const first = cacheKeyForSnapshot("thread/read", [{ id: "a", request: { id: "r1", params: { threadId: "t1" } } }]);
+  const second = cacheKeyForSnapshot("thread/read", [{ id: "b", request: { id: "r2", params: { threadId: "t1" } } }]);
   assert.equal(first, second);
+});
+
+test("cache keys keep ordinary top-level business ids", () => {
+  const first = cacheKeyForSnapshot("thread/read", [{ id: "thread-a", title: "same" }]);
+  const second = cacheKeyForSnapshot("thread/read", [{ id: "thread-b", title: "same" }]);
+  assert.notEqual(first, second);
 });
 
 test("cache keys keep nested business ids", () => {
@@ -75,7 +81,12 @@ test("redacts sensitive fields before writing snapshots", () => {
         nested: {
           password: "password-value",
           ordinary: "kept",
-          headers: [{ cookie: "cookie-value" }, { SetCookie: "set-cookie-value", ok: true }],
+          access_token: "access-token-value",
+          headers: [
+            { cookie: "cookie-value" },
+            { SetCookie: "set-cookie-value", ok: true },
+            { "set-cookie": "set-cookie-kebab-value", api_key: "api-key-value" },
+          ],
         },
       },
     }),
@@ -89,7 +100,12 @@ test("redacts sensitive fields before writing snapshots", () => {
     nested: {
       password: "[redacted]",
       ordinary: "kept",
-      headers: [{ cookie: "[redacted]" }, { SetCookie: "[redacted]", ok: true }],
+      access_token: "[redacted]",
+      headers: [
+        { cookie: "[redacted]" },
+        { SetCookie: "[redacted]", ok: true },
+        { "set-cookie": "[redacted]", api_key: "[redacted]" },
+      ],
     },
   });
 });
