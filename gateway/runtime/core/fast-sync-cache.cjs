@@ -16,17 +16,26 @@ function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
-function stablePart(value, seen = new WeakSet()) {
+function normalizeTtlMs(value) {
+  const ttlMs = Number(value);
+  return Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : DEFAULT_TTL_MS;
+}
+
+function stablePart(value, seen = new WeakSet(), pathParts = []) {
+  if (typeof value === "bigint") return { __type: "bigint", value: value.toString() };
   if (value == null || typeof value !== "object") return value;
   if (seen.has(value)) return "[Circular]";
   seen.add(value);
-  if (Array.isArray(value)) return value.map((item) => stablePart(item, seen));
+  if (Array.isArray(value)) return value.map((item, index) => stablePart(item, seen, pathParts.concat(String(index))));
 
   const result = {};
   for (const key of Object.keys(value).sort()) {
-    // 请求 id 每次调用都会变化，不能参与缓存 key，否则同一个首屏读请求无法命中快照。
-    if (key === "id" || key === "requestId") continue;
-    result[key] = stablePart(value[key], seen);
+    const nextPath = pathParts.concat(key);
+    // 只忽略请求包络上的易变 id；业务对象里的 id 必须保留，避免不同业务对象误命中。
+    const isTopLevelWrapper = pathParts.length === 1 && /^\d+$/.test(pathParts[0]);
+    if (isTopLevelWrapper && (key === "id" || key === "requestId")) continue;
+    if (pathParts.length === 2 && /^\d+$/.test(pathParts[0]) && pathParts[1] === "request" && key === "id") continue;
+    result[key] = stablePart(value[key], seen, nextPath);
   }
   return result;
 }
@@ -51,7 +60,7 @@ function safeClone(value) {
 
 function createFastSyncCache(options = {}) {
   const dir = options.dir || path.join(process.cwd(), ".data", "runtime", "cache", "fast-sync");
-  const ttlMs = Number(options.ttlMs || DEFAULT_TTL_MS);
+  const ttlMs = normalizeTtlMs(options.ttlMs ?? DEFAULT_TTL_MS);
 
   function filePathForKey(key) {
     return path.join(dir, `${hashText(key)}.json`);
@@ -87,17 +96,28 @@ function createFastSyncCache(options = {}) {
   function writeSnapshot({ capturedAtMs = Date.now(), key, method, value }) {
     if (!key || !isFastSyncCacheableMethod(method)) return false;
 
-    ensureDir(dir);
-    const filePath = filePathForKey(key);
-    const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-    // 快照写入采用临时文件再 rename，避免 gateway 重启或弱网中断时留下半截 JSON。
-    fs.writeFileSync(
-      tmpPath,
-      JSON.stringify({ capturedAtMs, key, method, schemaVersion: 1, value: safeClone(value) }),
-      "utf8"
-    );
-    fs.renameSync(tmpPath, filePath);
-    return true;
+    let tmpPath = null;
+    try {
+      ensureDir(dir);
+      const filePath = filePathForKey(key);
+      tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+      // 快照写入采用临时文件再 rename，避免 gateway 重启或弱网中断时留下半截 JSON。
+      fs.writeFileSync(
+        tmpPath,
+        JSON.stringify({ capturedAtMs, key, method, schemaVersion: 1, value: safeClone(value) }),
+        "utf8"
+      );
+      fs.renameSync(tmpPath, filePath);
+      return true;
+    } catch {
+      if (tmpPath) {
+        try {
+          // 写入任一步失败都清掉临时文件，让调用方可以安全降级为无缓存路径。
+          fs.unlinkSync(tmpPath);
+        } catch {}
+      }
+      return false;
+    }
   }
 
   return { filePathForKey, readSnapshot, writeSnapshot };

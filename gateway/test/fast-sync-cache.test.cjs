@@ -30,6 +30,25 @@ test("cache keys ignore volatile request ids", () => {
   assert.equal(first, second);
 });
 
+test("cache keys keep nested business ids", () => {
+  const first = cacheKeyForSnapshot("thread/read", [{ request: { id: "r1" }, thread: { id: "t1" } }]);
+  const second = cacheKeyForSnapshot("thread/read", [{ request: { id: "r1" }, thread: { id: "t2" } }]);
+  assert.notEqual(first, second);
+});
+
+test("cache keys ignore nested request ids", () => {
+  const first = cacheKeyForSnapshot("thread/read", [{ request: { id: "r1" }, threadId: "t1" }]);
+  const second = cacheKeyForSnapshot("thread/read", [{ request: { id: "r2" }, threadId: "t1" }]);
+  assert.equal(first, second);
+});
+
+test("cache keys handle non-json args without throwing", () => {
+  const args = [{ threadId: 1n }];
+  args[0].self = args[0];
+  assert.doesNotThrow(() => cacheKeyForSnapshot("thread/read", args));
+  assert.equal(cacheKeyForSnapshot("thread/read", args), cacheKeyForSnapshot("thread/read", args));
+});
+
 test("writes and reads a snapshot from disk", () => {
   const dir = tempDir();
   const cache = createFastSyncCache({ dir, ttlMs: 60_000 });
@@ -38,12 +57,37 @@ test("writes and reads a snapshot from disk", () => {
   assert.deepEqual(cache.readSnapshot({ key })?.value, { threadId: "t1", title: "Hello" });
 });
 
+test("writeSnapshot returns false for circular or bigint values", () => {
+  const dir = tempDir();
+  const cache = createFastSyncCache({ dir, ttlMs: 60_000 });
+  const circular = { threadId: "t1" };
+  circular.self = circular;
+
+  assert.equal(
+    cache.writeSnapshot({ key: cacheKeyForSnapshot("thread/read", [{ threadId: "t1" }]), method: "thread/read", value: circular }),
+    false
+  );
+  assert.equal(
+    cache.writeSnapshot({ key: cacheKeyForSnapshot("thread/read", [{ threadId: "t2" }]), method: "thread/read", value: { count: 1n } }),
+    false
+  );
+  assert.deepEqual(fs.readdirSync(dir, { recursive: true }), []);
+});
+
 test("expired snapshots are ignored", () => {
   const dir = tempDir();
   const cache = createFastSyncCache({ dir, ttlMs: 1 });
   const key = cacheKeyForSnapshot("thread/list", []);
   cache.writeSnapshot({ key, method: "thread/list", value: { items: [] }, capturedAtMs: Date.now() - 10_000 });
   assert.equal(cache.readSnapshot({ key }), null);
+});
+
+test("invalid ttl options fall back to the default ttl", () => {
+  const dir = tempDir();
+  const cache = createFastSyncCache({ dir, ttlMs: -1 });
+  const key = cacheKeyForSnapshot("thread/list", []);
+  cache.writeSnapshot({ key, method: "thread/list", value: { items: [] } });
+  assert.deepEqual(cache.readSnapshot({ key })?.value, { items: [] });
 });
 
 test("corrupt snapshots are deleted and treated as missing", () => {
