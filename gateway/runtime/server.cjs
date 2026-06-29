@@ -44,6 +44,7 @@ const { createPickedFilesService } = require("./ipc/picked-files.cjs");
 const { createStaticAssetService } = require("./http/static-assets.cjs");
 const { createWsHub } = require("./ipc/ws-hub.cjs");
 const { diagnosticError, diagnosticLog, diagnosticWarn, sanitizeDiagnosticValue, shortId } = require("./core/diagnostics.cjs");
+const { snapshotFlowState } = require("./core/flow-monitor.cjs");
 const { markGatewaySilentQuit } = require("./lifecycle/quit-confirmation-suppressor.cjs");
 
 // server.cjs 只负责编排 HTTP/WS 生命周期；官方 Electron hook 细节放在 official-runtime.cjs。
@@ -304,6 +305,20 @@ function createRequestHandler({ localFiles, pickedFiles, staticAssets }) {
 
     if (pathname === "/api/health") {
       return sendJson(res, 200, buildGatewayStatus());
+    }
+
+    if (pathname === "/api/diagnostics/flow" && req.method === "GET") {
+      // 链路状态只返回阶段、耗时和短 ID，不包含用户消息正文，方便手机端排障时直接查看。
+      return sendJson(
+        res,
+        200,
+        snapshotFlowState({
+          clientId: url.searchParams.get("clientId") || "",
+          limit: url.searchParams.get("limit") || 80,
+          threadId: url.searchParams.get("threadId") || "",
+        }),
+        { "cache-control": "no-store" }
+      );
     }
 
     if (pathname === "/api/ipc/handlers") {

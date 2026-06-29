@@ -6,6 +6,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { diagnosticLog, diagnosticWarn, shortId } = require("../core/diagnostics.cjs");
+const { recordFlowEvent } = require("../core/flow-monitor.cjs");
 const { DEBUG_LOGS, RUNTIME_DIR, ensureDir } = require("../core/config.cjs");
 const { resolveOpenCodexI18n } = require("../../../shared/i18n/index.cjs");
 
@@ -832,6 +833,14 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     if (!socket || socket.readyState !== socket.OPEN) {
       rememberPendingTargetMessage(clientId, payload, options);
       rememberOrphanTargetResponse(clientId, payload, options);
+      recordFlowEvent({
+        clientId,
+        hint: "gateway 找不到当前页面连接，回包已暂存等待重连",
+        level: "error",
+        requestId: routeIdFromPayload(payload),
+        scope: "connection",
+        stage: "send_to_missing_client",
+      });
       diagnosticWarn("ws-hub", "send_to_missing_client", {
         ...wsPayloadSummary(payload),
         clientId: shortId(clientId),
@@ -907,7 +916,8 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   }
 
   function postAppHostPortData(ws, portId, relay, data) {
-    postAppHostPortData(ws, portId, relay, data);
+    // 断线期间缓存的 app-host 帧恢复后要投回官方 MessagePort，不能再次调用自己。
+    relay.postMessage(data);
     // null 是 MessagePort 关闭信号，发送给官方后即可从索引移除。
     if (data == null) {
       const relays = appHostRelaysForSocket(ws);
@@ -940,6 +950,55 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       queued: queue.length,
       sent,
     });
+    recordFlowEvent({
+      clientId,
+      hint: `relay 已恢复，缓存 ${sent}/${queue.length} 条已补发`,
+      scope: "relay",
+      stage: sent === queue.length ? "relay_flushed" : "relay_partial_flush",
+    });
+  }
+
+  function createAndAttachAppHostRelay(ws, clientId, portId, remoteAddress) {
+    // app-host relay 可能在手机切后台、WebSocket 恢复或官方 AppView 重建后丢失；
+    // 这里集中创建官方 MessagePort，connect 帧和后续消息自愈都复用同一套生命周期。
+    const relays = appHostRelaysForSocket(ws);
+    let relay = null;
+    relay = createAppHostRelay({
+      clientId,
+      portId,
+      remoteAddress: remoteAddress || socketRemoteAddress(ws),
+      onClose(reason) {
+        if (relays.get(portId) === relay) relays.delete(portId);
+        safeSend(ws, { type: "app-host-port-close", portId, reason }, { suppressDiagnostic: true });
+        if (DEBUG_LOGS) {
+          diagnosticLog("ws-hub", "app_host_closed", {
+            clientId: shortId(clientId),
+            portId: shortId(portId),
+            reason,
+          });
+        }
+      },
+      onError(error) {
+        safeSend(
+          ws,
+          {
+            type: "app-host-port-error",
+            portId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          { suppressDiagnostic: true }
+        );
+      },
+      onMessage(data) {
+        // app-host RPC 是高频字符串流，只转发不逐条写日志，避免首屏日志刷屏和拖慢关键链路。
+        maybeHandleAppHostReadOnlyResponse(ws, portId, relay, data);
+        safeSend(ws, { type: "app-host-port-message", portId, data }, { suppressDiagnostic: true });
+      },
+    });
+    relays.set(portId, relay);
+    safeSend(ws, { type: "app-host-port-connected", portId }, { suppressDiagnostic: true });
+    flushPendingAppHostMessages(ws, clientId, portId, relay);
+    return relay;
   }
 
   function handleAppHostConnect(ws, req, message) {
@@ -1058,15 +1117,52 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       return true;
     }
     const relays = appHostRelaysForSocket(ws);
-    const relay = relays.get(portId);
+    let relay = relays.get(portId);
     if (!relay) {
       rememberPendingAppHostMessage(clientId, portId, data);
+      recordFlowEvent({
+        clientId,
+        hint: "app-host relay 丢失，正在缓存消息并尝试重建通道",
+        level: "warn",
+        scope: "relay",
+        stage: "relay_missing",
+      });
       diagnosticWarn("ws-hub", "app_host_message_missing_relay", {
         clientId: shortId(clientId),
         portId: shortId(portId),
         queued: prunePendingAppHostMessages(clientId, portId).length,
       });
-      return true;
+      if (typeof createAppHostRelay !== "function") return true;
+      try {
+        // 手机端可能仍持有可用的浏览器 MessagePort，但 gateway 侧 relay 已被释放；
+        // 当前消息到达时立即补建官方端口，再把缓存和本帧继续送过去，避免用户消息显示失败后消失。
+        relay = createAndAttachAppHostRelay(ws, clientId, portId, socketRemoteAddress(ws));
+        return true;
+      } catch (error) {
+        recordFlowEvent({
+          clientId,
+          error: error instanceof Error ? error.message : String(error),
+          hint: "relay 重建失败，需要刷新会话或重连 WS",
+          level: "error",
+          scope: "relay",
+          stage: "relay_failed",
+        });
+        diagnosticWarn("ws-hub", "app_host_missing_relay_recreate_failed", {
+          clientId: shortId(clientId),
+          error: error instanceof Error ? error.message : String(error),
+          portId: shortId(portId),
+        });
+        safeSend(
+          ws,
+          {
+            type: "app-host-port-error",
+            portId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          { suppressDiagnostic: true }
+        );
+        return true;
+      }
     }
     if (WS_DEBUG_ENABLED && typeof data === "string") recordAppHostTraffic(ws, "browser-to-official", portId, byteLength(data));
     if (maybeHandleAppHostLocalRequest(ws, portId, data)) return true;
@@ -1165,6 +1261,12 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
             clientsById.set(clientId, ws);
             flushPendingTargetMessages(ws, clientId);
             flushOrphanTargetResponses(ws, clientId);
+            recordFlowEvent({
+              clientId,
+              hint: "WebSocket 已确认 clientId，浏览器可以接收定向回包",
+              scope: "connection",
+              stage: "ws_ready",
+            });
             if (DEBUG_LOGS) {
               diagnosticLog("ws-hub", "hello", {
                 clientId: shortId(clientId),

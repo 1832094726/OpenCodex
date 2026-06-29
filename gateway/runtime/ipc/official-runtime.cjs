@@ -29,6 +29,7 @@ const {
 } = require("../core/config.cjs");
 const { persistedAtomSnapshotForRenderer } = require("../state/desktop-state.cjs");
 const { diagnosticLog, diagnosticWarn, shortId } = require("../core/diagnostics.cjs");
+const { recordFlowEvent } = require("../core/flow-monitor.cjs");
 const { resolveOpenCodexI18n } = require("../../../shared/i18n/index.cjs");
 const { withPluginI18nMessages } = require("../core/plugin-assets.cjs");
 const {
@@ -433,6 +434,9 @@ function alignOfficialElectronEnvironment(bundle) {
   } catch {}
   process.env.CODEX_ELECTRON_USER_DATA_PATH = process.env.CODEX_ELECTRON_USER_DATA_PATH || runtimeUserDataDir;
   process.env.CODEX_HOME = process.env.CODEX_HOME || CODEX_HOME;
+  if (bundle.codexBinaryPath) {
+    process.env.CODEX_CLI_PATH = process.env.CODEX_CLI_PATH || bundle.codexBinaryPath;
+  }
   process.env.TMPDIR = runtimeTempDir;
   process.env.TMP = runtimeTempDir;
   process.env.TEMP = runtimeTempDir;
@@ -687,6 +691,89 @@ function incomingIpcDiagnosticSummary(channel, payload) {
     }
   }
   return summary;
+}
+
+function valueStringAtKeys(value, keys, depth = 0, seen = new WeakSet()) {
+  if (!value || typeof value !== "object" || depth > 5) return "";
+  if (seen.has(value)) return "";
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const nested = valueStringAtKeys(item, keys, depth + 1, seen);
+      if (nested) return nested;
+    }
+    return "";
+  }
+  for (const key of keys) {
+    if (typeof value[key] === "string" && value[key]) return value[key];
+  }
+  for (const nested of Object.values(value)) {
+    const found = valueStringAtKeys(nested, keys, depth + 1, seen);
+    if (found) return found;
+  }
+  return "";
+}
+
+function flowThreadIdFromPayload(payload) {
+  // 官方不同版本会把对话 ID 放在 threadId、conversationId 或 params 里，递归提取只保留 ID，不读取正文。
+  return valueStringAtKeys(payload, ["threadId", "conversationId", "conversation_id"]);
+}
+
+function flowStageForMethod(method, phase) {
+  const name = String(method || "");
+  const start = phase === "start";
+  if (name === "thread/read") return start ? "thread_reading" : "thread_read";
+  if (name === "thread/resume") return start ? "thread_resuming" : "thread_resumed";
+  if (name === "thread/turns/list") return start ? "turns_loading" : "thread_ready";
+  if (name === "turn/start") return start ? "turn_starting" : "turn_accepted";
+  return "";
+}
+
+function flowScopeForMethod(method) {
+  return String(method || "") === "turn/start" ? "turn" : "thread";
+}
+
+function shouldTrackFlowMethod(method) {
+  return !!flowStageForMethod(method, "start");
+}
+
+function recordOfficialFlowStart(clientId, summary, payload) {
+  const method = summary && summary.method;
+  if (!clientId || !shouldTrackFlowMethod(method)) return;
+  recordFlowEvent({
+    clientId,
+    hint: method === "turn/start" ? "消息正在提交到官方 runtime" : "正在拉取对话历史状态",
+    method,
+    requestId: summary.requestId || "",
+    scope: flowScopeForMethod(method),
+    stage: flowStageForMethod(method, "start"),
+    threadId: flowThreadIdFromPayload(payload),
+  });
+}
+
+function recordOfficialFlowResponse(clientId, routeBase, payload, requestSummary) {
+  const method = routeBase && routeBase.method;
+  if (!clientId || !shouldTrackFlowMethod(method)) return;
+  const startedAtMs = requestSummary && Number(requestSummary.startedAtMs);
+  const durationMs = Number.isFinite(startedAtMs) ? Date.now() - startedAtMs : undefined;
+  const ok = !(payload && typeof payload === "object" && (payload.error || payload.status >= 400));
+  recordFlowEvent({
+    clientId,
+    durationMs,
+    error: ok ? "" : (payload && (payload.error || payload.status)) || "",
+    hint: ok
+      ? method === "turn/start"
+        ? "消息已提交到官方 runtime"
+        : "对话历史阶段完成"
+      : "官方 runtime 返回失败",
+    level: ok ? "info" : "error",
+    method,
+    ok,
+    requestId: routeBase.requestId || "",
+    scope: flowScopeForMethod(method),
+    stage: ok ? flowStageForMethod(method, "end") : `${flowStageForMethod(method, "start")}_failed`,
+    threadId: flowThreadIdFromPayload(payload) || flowThreadIdFromPayload(requestSummary),
+  });
 }
 
 function stableReadOnlyCachePart(value, seen = new WeakSet()) {
@@ -1319,9 +1406,14 @@ function isTargetedOutgoing(channel, payload) {
 function rememberRequestRoute(channel, payload, clientId, summary = null) {
   if (!clientId) return;
   const requestId = requestRouteIdFromIncoming(channel, payload);
+  const routeSummary = {
+    ...(summary || incomingIpcDiagnosticSummary(channel, payload)),
+    startedAtMs: Date.now(),
+  };
+  recordOfficialFlowStart(clientId, routeSummary, payload);
   if (requestId) {
     requestRoutes.set(requestId, clientId);
-    requestRouteSummaries.set(requestId, summary || incomingIpcDiagnosticSummary(channel, payload));
+    requestRouteSummaries.set(requestId, routeSummary);
   }
 }
 
@@ -1369,6 +1461,7 @@ function routeOfficialWebContentsSend(channel, args) {
   };
   // 这些 app-server 列表是只读初始化数据；成功回包落盘后，重启网关也能先用热缓存撑住弱网首屏。
   rememberReadOnlyAppServerResponse(channel, args, requestSummary, requestId);
+  recordOfficialFlowResponse(mappedClientId || targetClientId, routeBase, payload, requestSummary);
   // 只对锁屏授权相关回包做结构化摘要，避免把大图标 dataURL 打进日志。
   logComputerUseAuthResponse(routeBase, payload);
   const suppressRouteDiagnostic = shouldSuppressRoutineRouteDiagnostic(routeBase);
