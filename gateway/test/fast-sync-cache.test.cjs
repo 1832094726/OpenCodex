@@ -59,6 +59,41 @@ test("writes and reads a snapshot from disk", () => {
   assert.deepEqual(cache.readSnapshot({ key })?.value, { threadId: "t1", title: "Hello" });
 });
 
+test("redacts sensitive fields before writing snapshots", () => {
+  const dir = tempDir();
+  const cache = createFastSyncCache({ dir, ttlMs: 60_000 });
+  const key = cacheKeyForSnapshot("thread/read", [{ threadId: "t1" }]);
+
+  assert.equal(
+    cache.writeSnapshot({
+      key,
+      method: "thread/read",
+      value: {
+        threadId: "t1",
+        title: "Hello",
+        token: "token-value",
+        nested: {
+          password: "password-value",
+          ordinary: "kept",
+          headers: [{ cookie: "cookie-value" }, { SetCookie: "set-cookie-value", ok: true }],
+        },
+      },
+    }),
+    true
+  );
+
+  assert.deepEqual(cache.readSnapshot({ key })?.value, {
+    threadId: "t1",
+    title: "Hello",
+    token: "[redacted]",
+    nested: {
+      password: "[redacted]",
+      ordinary: "kept",
+      headers: [{ cookie: "[redacted]" }, { SetCookie: "[redacted]", ok: true }],
+    },
+  });
+});
+
 test("writeSnapshot returns false for circular or bigint values", () => {
   const dir = tempDir();
   const cache = createFastSyncCache({ dir, ttlMs: 60_000 });

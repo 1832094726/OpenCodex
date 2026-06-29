@@ -12,6 +12,18 @@ const CACHEABLE_METHODS = new Set([
   "thread/read",
   "thread/turns/list",
 ]);
+const REDACTED_VALUE = "[redacted]";
+const SENSITIVE_FIELD_NAMES = new Set([
+  "token",
+  "accesstoken",
+  "refreshtoken",
+  "authorization",
+  "password",
+  "secret",
+  "apikey",
+  "cookie",
+  "setcookie",
+]);
 
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
@@ -60,6 +72,18 @@ function safeClone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function redactSensitiveFields(value) {
+  if (value == null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((item) => redactSensitiveFields(item));
+
+  const result = {};
+  for (const [key, item] of Object.entries(value)) {
+    // 快照会落盘，常见凭证字段统一替换，避免弱网快速恢复缓存泄露敏感信息。
+    result[key] = SENSITIVE_FIELD_NAMES.has(key.toLowerCase()) ? REDACTED_VALUE : redactSensitiveFields(item);
+  }
+  return result;
+}
+
 function createFastSyncCache(options = {}) {
   const dir = options.dir || path.join(process.cwd(), ".data", "runtime", "cache", "fast-sync");
   const ttlMs = normalizeTtlMs(options.ttlMs ?? DEFAULT_TTL_MS);
@@ -106,7 +130,7 @@ function createFastSyncCache(options = {}) {
       // 快照写入采用临时文件再 rename，避免 gateway 重启或弱网中断时留下半截 JSON。
       fs.writeFileSync(
         tmpPath,
-        JSON.stringify({ capturedAtMs, key, method, schemaVersion: 1, value: safeClone(value) }),
+        JSON.stringify({ capturedAtMs, key, method, schemaVersion: 1, value: redactSensitiveFields(safeClone(value)) }),
         "utf8"
       );
       fs.renameSync(tmpPath, filePath);
