@@ -882,6 +882,38 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return messageClientId || socketClientId;
   }
 
+  function safeFastSyncFlowData(ws, message) {
+    const data = message && message.data && typeof message.data === "object" && !Array.isArray(message.data) ? message.data : {};
+    const clientId = normalizedWsClientId(ws, message) || (typeof data.clientId === "string" ? data.clientId : "");
+    if (!clientId || ws.__codexWebClientId !== clientId) return null;
+    const result = {
+      clientId,
+      // 浏览器诊断帧只允许进入 turn 链路，避免任意 WS 消息污染其它状态域。
+      scope: "turn",
+    };
+    for (const key of ["error", "localSendId", "method", "requestId", "stage", "threadId", "turnId"]) {
+      if (data[key] == null) continue;
+      result[key] = String(data[key]).slice(0, key === "method" || key === "stage" ? 80 : 120);
+    }
+    if (!result.stage) return null;
+    if (!result.method) result.method = "turn/start";
+    if (result.error) result.level = "error";
+    return result;
+  }
+
+  function handleClientDiagnosticMessage(ws, message) {
+    if (
+      !message ||
+      message.type !== "client-diagnostic" ||
+      message.event !== "fast-sync-flow"
+    ) {
+      return false;
+    }
+    const flowEvent = safeFastSyncFlowData(ws, message);
+    if (flowEvent) recordFlowEvent(flowEvent);
+    return true;
+  }
+
   function validAppHostPortId(value) {
     // portId 只作为本页多条 MessagePort 的路由键，限制长度即可，不引入额外协议含义。
     return typeof value === "string" && value.length > 0 && value.length <= 160;
@@ -1220,6 +1252,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       // 通知 click/close 只从已认证 WS 回传；hub 不理解官方通知语义，直接交回 runtime 的 fake Notification。
       return typeof handleNotificationEvent === "function" ? handleNotificationEvent(message, ws, req) : true;
     }
+    if (handleClientDiagnosticMessage(ws, message)) return true;
     if (message.type === "app-host-connect") return handleAppHostConnect(ws, req, message);
     if (message.type === "app-host-port-message") return handleAppHostPortMessage(ws, message);
     return false;

@@ -54,3 +54,19 @@ test("fast sync snapshot reads have short miss timeouts", () => {
   assert.match(source, /browser-read-timeout/);
   assert.match(source, /gateway-read-timeout/);
 });
+
+test("turn starts create pending sends and flow diagnostics", () => {
+  const source = readPolyfillSource();
+  // turn/start 是写操作，不能进快照缓存，但需要本地 pending 与链路诊断帮助排查弱网转圈。
+  for (const expected of [
+    "createPendingSend(payload)",
+    "completePendingSend(localSendId",
+    "fast-sync-flow",
+    "send_pending_created",
+    "send_turn_accepted",
+    "send_pending_failed",
+    "localSendId",
+  ]) {
+    assert.match(source, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+});

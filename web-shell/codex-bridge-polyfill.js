@@ -2718,6 +2718,79 @@
     return "";
   }
 
+  function diagnosticThreadIdFromValue(value, depth = 0, seen = new WeakSet()) {
+    // 只提取路由 ID，不读取 prompt/body 内容，避免本地诊断上报用户消息正文。
+    if (!value || typeof value !== "object" || depth > 4) return "";
+    if (seen.has(value)) return "";
+    seen.add(value);
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const nested = diagnosticThreadIdFromValue(item, depth + 1, seen);
+        if (nested) return nested;
+      }
+      return "";
+    }
+    for (const key of ["threadId", "thread_id", "conversationId", "conversation_id"]) {
+      if (value[key] != null && (typeof value[key] === "string" || typeof value[key] === "number")) {
+        return String(value[key]);
+      }
+    }
+    for (const key of ["params", "request", "payload", "message", "body"]) {
+      const nested = diagnosticThreadIdFromValue(value[key], depth + 1, seen);
+      if (nested) return nested;
+    }
+    return "";
+  }
+
+  function turnStartFlowData(payload, method, stage, localSendId, error) {
+    const data = {
+      clientId: shortClientId(clientId),
+      localSendId,
+      method,
+      requestId: diagnosticRouteIdFromValue(payload),
+      scope: "turn",
+      stage,
+      threadId: diagnosticThreadIdFromValue(payload),
+    };
+    if (error) data.error = error instanceof Error ? error.message : String(error);
+    return data;
+  }
+
+  function emitTurnStartFlow(payload, method, stage, localSendId, error) {
+    clientDiagnostic("fast-sync-flow", turnStartFlowData(payload, method, stage, localSendId, error));
+  }
+
+  async function createTurnStartPendingSend(payload, method) {
+    if (method !== "turn/start") return null;
+    const store = fastSyncStore();
+    if (!store || typeof store.createPendingSend !== "function") return null;
+    try {
+      const record = await store.createPendingSend(payload);
+      const localSendId = record && typeof record.localSendId === "string" ? record.localSendId : "";
+      if (localSendId) emitTurnStartFlow(payload, method, "send_pending_created", localSendId);
+      return localSendId ? record : null;
+    } catch (error) {
+      clientDiagnostic("fast-sync-refresh-failed", {
+        ...turnStartFlowData(payload, method, "send_pending_create_failed", "", error),
+        reason: "pending-send-create",
+      });
+      return null;
+    }
+  }
+
+  function completeTurnStartPendingSend(localSendId, patch) {
+    if (!localSendId) return;
+    const store = fastSyncStore();
+    if (!store || typeof store.completePendingSend !== "function") return;
+    Promise.resolve(store.completePendingSend(localSendId, patch)).catch((error) => {
+      clientDiagnostic("fast-sync-refresh-failed", {
+        error: error instanceof Error ? error.message : String(error),
+        localSendId,
+        reason: "pending-send-complete",
+      });
+    });
+  }
+
   function fastSyncSnapshotMethod(payload) {
     const method = appServerMethod(payload);
     return FAST_SYNC_SNAPSHOT_METHODS.has(method) ? method : "";
@@ -3044,11 +3117,39 @@
        */
       return handleConnectorLogoFetchInvoke(channel, ipcArgs, payload, diagnosticSummary);
     }
-    const value = await invokeGatewayImmediate(channel, ipcArgs, payload);
-    if (fastSyncInvoke && fastSyncInvoke.method) {
-      writeFastSyncBrowserSnapshot(fastSyncInvoke.method, ipcArgs, value, diagnosticSummary, "miss");
+    const turnStartMethod = appServerMethod(payload) === "turn/start" ? "turn/start" : "";
+    const pendingSend = await createTurnStartPendingSend(payload, turnStartMethod);
+    const localSendId = pendingSend && pendingSend.localSendId ? pendingSend.localSendId : "";
+    try {
+      const value = await invokeGatewayImmediate(channel, ipcArgs, payload);
+      if (turnStartMethod) {
+        emitTurnStartFlow(payload, turnStartMethod, "send_turn_accepted", localSendId);
+        if (localSendId) {
+          completeTurnStartPendingSend(localSendId, {
+            acceptedAtMs: Date.now(),
+            requestId: diagnosticRouteIdFromValue(payload),
+            status: "accepted",
+          });
+        }
+      }
+      if (fastSyncInvoke && fastSyncInvoke.method) {
+        writeFastSyncBrowserSnapshot(fastSyncInvoke.method, ipcArgs, value, diagnosticSummary, "miss");
+      }
+      return value;
+    } catch (error) {
+      if (turnStartMethod) {
+        emitTurnStartFlow(payload, turnStartMethod, "send_pending_failed", localSendId, error);
+        if (localSendId) {
+          completeTurnStartPendingSend(localSendId, {
+            error: error instanceof Error ? error.message : String(error),
+            failedAtMs: Date.now(),
+            requestId: diagnosticRouteIdFromValue(payload),
+            status: "failed",
+          });
+        }
+      }
+      throw error;
     }
-    return value;
   }
 
   // ─── WS IPC 通道 ───────────────────────────────────────────────

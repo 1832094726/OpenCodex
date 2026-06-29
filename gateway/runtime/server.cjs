@@ -51,7 +51,7 @@ const { createPickedFilesService } = require("./ipc/picked-files.cjs");
 const { createStaticAssetService } = require("./http/static-assets.cjs");
 const { createWsHub } = require("./ipc/ws-hub.cjs");
 const { diagnosticError, diagnosticLog, diagnosticWarn, sanitizeDiagnosticValue, shortId } = require("./core/diagnostics.cjs");
-const { snapshotFlowState } = require("./core/flow-monitor.cjs");
+const { recordFlowEvent, snapshotFlowState } = require("./core/flow-monitor.cjs");
 const { markGatewaySilentQuit } = require("./lifecycle/quit-confirmation-suppressor.cjs");
 
 const fastSyncCache = createFastSyncCache({
@@ -169,6 +169,23 @@ function safeClientLogData(value) {
   return result;
 }
 
+function safeFastSyncFlowData(value, fallbackClientId = "") {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const result = {
+    // fast-sync-flow 只描述发送链路，不允许浏览器把 prompt/body 等大字段写入 flow monitor。
+    scope: "turn",
+  };
+  for (const key of ["clientId", "error", "localSendId", "method", "requestId", "stage", "threadId", "turnId"]) {
+    const sanitized = sanitizeDiagnosticValue(key, value[key]);
+    if (sanitized !== undefined) result[key] = key === "clientId" ? shortId(String(sanitized)) : sanitized;
+  }
+  if (!result.clientId && fallbackClientId) result.clientId = shortId(fallbackClientId);
+  if (!result.clientId || !result.stage) return null;
+  if (!result.method) result.method = "turn/start";
+  if (result.error) result.level = "error";
+  return result;
+}
+
 async function handleClientLog(req, res) {
   const body = await readBody(req);
   let parsed = {};
@@ -180,6 +197,12 @@ async function handleClientLog(req, res) {
 
   // 浏览器端会批量上报诊断事件，减少日志本身对真实 IPC 请求的干扰；旧单事件格式继续兼容。
   const entries = Array.isArray(parsed.events) ? parsed.events.slice(0, 200) : [parsed];
+  for (const entry of entries) {
+    const event = entry && typeof entry.event === "string" ? entry.event.slice(0, 120) : "unknown";
+    if (event !== "fast-sync-flow") continue;
+    const flowEvent = safeFastSyncFlowData(entry && entry.data, parsed.clientId);
+    if (flowEvent) recordFlowEvent(flowEvent);
+  }
   if (DEBUG_LOGS) {
     // client-diagnostic 是浏览器侧辅助埋点，正常渲染会大量触发；默认只接收不落盘，排查前端链路时再打开。
     for (const entry of entries) {
