@@ -30,6 +30,11 @@ const {
 const { persistedAtomSnapshotForRenderer } = require("../state/desktop-state.cjs");
 const { diagnosticLog, diagnosticWarn, shortId } = require("../core/diagnostics.cjs");
 const { recordFlowEvent } = require("../core/flow-monitor.cjs");
+const {
+  cacheKeyForSnapshot,
+  createFastSyncCache,
+  isFastSyncCacheableMethod,
+} = require("../core/fast-sync-cache.cjs");
 const { resolveOpenCodexI18n } = require("../../../shared/i18n/index.cjs");
 const { withPluginI18nMessages } = require("../core/plugin-assets.cjs");
 const {
@@ -58,6 +63,9 @@ const APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS = Number(
 const APP_SERVER_READ_ONLY_CACHE_FILE = path.join(RUNTIME_DIR, "cache", "app-server-read-only-cache.json");
 const DEFAULT_BROWSER_USE_AVAILABLE_BACKENDS = "chrome";
 const appServerReadOnlyCache = new Map();
+const fastSyncCache = createFastSyncCache({
+  dir: path.join(RUNTIME_DIR, "cache", "fast-sync"),
+});
 let appServerReadOnlyCacheLoaded = false;
 let appServerReadOnlyCacheSaveTimer = null;
 let officialBundle = null;
@@ -1075,6 +1083,18 @@ function readOnlyAppServerCacheKey(channel, invokeArgs, summary) {
   }
 }
 
+function fastSyncMethodFromRequestSummary(summary) {
+  const method = summary && typeof summary.method === "string" ? summary.method : "";
+  return isFastSyncCacheableMethod(method) ? method : "";
+}
+
+function attachFastSyncSnapshotKey(summary, invokeArgs) {
+  const method = fastSyncMethodFromRequestSummary(summary);
+  if (!method) return;
+  // 快照 key 必须基于入站请求参数生成；出站 fetch-response 已经没有完整请求 args。
+  summary.fastSyncSnapshotKey = cacheKeyForSnapshot(method, invokeArgs);
+}
+
 function canServeStaleReadOnlyCache(method, entry, nowMs = Date.now()) {
   if (!APP_SERVER_STALE_READ_ONLY_METHODS.has(method)) return false;
   if (!entry || typeof entry.expiresAtMs !== "number") return false;
@@ -1591,6 +1611,31 @@ function logComputerUseAuthResponse(routeBase, payload) {
   });
 }
 
+function fastSyncResponseValueFromPayload(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  if (payload.type !== "fetch-response") return null;
+  if (payload.responseType && payload.responseType !== "success") return null;
+  const status = Number(payload.status || 0);
+  if (status >= 400) return null;
+  return parseFetchResponseBodyJson(payload);
+}
+
+function rememberFastSyncSnapshot(channel, _args, requestSummary, responseValue, context = {}) {
+  void channel;
+  const method = fastSyncMethodFromRequestSummary(requestSummary);
+  const key = requestSummary && typeof requestSummary.fastSyncSnapshotKey === "string" ? requestSummary.fastSyncSnapshotKey : "";
+  if (!method || !key || responseValue == null) return;
+  if (!fastSyncCache.writeSnapshot({ key, method, value: responseValue })) return;
+  recordFlowEvent({
+    clientId: context.clientId || "",
+    hint: "已写入 gateway 快照",
+    method,
+    scope: "thread",
+    stage: "gateway_snapshot_store",
+    threadId: flowThreadIdFromPayload(responseValue) || flowThreadIdFromPayload(requestSummary),
+  });
+}
+
 function outgoingIpcDiagnosticSummary(channel, args, requestSummary = null) {
   const payload = payloadFromArgs(args);
   const summary = {
@@ -1738,6 +1783,10 @@ function routeOfficialWebContentsSend(channel, args) {
   };
   // 这些 app-server 列表是只读初始化数据；成功回包落盘后，重启网关也能先用热缓存撑住弱网首屏。
   rememberReadOnlyAppServerResponse(channel, args, requestSummary, requestId);
+  // fast-sync 快照只记录 allowlist 的官方成功只读回包，供浏览器首屏独立读取。
+  rememberFastSyncSnapshot(channel, args, requestSummary, fastSyncResponseValueFromPayload(payload), {
+    clientId: mappedClientId || targetClientId,
+  });
   recordOfficialFlowResponse(mappedClientId || targetClientId, routeBase, payload, requestSummary);
   // 只对锁屏授权相关回包做结构化摘要，避免把大图标 dataURL 打进日志。
   logComputerUseAuthResponse(routeBase, payload);
@@ -1991,6 +2040,7 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   const requestSummary = incomingIpcDiagnosticSummary(channel, invokeArgs);
   const readOnlyCacheKey = readOnlyAppServerCacheKey(channel, invokeArgs, requestSummary);
   if (readOnlyCacheKey) requestSummary.cacheKey = readOnlyCacheKey;
+  attachFastSyncSnapshotKey(requestSummary, invokeArgs);
   if (maybeServeReadOnlyAppServerCache(channel, invokeArgs, context, requestSummary, readOnlyCacheKey)) return true;
   // 先记录请求归属，再调用官方 handler，这样同步和异步回包都能找到目标 client。
   rememberRequestRoute(channel, invokeArgs, context.clientId || "", requestSummary);

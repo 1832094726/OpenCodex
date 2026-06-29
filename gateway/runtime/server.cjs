@@ -19,11 +19,17 @@ const {
   PORT,
   PROJECT_ROOT,
   REPORTS_DIR,
+  RUNTIME_DIR,
   UNKNOWN_IPC_PATH,
   ensureDir,
   exists,
 } = require("./core/config.cjs");
 const { readBody, send, sendJson } = require("./http/http-utils.cjs");
+const {
+  cacheKeyForSnapshot,
+  createFastSyncCache,
+  isFastSyncCacheableMethod,
+} = require("./core/fast-sync-cache.cjs");
 const { createLocalFileService } = require("./http/local-files.cjs");
 const { handleTokenUsageRequest } = require("./http/token-usage.cjs");
 const {
@@ -46,6 +52,10 @@ const { createWsHub } = require("./ipc/ws-hub.cjs");
 const { diagnosticError, diagnosticLog, diagnosticWarn, sanitizeDiagnosticValue, shortId } = require("./core/diagnostics.cjs");
 const { snapshotFlowState } = require("./core/flow-monitor.cjs");
 const { markGatewaySilentQuit } = require("./lifecycle/quit-confirmation-suppressor.cjs");
+
+const fastSyncCache = createFastSyncCache({
+  dir: path.join(RUNTIME_DIR, "cache", "fast-sync"),
+});
 
 // server.cjs 只负责编排 HTTP/WS 生命周期；官方 Electron hook 细节放在 official-runtime.cjs。
 function gatewayUrl(req) {
@@ -319,6 +329,26 @@ function createRequestHandler({ localFiles, pickedFiles, staticAssets }) {
         }),
         { "cache-control": "no-store" }
       );
+    }
+
+    if (pathname === "/api/fast-sync/snapshot" && req.method === "GET") {
+      const method = url.searchParams.get("method") || "";
+      const argsJson = url.searchParams.get("args") || "[]";
+      if (!isFastSyncCacheableMethod(method)) {
+        return sendJson(res, 400, { ok: false, error: "Method is not fast-sync cacheable" }, { "cache-control": "no-store" });
+      }
+
+      let args = [];
+      try {
+        // args 与官方 IPC 入站参数保持同形，确保浏览器读取和 gateway 写入使用同一个快照 key。
+        args = JSON.parse(argsJson);
+      } catch {
+        return sendJson(res, 400, { ok: false, error: "Invalid args JSON" }, { "cache-control": "no-store" });
+      }
+
+      const key = cacheKeyForSnapshot(method, args);
+      const snapshot = fastSyncCache.readSnapshot({ key });
+      return sendJson(res, 200, { ok: true, snapshot }, { "cache-control": "no-store" });
     }
 
     if (pathname === "/api/ipc/handlers") {

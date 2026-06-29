@@ -50,6 +50,12 @@ test("cache keys ignore nested request ids", () => {
   assert.equal(first, second);
 });
 
+test("request-shaped thread cache keys are stable", () => {
+  const first = cacheKeyForSnapshot("thread/turns/list", [{ request: { id: "1", params: { threadId: "t1" } } }]);
+  const second = cacheKeyForSnapshot("thread/turns/list", [{ request: { id: "2", params: { threadId: "t1" } } }]);
+  assert.equal(first, second);
+});
+
 test("cache keys handle non-json args without throwing", () => {
   const args = [{ threadId: 1n }];
   args[0].self = args[0];
