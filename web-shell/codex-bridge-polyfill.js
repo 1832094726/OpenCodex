@@ -456,10 +456,7 @@
   let reconnectTimer = null;
   let reconnectDelay = 500;
   const MOBILE_WS_RESUME_RECONNECT_AFTER_MS = 5000;
-  const MOBILE_THREAD_RELOAD_COOLDOWN_MS = 30000;
   let lastPageHiddenAtMs = 0;
-  let mobileThreadReloadAfterReconnect = false;
-  let lastMobileThreadReloadAtMs = 0;
   const bridgeStartedAtMs = Date.now();
   const clientDiagnosticQueue = [];
   const recentClientDiagnostics = [];
@@ -2193,32 +2190,19 @@
     emitPersistedAtomSync();
     emitSharedObjectSnapshotValue(STATSIG_DEFAULT_FEATURES_CONFIG);
     emitSharedObjectSnapshotValue(STATSIG_I18N_LAYER_CONFIG);
-    scheduleMobileThreadReloadAfterReconnect();
+    markMobileResumeReconnectedWithoutReload();
   }
 
-  function scheduleMobileThreadReloadAfterReconnect() {
-    if (!mobileThreadReloadAfterReconnect) return;
-    mobileThreadReloadAfterReconnect = false;
+  function markMobileResumeReconnectedWithoutReload() {
+    if (!isMobileResumeSensitiveBrowser()) return;
     const route = currentRestorableRoute();
-    if (!route || !isMobileResumeSensitiveBrowser()) return;
-    const nowMs = Date.now();
-    if (nowMs - lastMobileThreadReloadAtMs < MOBILE_THREAD_RELOAD_COOLDOWN_MS) return;
-    lastMobileThreadReloadAtMs = nowMs;
-    clientDiagnostic("mobile-thread-reload-after-reconnect", {
+    if (!route) return;
+    // 移动端回到前台后保留官方 renderer 当前状态，只记录重连完成；刷新页面留给用户手动兜底。
+    clientDiagnostic("mobile-resume-reconnect-without-reload", {
       route,
       wsReady,
       wsState: websocketStateName(ws),
     });
-    w.setTimeout(() => {
-      if (currentRestorableRoute() !== route) return;
-      try {
-        // 手机后台断网后官方 renderer 可能停在半连接态；刷新当前会话可重新触发 thread/read + thread/resume。
-        history.replaceState(history.state, "", route);
-        location.reload();
-      } catch {
-        location.href = route;
-      }
-    }, 350);
   }
 
   function hasEditableFocus() {
@@ -4462,9 +4446,15 @@
       const hiddenForMs = lastPageHiddenAtMs > 0 ? Date.now() - lastPageHiddenAtMs : 0;
       const shouldRefreshMobileSocket =
         isMobileResumeSensitiveBrowser() && hiddenForMs >= MOBILE_WS_RESUME_RECONNECT_AFTER_MS;
-      if (shouldRefreshMobileSocket && currentRestorableRoute()) {
-        // 只有移动端长时间后台恢复时才允许刷新会话页，避免桌面短暂断线打断用户输入。
-        mobileThreadReloadAfterReconnect = true;
+      if (shouldRefreshMobileSocket) {
+        // 移动端长时间后台恢复时只强制换新 WS；整页刷新保留在网络面板作为手动兜底。
+        clientDiagnostic("mobile-resume-force-reconnect", {
+          hiddenForMs,
+          reason,
+          route: currentRestorableRoute() || "",
+          wsReady,
+          wsState: websocketStateName(ws),
+        });
       }
       ensureGatewayWebSocket(reason, { force: shouldRefreshMobileSocket });
     };

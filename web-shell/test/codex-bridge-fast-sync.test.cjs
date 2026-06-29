@@ -10,6 +10,14 @@ function readPolyfillSource() {
   return fs.readFileSync(polyfillPath, "utf8");
 }
 
+function sourceBetween(source, startMarker, endMarker) {
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start);
+  assert.ok(start >= 0, `missing start marker: ${startMarker}`);
+  assert.ok(end > start, `missing end marker after ${startMarker}: ${endMarker}`);
+  return source.slice(start, end);
+}
+
 test("fast sync snapshot allowlist stays limited to first-screen reads", () => {
   const source = readPolyfillSource();
   const expectedMethods = [
@@ -71,4 +79,25 @@ test("turn starts create pending sends and flow diagnostics", () => {
   ]) {
     assert.match(source, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
+});
+
+test("mobile resume reconnect does not automatically reload the page", () => {
+  const source = readPolyfillSource();
+  const resumeReadyBlock = sourceBetween(source, "function markMobileResumeReconnectedWithoutReload", "function hasEditableFocus");
+  const resumeHookBlock = sourceBetween(source, "function installGatewayWebSocketResumeHooks", "installGatewayWebSocketResumeHooks();");
+  // 移动端回到前台应走原地重连，不能再用刷新当前会话作为默认恢复路径。
+  assert.doesNotMatch(
+    source,
+    /mobileThreadReloadAfterReconnect|lastMobileThreadReloadAtMs|MOBILE_THREAD_RELOAD_COOLDOWN_MS|scheduleMobileThreadReloadAfterReconnect/
+  );
+  assert.doesNotMatch(resumeReadyBlock, /location\.reload\(\)|location\.href|history\.replaceState/);
+  assert.doesNotMatch(resumeHookBlock, /location\.reload\(\)|location\.href|history\.replaceState/);
+  assert.match(source, /mobile-resume-reconnect-without-reload/);
+});
+
+test("mobile foreground resume still forces a fresh websocket", () => {
+  const source = readPolyfillSource();
+  // 无感恢复仍必须换一条新的 WS，避免手机后台后的半开连接继续吞回包。
+  assert.match(source, /MOBILE_WS_RESUME_RECONNECT_AFTER_MS/);
+  assert.match(source, /ensureGatewayWebSocket\(reason,\s*\{\s*force:\s*shouldRefreshMobileSocket\s*\}\)/);
 });
