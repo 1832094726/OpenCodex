@@ -453,9 +453,13 @@
   let reconnectTimer = null;
   let reconnectDelay = 500;
   const MOBILE_WS_RESUME_RECONNECT_AFTER_MS = 5000;
+  const MOBILE_THREAD_RELOAD_COOLDOWN_MS = 30000;
   let lastPageHiddenAtMs = 0;
+  let mobileThreadReloadAfterReconnect = false;
+  let lastMobileThreadReloadAtMs = 0;
   const bridgeStartedAtMs = Date.now();
   const clientDiagnosticQueue = [];
+  const recentClientDiagnostics = [];
   let clientDiagnosticFlushTimer = null;
   let crossClientSyncTimer = null;
   let lastCrossClientSyncAtMs = 0;
@@ -567,6 +571,9 @@
         }
       }
       clientDiagnosticQueue.push({ event, data: diagnosticData });
+      recentClientDiagnostics.push({ event, data: diagnosticData });
+      while (recentClientDiagnostics.length > 30) recentClientDiagnostics.shift();
+      updateNetworkStatusWidget();
       if (clientDiagnosticQueue.length >= CLIENT_DIAGNOSTIC_MAX_BATCH) {
         if (clientDiagnosticFlushTimer) {
           w.clearTimeout(clientDiagnosticFlushTimer);
@@ -577,6 +584,324 @@
         scheduleClientDiagnosticFlush();
       }
     } catch {}
+  }
+
+  function networkStatusSnapshot() {
+    return {
+      clientId: shortClientId(clientId),
+      href: redactDiagnosticUrl(location.href),
+      online: w.navigator?.onLine !== false,
+      route: currentRestorableRoute() || "/",
+      wsReady,
+      wsState: websocketStateName(ws),
+      queuedDiagnostics: clientDiagnosticQueue.length,
+      appHostRelays: appHostPortRelays.size,
+      recent: recentClientDiagnostics.slice(-8).reverse(),
+    };
+  }
+
+  let latestFlowSnapshot = null;
+  let latestFlowError = "";
+  let latestFlowExtra = "";
+  let flowSnapshotInFlight = false;
+  let lastFlowSnapshotAtMs = 0;
+
+  function stateLabel(state) {
+    const labels = {
+      idle: "空闲",
+      ready: "正常",
+      relay_failed: "通道失败",
+      relay_flushed: "通道已恢复",
+      relay_missing: "通道丢失",
+      relay_partial_flush: "部分补发",
+      send_to_missing_client: "页面连接丢失",
+      thread_read: "元信息已读取",
+      thread_reading: "读取元信息",
+      thread_ready: "历史已拉取",
+      thread_resumed: "对话已恢复",
+      thread_resuming: "恢复对话",
+      turn_accepted: "消息已提交",
+      turn_starting: "提交消息",
+      turns_loading: "拉取历史",
+      waiting_for_events: "等待回复",
+      ws_ready: "WS 已确认",
+    };
+    return labels[state] || state || "未知";
+  }
+
+  function flowLine(label, record, fallback) {
+    const state = record && record.state ? stateLabel(record.state) : fallback;
+    const duration = record && Number.isFinite(Number(record.lastDurationMs)) ? `，${Math.round(record.lastDurationMs)}ms` : "";
+    const age = record && Number.isFinite(Number(record.ageMs)) && record.ageMs > 1000 ? `，${Math.round(record.ageMs / 1000)}s` : "";
+    const hint = record && record.lastHint ? `，${record.lastHint}` : "";
+    return `${label}：${state}${duration}${age}${hint}`;
+  }
+
+  function flowTimeline(snapshot) {
+    const events = snapshot && Array.isArray(snapshot.events) ? snapshot.events.slice(-12).reverse() : [];
+    if (!events.length) return "暂无链路事件";
+    return events
+      .map((event) => {
+        const time = event.at ? new Date(event.at).toLocaleTimeString() : "";
+        const method = event.method ? ` ${event.method}` : "";
+        const duration = Number.isFinite(Number(event.durationMs)) ? ` ${Math.round(event.durationMs)}ms` : "";
+        const hint = event.hint ? ` ${event.hint}` : "";
+        return `${time} ${stateLabel(event.stage)}${method}${duration}${hint}`.trim();
+      })
+      .join("\n");
+  }
+
+  async function refreshFlowSnapshot(force) {
+    const now = Date.now();
+    if (flowSnapshotInFlight) return latestFlowSnapshot;
+    if (!force && now - lastFlowSnapshotAtMs < 2000) return latestFlowSnapshot;
+    flowSnapshotInFlight = true;
+    try {
+      const response = await w.fetch(`/api/diagnostics/flow?clientId=${encodeURIComponent(clientId)}&limit=60`, {
+        credentials: "same-origin",
+        headers: gatewayAuthHeaders(),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      latestFlowSnapshot = await response.json();
+      latestFlowError = "";
+      lastFlowSnapshotAtMs = Date.now();
+    } catch (error) {
+      latestFlowError = error instanceof Error ? error.message : String(error);
+    } finally {
+      flowSnapshotInFlight = false;
+    }
+    return latestFlowSnapshot;
+  }
+
+  function ensureNetworkStatusWidget() {
+    if (!document || document.getElementById("opencodex-network-status")) return;
+    const root = document.createElement("div");
+    root.id = "opencodex-network-status";
+    root.innerHTML = `
+      <button type="button" class="opencodex-network-status__button" aria-label="网络状态">
+        <span class="opencodex-network-status__dot"></span>
+        <span class="opencodex-network-status__label">网络</span>
+      </button>
+      <div class="opencodex-network-status__panel" hidden>
+        <div class="opencodex-network-status__title">网络状态</div>
+        <pre class="opencodex-network-status__body"></pre>
+        <div class="opencodex-network-status__actions">
+          <button type="button" data-action="reconnect">重连 WS</button>
+          <button type="button" data-action="health">健康检查</button>
+          <button type="button" data-action="reload">刷新会话</button>
+        </div>
+      </div>
+    `;
+    const style = document.createElement("style");
+    style.id = "opencodex-network-status-style";
+    style.textContent = `
+      #opencodex-network-status {
+        color: #111827;
+        font: 12px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        position: fixed;
+        right: max(14px, env(safe-area-inset-right));
+        top: calc(max(12px, env(safe-area-inset-top)) + 58px);
+        z-index: 2147483647;
+      }
+      .opencodex-network-status__button {
+        align-items: center;
+        background: rgba(17, 24, 39, 0.9);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 999px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+        color: #fff;
+        display: flex;
+        gap: 6px;
+        min-height: 34px;
+        padding: 0 12px;
+      }
+      .opencodex-network-status__dot {
+        background: #22c55e;
+        border-radius: 999px;
+        display: inline-block;
+        height: 8px;
+        width: 8px;
+      }
+      #opencodex-network-status[data-state="warn"] .opencodex-network-status__dot { background: #f59e0b; }
+      #opencodex-network-status[data-state="bad"] .opencodex-network-status__dot { background: #ef4444; }
+      .opencodex-network-status__panel {
+        background: rgba(255, 255, 255, 0.98);
+        border: 1px solid rgba(17, 24, 39, 0.12);
+        border-radius: 8px;
+        box-shadow: 0 18px 48px rgba(0, 0, 0, 0.26);
+        margin-top: 8px;
+        max-width: min(360px, calc(100vw - 28px));
+        padding: 10px;
+        width: 340px;
+      }
+      .opencodex-network-status__title {
+        font-weight: 700;
+        margin-bottom: 6px;
+      }
+      .opencodex-network-status__body {
+        background: #f3f4f6;
+        border-radius: 6px;
+        color: #111827;
+        margin: 0;
+        max-height: 260px;
+        overflow: auto;
+        padding: 8px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .opencodex-network-status__actions {
+        display: grid;
+        gap: 6px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        margin-top: 8px;
+      }
+      .opencodex-network-status__actions button {
+        background: #111827;
+        border: 0;
+        border-radius: 6px;
+        color: #fff;
+        flex: 1;
+        min-height: 30px;
+      }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+    (document.body || document.documentElement).appendChild(root);
+    // 早期版本的调试浮层曾经出现编码损坏；这里用 DOM 写入最终可见文案，避免旧 innerHTML 残留影响阅读。
+    const label = root.querySelector(".opencodex-network-status__label");
+    if (label) label.textContent = "链路";
+    const button = root.querySelector(".opencodex-network-status__button");
+    if (button) button.setAttribute("aria-label", "链路状态");
+    const title = root.querySelector(".opencodex-network-status__title");
+    if (title) title.textContent = "链路状态";
+    const reconnectButton = root.querySelector("[data-action='reconnect']");
+    if (reconnectButton) reconnectButton.textContent = "重连 WS";
+    const healthButton = root.querySelector("[data-action='health']");
+    if (healthButton) healthButton.textContent = "健康检查";
+    const reloadButton = root.querySelector("[data-action='reload']");
+    if (reloadButton) reloadButton.textContent = "刷新会话";
+    const actions = root.querySelector(".opencodex-network-status__actions");
+    if (actions && !root.querySelector("[data-action='copy']")) {
+      const copyButton = document.createElement("button");
+      copyButton.type = "button";
+      copyButton.dataset.action = "copy";
+      copyButton.textContent = "复制诊断";
+      actions.appendChild(copyButton);
+    }
+    root.querySelector(".opencodex-network-status__button")?.addEventListener("click", () => {
+      const panel = root.querySelector(".opencodex-network-status__panel");
+      if (!panel) return;
+      panel.hidden = !panel.hidden;
+      updateNetworkStatusWidget("", { forceFlowRefresh: !panel.hidden });
+    });
+    root.querySelector("[data-action='reconnect']")?.addEventListener("click", () => {
+      forceGatewayWebSocketReconnect("network-status-button");
+      updateNetworkStatusWidget();
+    });
+    root.querySelector("[data-action='health']")?.addEventListener("click", () => {
+      checkNetworkStatusHealth();
+    });
+    root.querySelector("[data-action='reload']")?.addEventListener("click", () => {
+      const route = currentRestorableRoute();
+      if (route) location.href = route;
+      else location.reload();
+    });
+    root.querySelector("[data-action='copy']")?.addEventListener("click", () => {
+      copyFlowDiagnostics();
+    });
+    updateNetworkStatusWidget();
+  }
+
+  function updateNetworkStatusWidget(extra, options) {
+    const root = document?.getElementById?.("opencodex-network-status");
+    if (!root) return;
+    const snapshot = networkStatusSnapshot();
+    if (extra) latestFlowExtra = extra;
+    const panel = root.querySelector(".opencodex-network-status__panel");
+    const shouldRefreshFlow =
+      !options?.skipFlowRefresh &&
+      ((options && options.forceFlowRefresh) || (panel && !panel.hidden && Date.now() - lastFlowSnapshotAtMs >= 2000));
+    if (shouldRefreshFlow) {
+      refreshFlowSnapshot(options && options.forceFlowRefresh).then(() => updateNetworkStatusWidget("", { skipFlowRefresh: true }));
+    }
+    const flow = latestFlowSnapshot || {};
+    const bad =
+      !snapshot.online ||
+      snapshot.wsState === "closed" ||
+      flow.connection?.state === "send_to_missing_client" ||
+      flow.relay?.state === "relay_failed";
+    const warn =
+      !bad &&
+      (!snapshot.wsReady ||
+        snapshot.wsState !== "open" ||
+        flow.turn?.state === "waiting_for_events" ||
+        flow.relay?.state === "relay_missing");
+    root.dataset.state = bad ? "bad" : warn ? "warn" : "ok";
+    const body = root.querySelector(".opencodex-network-status__body");
+    if (body) {
+      const recentClient = snapshot.recent
+        .map((item) => `${item.data.clientAt || ""} ${item.event} ${item.data.method || item.data.type || item.data.error || ""}`)
+        .join("\n");
+      body.textContent = [
+        `在线：${snapshot.online ? "是" : "否"}`,
+        `WS: ${snapshot.wsState} / ready=${snapshot.wsReady}`,
+        `client: ${snapshot.clientId}`,
+        `route: ${snapshot.route}`,
+        "",
+        flowLine("连接", flow.connection, snapshot.wsReady ? "正常" : "连接中"),
+        flowLine("历史", flow.thread, "未开始"),
+        flowLine("发送", flow.turn, "未开始"),
+        flowLine("通道", flow.relay, snapshot.appHostRelays ? "已连接" : "未连接"),
+        latestFlowExtra ? `检查：${latestFlowExtra}` : "",
+        latestFlowError ? `诊断接口：${latestFlowError}` : "",
+        "",
+        "链路时间线",
+        flowTimeline(flow),
+        "",
+        "浏览器事件",
+        recentClient || "暂无",
+      ]
+        .filter((line) => line !== "")
+        .join("\n");
+    }
+  }
+
+  async function checkNetworkStatusHealth() {
+    const startedAtMs = Date.now();
+    try {
+      const response = await w.fetch("/api/health", {
+        credentials: "same-origin",
+        headers: gatewayAuthHeaders(),
+      });
+      await refreshFlowSnapshot(true);
+      updateNetworkStatusWidget(`HTTP ${response.status} ${Date.now() - startedAtMs}ms`);
+    } catch (error) {
+      updateNetworkStatusWidget(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function copyFlowDiagnostics() {
+    await refreshFlowSnapshot(true);
+    const snapshot = networkStatusSnapshot();
+    const payload = {
+      browser: snapshot,
+      flow: latestFlowSnapshot,
+      flowError: latestFlowError,
+    };
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+      updateNetworkStatusWidget("诊断已复制");
+    } catch (error) {
+      updateNetworkStatusWidget(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function installNetworkStatusWidget() {
+    // 状态按钮属于远程调试辅助，不依赖官方 React 根，body 未就绪时延后挂载。
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", ensureNetworkStatusWidget, { once: true });
+      return;
+    }
+    ensureNetworkStatusWidget();
   }
 
   function ipcDiagnosticSummary(channel, payload) {
@@ -1865,6 +2190,32 @@
     emitPersistedAtomSync();
     emitSharedObjectSnapshotValue(STATSIG_DEFAULT_FEATURES_CONFIG);
     emitSharedObjectSnapshotValue(STATSIG_I18N_LAYER_CONFIG);
+    scheduleMobileThreadReloadAfterReconnect();
+  }
+
+  function scheduleMobileThreadReloadAfterReconnect() {
+    if (!mobileThreadReloadAfterReconnect) return;
+    mobileThreadReloadAfterReconnect = false;
+    const route = currentRestorableRoute();
+    if (!route || !isMobileResumeSensitiveBrowser()) return;
+    const nowMs = Date.now();
+    if (nowMs - lastMobileThreadReloadAtMs < MOBILE_THREAD_RELOAD_COOLDOWN_MS) return;
+    lastMobileThreadReloadAtMs = nowMs;
+    clientDiagnostic("mobile-thread-reload-after-reconnect", {
+      route,
+      wsReady,
+      wsState: websocketStateName(ws),
+    });
+    w.setTimeout(() => {
+      if (currentRestorableRoute() !== route) return;
+      try {
+        // 手机后台断网后官方 renderer 可能停在半连接态；刷新当前会话可重新触发 thread/read + thread/resume。
+        history.replaceState(history.state, "", route);
+        location.reload();
+      } catch {
+        location.href = route;
+      }
+    }, 350);
   }
 
   function hasEditableFocus() {
@@ -3781,6 +4132,10 @@
       const hiddenForMs = lastPageHiddenAtMs > 0 ? Date.now() - lastPageHiddenAtMs : 0;
       const shouldRefreshMobileSocket =
         isMobileResumeSensitiveBrowser() && hiddenForMs >= MOBILE_WS_RESUME_RECONNECT_AFTER_MS;
+      if (shouldRefreshMobileSocket && currentRestorableRoute()) {
+        // 只有移动端长时间后台恢复时才允许刷新会话页，避免桌面短暂断线打断用户输入。
+        mobileThreadReloadAfterReconnect = true;
+      }
       ensureGatewayWebSocket(reason, { force: shouldRefreshMobileSocket });
     };
     w.addEventListener("online", () => handleResume("online"), { passive: true });
@@ -3800,5 +4155,6 @@
   }
 
   installGatewayWebSocketResumeHooks();
+  installNetworkStatusWidget();
   connect();
 })();

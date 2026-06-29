@@ -2,6 +2,7 @@
 export {};
 
 const path = require("path");
+const fs = require("fs");
 const { DEFAULT_BUNDLE_DIR } = require("./constants");
 const { OfficialBundleLogger } = require("./OfficialBundleLogger");
 const { OfficialBundleFileSystem } = require("./OfficialBundleFileSystem");
@@ -95,6 +96,8 @@ class LocalCodexBundleProvider {
       this.logCacheHit({ manifest, sourceInfo });
     }
 
+    this.ensureCachedResourceExtras({ cache, sourceInfo });
+
     return {
       bundleDir: cache.bundleDir,
       webviewDir: cache.webviewDir,
@@ -105,7 +108,7 @@ class LocalCodexBundleProvider {
       sourceAppPath: sourceInfo.installRoot,
       sourceAsarPath: sourceInfo.asarPath,
       // process.resourcesPath 会对齐到官方 Resources，保证官方代码能找到 codex 二进制等资源。
-      sourceResourcesPath: sourceInfo.resourcesDir,
+      sourceResourcesPath: cache.bundleDir,
       codexBinaryPath: sourceInfo.codexBinaryPath,
       version: sourceInfo.version,
       build: sourceInfo.build,
@@ -182,6 +185,40 @@ class LocalCodexBundleProvider {
      */
     this.fileSystem.copyTree(unpackedDir, tmpDir);
     return { copied: true };
+  }
+
+  private ensureCachedResourceExtras({ cache, sourceInfo }: { cache: any; sourceInfo: any }): void {
+    const sourceResourcesDir = sourceInfo.resourcesDir;
+    if (!sourceResourcesDir || !this.fileSystem.isDirectory(sourceResourcesDir)) return;
+    const names = [
+      "native",
+      "plugins",
+      "default_app",
+      "accessibility",
+      "codex-command-runner.exe",
+      "codex-notification.wav",
+      "codex-tray.ico",
+      "icon.ico",
+      "owl-app.ini",
+      "owl-electron-app.json",
+      "rg",
+      "rg.exe",
+      "THIRD_PARTY_NOTICES.txt",
+    ];
+    for (const name of names) {
+      const sourcePath = path.join(sourceResourcesDir, name);
+      const targetPath = path.join(cache.bundleDir, name);
+      if (!this.fileSystem.exists(sourcePath)) continue;
+      try {
+        fs.cpSync(sourcePath, targetPath, {
+          recursive: true,
+          force: true,
+          verbatimSymlinks: true,
+        });
+      } catch (error) {
+        this.logger.warn(`OpenCodex local resource mirror skipped ${name}`, error);
+      }
+    }
   }
 }
 
