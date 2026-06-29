@@ -1338,7 +1338,6 @@ function nonCriticalFetchBodyForUrl(url) {
       return {};
     }
     if (pathname === "/beacons/home") return {};
-    if (pathname === "/wham/usage") return {};
     if (pathname === "/wham/tasks/list") {
       return {
         items: [],
