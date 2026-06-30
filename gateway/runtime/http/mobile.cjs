@@ -28,6 +28,14 @@ function firstValue(...values) {
   return null;
 }
 
+function estimatedJsonBytes(value) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), "utf8");
+  } catch {
+    return 0;
+  }
+}
+
 function threadsArrayFromValue(value) {
   if (Array.isArray(value)) return value;
   if (!value || typeof value !== "object") return [];
@@ -282,7 +290,8 @@ function parseSessionFile(filePath, archived, options = {}) {
   const headBytes = Math.max(1024, Number(options.headBytes) || MOBILE_THREAD_DETAIL_HEAD_BYTES);
   const tailBytes = Math.max(1024, Number(options.tailBytes) || MOBILE_THREAD_DETAIL_TAIL_BYTES);
   try {
-    const head = readFileWindow(filePath, 0, Math.min(stat.size, headBytes));
+    const headLength = Math.min(stat.size, headBytes);
+    const head = readFileWindow(filePath, 0, headLength);
     const tailStart = Math.max(0, stat.size - tailBytes);
     const tail = tailStart === 0 ? head : readFileWindow(filePath, tailStart, stat.size - tailStart);
     const headLines = jsonlLinesFromWindow(head);
@@ -327,7 +336,19 @@ function parseSessionFile(filePath, archived, options = {}) {
     return null;
   }
   thread.title = thread.title || "Untitled";
-  return { messages, ok: true, thread };
+  return {
+    messages,
+    metrics: {
+      fileBytes: stat.size,
+      headBytesRead: Math.min(stat.size, headBytes),
+      messageCount: messages.length,
+      tailBytesRead: Math.min(stat.size, tailBytes),
+      truncatedCount: messages.filter((message) => message && message.truncated).length,
+      windowed: stat.size > headBytes + tailBytes,
+    },
+    ok: true,
+    thread,
+  };
 }
 
 function listLocalSessionThreads(options = {}) {
@@ -585,26 +606,40 @@ function createMobileBootstrapPayload(options = {}) {
     snapshotThreads.length === 0 && typeof options.listLocalThreads === "function"
       ? normalizeMobileThreads(options.listLocalThreads(), { limit: options.limit })
       : [];
-  return Promise.resolve({
+  const payload = {
     deferredState: MOBILE_DEFERRED_STATE,
     mode: "mobile-lite",
     ok: true,
     snapshotAgeMs,
     source: snapshotThreads.length > 0 ? snapshot.source || "snapshot" : localThreads.length > 0 ? "local-history" : "empty",
     threads: snapshotThreads.length > 0 ? snapshotThreads : localThreads,
-  });
+  };
+  payload.metrics = {
+    deferredStateCount: MOBILE_DEFERRED_STATE.length,
+    estimatedPayloadBytes: estimatedJsonBytes(payload),
+    threadCount: payload.threads.length,
+  };
+  return Promise.resolve(payload);
 }
 
 function createMobileThreadPayload(options = {}) {
   const detail = typeof options.readLocalThreadDetail === "function" ? options.readLocalThreadDetail() : null;
   if (!detail || detail.ok !== true) return Promise.resolve({ ok: false, error: "Thread not found" });
-  return Promise.resolve({
+  const messages = Array.isArray(detail.messages) ? detail.messages : [];
+  const payload = {
     messages: Array.isArray(detail.messages) ? detail.messages : [],
     mode: "mobile-lite",
     ok: true,
     source: detail.source || "local-history",
     thread: detail.thread,
-  });
+  };
+  payload.metrics = {
+    ...(detail.metrics && typeof detail.metrics === "object" ? detail.metrics : {}),
+    estimatedPayloadBytes: estimatedJsonBytes(payload),
+    messageCount: messages.length,
+    truncatedCount: messages.filter((message) => message && message.truncated).length,
+  };
+  return Promise.resolve(payload);
 }
 
 function createMobileApi({ fastSyncCache, invokeTurnStart }) {

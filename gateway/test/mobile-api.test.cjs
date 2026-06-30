@@ -152,6 +152,9 @@ test("createMobileBootstrapPayload uses cached thread list and records snapshot 
 
   assert.equal(payload.source, "gateway-disk");
   assert.equal(payload.snapshotAgeMs, 600);
+  assert.equal(payload.metrics.threadCount, 1);
+  assert.equal(payload.metrics.deferredStateCount, 4);
+  assert.ok(payload.metrics.estimatedPayloadBytes > 0);
   assert.deepEqual(payload.threads, [
     {
       archived: false,
@@ -161,6 +164,7 @@ test("createMobileBootstrapPayload uses cached thread list and records snapshot 
       updatedAt: 800,
     },
   ]);
+  assert.doesNotMatch(JSON.stringify(payload), /extraLargeField|large-state|unused-on-phone/);
 });
 
 test("listLocalSessionThreads builds a phone-safe list from Codex jsonl history", () => {
@@ -417,6 +421,31 @@ test("createMobileThreadPayload reports not found without falling back to deskto
   });
 
   assert.deepEqual(payload, { ok: false, error: "Thread not found" });
+});
+
+test("createMobileThreadPayload reports lightweight transfer metrics", async () => {
+  const payload = await createMobileThreadPayload({
+    readLocalThreadDetail: () => ({
+      messages: [
+        { role: "user", text: "只同步这一条", timestamp: "2026-06-30T10:00:00.000Z" },
+        { role: "assistant", text: "收到", timestamp: "2026-06-30T10:00:01.000Z", truncated: true },
+      ],
+      metrics: {
+        fileBytes: 900_000,
+        headBytesRead: 65_536,
+        tailBytesRead: 524_288,
+        windowed: true,
+      },
+      ok: true,
+      thread: { id: "thread-metrics", title: "指标" },
+    }),
+  });
+
+  assert.equal(payload.ok, true);
+  assert.equal(payload.metrics.messageCount, 2);
+  assert.equal(payload.metrics.truncatedCount, 1);
+  assert.equal(payload.metrics.windowed, true);
+  assert.ok(payload.metrics.estimatedPayloadBytes > 0);
 });
 
 test("createMobileThreadEventStream emits only appended visible messages and cleans up on close", async () => {

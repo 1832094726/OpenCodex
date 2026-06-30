@@ -5,6 +5,7 @@
   const backEl = document.getElementById("mobile-back");
   const sourceEl = document.getElementById("mobile-source");
   const countEl = document.getElementById("mobile-count");
+  const bytesEl = document.getElementById("mobile-bytes");
   const listEl = document.getElementById("mobile-thread-list");
   const messageListEl = document.getElementById("mobile-message-list");
   const composeEl = document.getElementById("mobile-compose");
@@ -32,6 +33,13 @@
   function cssEscape(value) {
     if (window.CSS && typeof window.CSS.escape === "function") return window.CSS.escape(value);
     return String(value).replace(/["\\]/g, "\\$&");
+  }
+
+  function formatBytes(value) {
+    const bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes <= 0) return "-";
+    if (bytes < 1024) return `${bytes} B`;
+    return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
   }
 
   function renderThreads(threads) {
@@ -203,6 +211,7 @@
     setText(statusEl, payload.source === "empty" ? "未命中快照，可切换完整模式刷新" : "已加载轻量会话列表");
     setText(sourceEl, payload.source || "-");
     setText(countEl, threads.length);
+    setText(bytesEl, formatBytes(payload.metrics && payload.metrics.estimatedPayloadBytes));
     renderThreads(threads);
   }
 
@@ -228,6 +237,7 @@
     setText(statusEl, "已加载当前会话轻量消息");
     setText(sourceEl, payload.source || "-");
     setText(countEl, messages.length);
+    setText(bytesEl, formatBytes(payload.metrics && payload.metrics.estimatedPayloadBytes));
     if (backEl) backEl.hidden = false;
     renderMessages(messages);
     connectThreadEvents(threadId);
