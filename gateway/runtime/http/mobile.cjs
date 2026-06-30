@@ -14,6 +14,8 @@ const MOBILE_THREAD_DETAIL_TAIL_BYTES = 512 * 1024;
 const MOBILE_MESSAGE_TEXT_MAX_CHARS = 12_000;
 const MOBILE_THREAD_LIST_CACHE_TTL_MS = 5_000;
 const MOBILE_THREAD_LIST_SCAN_MAX_MS = 250;
+const MOBILE_THREAD_EVENT_CHUNK_BYTES = 64 * 1024;
+const MOBILE_THREAD_EVENT_PENDING_MAX_BYTES = 256 * 1024;
 const MOBILE_THREAD_FIND_RECENT_FILE_LIMIT = 600;
 const MOBILE_SESSION_META_HEAD_BYTES = 64 * 1024;
 const MOBILE_THREAD_ID_MAX_CHARS = 160;
@@ -613,6 +615,8 @@ function createMobileThreadEventStream(options = {}) {
   const filePath = options.filePath;
   const pollMs = Math.max(10, Number(options.pollMs) || 1000);
   const heartbeatMs = Math.max(pollMs, Number(options.heartbeatMs) || 30_000);
+  const chunkBytes = Math.max(1024, Number(options.chunkBytes) || MOBILE_THREAD_EVENT_CHUNK_BYTES);
+  const pendingMaxBytes = Math.max(chunkBytes, Number(options.pendingMaxBytes) || MOBILE_THREAD_EVENT_PENDING_MAX_BYTES);
   let closed = false;
   let offset = 0;
   let pending = "";
@@ -640,18 +644,22 @@ function createMobileThreadEventStream(options = {}) {
     let chunk = "";
     try {
       const fd = fs.openSync(filePath, "r");
-      const length = stat.size - offset;
+      const length = Math.min(chunkBytes, stat.size - offset);
       const buffer = Buffer.alloc(length);
-      fs.readSync(fd, buffer, 0, length, offset);
+      const bytesRead = fs.readSync(fd, buffer, 0, length, offset);
       fs.closeSync(fd);
-      offset = stat.size;
-      chunk = buffer.toString("utf8");
+      offset += bytesRead;
+      chunk = buffer.subarray(0, bytesRead).toString("utf8");
     } catch {
       return;
     }
     pending += chunk;
     const lines = pending.split(/\r?\n/);
     pending = pending.endsWith("\n") || pending.endsWith("\r") ? "" : lines.pop() || "";
+    if (Buffer.byteLength(pending, "utf8") > pendingMaxBytes) {
+      // 超大内部状态行不会下发到手机端；截断半行后等待后续换行恢复 JSONL 边界。
+      pending = "";
+    }
     for (const line of lines) {
       if (!line.trim()) continue;
       let record = null;

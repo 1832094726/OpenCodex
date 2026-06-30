@@ -904,6 +904,63 @@ test("createMobileThreadEventStream resumes from detail snapshot offset", async 
   assert.equal(stream.closed(), true);
 });
 
+test("createMobileThreadEventStream reads large appends in bounded chunks", async () => {
+  const root = tempDir();
+  const file = path.join(root, "thread-large-stream.jsonl");
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:00.000Z",
+        type: "event_msg",
+        payload: { message: "初始快照", type: "user_message" },
+      }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  const harness = createStreamHarness();
+  const stream = createMobileThreadEventStream({
+    chunkBytes: 128,
+    filePath: file,
+    pendingMaxBytes: 256,
+    pollMs: 10,
+    req: harness.req,
+    res: harness.res,
+    sinceOffset: null,
+    threadId: "thread-large-stream",
+  });
+
+  fs.appendFileSync(
+    file,
+    [
+      JSON.stringify({
+        type: "internal_state",
+        payload: { blob: "x".repeat(2_000) },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:01.000Z",
+        type: "response_item",
+        payload: {
+          content: [{ text: "大块内部状态后仍能恢复增量", type: "output_text" }],
+          role: "assistant",
+          type: "message",
+        },
+      }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  await wait(260);
+  const output = harness.writes.join("");
+  assert.match(output, /大块内部状态后仍能恢复增量/);
+  assert.doesNotMatch(output, /x{200}/);
+
+  harness.close();
+  assert.equal(stream.closed(), true);
+});
+
 test("createMobileTurnStartPayload keeps phone send payload minimal", () => {
   const payload = createMobileTurnStartPayload({
     localSendId: "local-1",
