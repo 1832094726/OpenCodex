@@ -7,6 +7,7 @@ const test = require("node:test");
 const {
   createMobileBootstrapPayload,
   createMobileThreadPayload,
+  createMobileThreadEventStream,
   listLocalSessionThreadDetail,
   listLocalSessionThreads,
   normalizeMobileThreads,
@@ -40,6 +41,39 @@ function collectResponse(handler, req) {
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-mobile-test-"));
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function createStreamHarness() {
+  const events = {};
+  const writes = [];
+  const req = {
+    on(event, handler) {
+      events[event] = handler;
+    },
+  };
+  const res = {
+    headers: {},
+    statusCode: 0,
+    write(chunk) {
+      writes.push(String(chunk));
+    },
+    writeHead(statusCode, headers = {}) {
+      this.statusCode = statusCode;
+      this.headers = headers;
+    },
+  };
+  return {
+    close() {
+      if (events.close) events.close();
+    },
+    req,
+    res,
+    writes,
+  };
 }
 
 test("normalizeMobileThreads trims thread list to phone-safe fields", () => {
@@ -255,6 +289,81 @@ test("createMobileThreadPayload reports not found without falling back to deskto
   });
 
   assert.deepEqual(payload, { ok: false, error: "Thread not found" });
+});
+
+test("createMobileThreadEventStream emits only appended visible messages and cleans up on close", async () => {
+  const root = tempDir();
+  const file = path.join(root, "thread.jsonl");
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:00.000Z",
+        type: "event_msg",
+        payload: { message: "旧消息不应该重复推送", type: "user_message" },
+      }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  const harness = createStreamHarness();
+
+  const stream = createMobileThreadEventStream({
+    filePath: file,
+    pollMs: 10,
+    req: harness.req,
+    res: harness.res,
+    sinceOffset: null,
+    threadId: "thread-sse-1",
+  });
+
+  assert.equal(harness.res.statusCode, 200);
+  assert.equal(harness.res.headers["content-type"], "text/event-stream; charset=utf-8");
+  const readyOutput = harness.writes.join("");
+  assert.match(readyOutput, /event: ready/);
+  assert.match(readyOutput, new RegExp(`id: ${fs.statSync(file).size}\\n`));
+
+  fs.appendFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:01.000Z",
+        type: "response_item",
+        payload: {
+          content: [{ text: "<environment_context>skip", type: "input_text" }],
+          role: "user",
+          type: "message",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:02.000Z",
+        type: "event_msg",
+        payload: { message: "只推当前会话新增消息", type: "user_message" },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:03.000Z",
+        type: "response_item",
+        payload: {
+          content: [{ text: "收到，继续只推增量。", type: "output_text" }],
+          role: "assistant",
+          type: "message",
+        },
+      }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  await wait(40);
+  const output = harness.writes.join("");
+  assert.match(output, /event: message/);
+  assert.match(output, /只推当前会话新增消息/);
+  assert.match(output, /收到，继续只推增量。/);
+  assert.doesNotMatch(output, /旧消息不应该重复推送/);
+  assert.doesNotMatch(output, /environment_context/);
+
+  harness.close();
+  assert.equal(stream.closed(), true);
 });
 
 test("request handler serves the mobile-lite shell at /m before the full app shell fallback", async () => {

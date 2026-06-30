@@ -7,6 +7,7 @@
   const countEl = document.getElementById("mobile-count");
   const listEl = document.getElementById("mobile-thread-list");
   const messageListEl = document.getElementById("mobile-message-list");
+  let threadEvents = null;
 
   function setText(node, value) {
     if (node) node.textContent = String(value == null ? "" : value);
@@ -65,20 +66,48 @@
       return;
     }
     for (const message of messages) {
-      const item = document.createElement("article");
-      item.className = `message ${message.role === "user" ? "user" : "assistant"}`;
-
-      const role = document.createElement("span");
-      role.className = "message-role";
-      role.textContent = message.role === "user" ? "你" : "Codex";
-
-      const text = document.createElement("p");
-      text.className = "message-text";
-      text.textContent = message.text || "";
-
-      item.append(role, text);
-      messageListEl.append(item);
+      appendMessage(message);
     }
+  }
+
+  function appendMessage(message) {
+    const item = document.createElement("article");
+    item.className = `message ${message.role === "user" ? "user" : "assistant"}`;
+
+    const role = document.createElement("span");
+    role.className = "message-role";
+    role.textContent = message.role === "user" ? "你" : "Codex";
+
+    const text = document.createElement("p");
+    text.className = "message-text";
+    text.textContent = message.text || "";
+
+    item.append(role, text);
+    messageListEl.append(item);
+  }
+
+  function connectThreadEvents(threadId) {
+    if (!("EventSource" in window)) return;
+    if (threadEvents) threadEvents.close();
+    // 增量通道只订阅当前会话，避免手机端恢复完整官方 WS/app-host 状态流。
+    threadEvents = new EventSource(`/api/mobile/thread/${encodeURIComponent(threadId)}/events`);
+    threadEvents.addEventListener("ready", () => {
+      setText(statusEl, "已连接当前会话增量");
+    });
+    threadEvents.addEventListener("message", (event) => {
+      try {
+        const message = JSON.parse(event.data || "{}");
+        if (!message || !message.text) return;
+        const empty = messageListEl.querySelector(".empty");
+        if (empty) empty.remove();
+        appendMessage(message);
+        const count = Number(countEl.textContent || 0);
+        setText(countEl, Number.isFinite(count) ? count + 1 : messageListEl.querySelectorAll(".message").length);
+      } catch {}
+    });
+    threadEvents.addEventListener("error", () => {
+      setText(statusEl, "增量连接已断开，浏览器会自动重连");
+    });
   }
 
   async function loadBootstrap() {
@@ -125,6 +154,7 @@
     setText(countEl, messages.length);
     if (backEl) backEl.hidden = false;
     renderMessages(messages);
+    connectThreadEvents(threadId);
   }
 
   function currentThreadId() {
@@ -140,6 +170,7 @@
       renderMessages([]);
     });
   } else {
+    if (threadEvents) threadEvents.close();
     loadBootstrap().catch((error) => {
       setText(statusEl, `读取失败：${error && error.message ? error.message : String(error)}`);
       if (statusEl) statusEl.classList.add("error");

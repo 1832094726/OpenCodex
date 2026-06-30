@@ -118,6 +118,28 @@ function textFromContentParts(content) {
     .trim();
 }
 
+function mobileMessageFromRecord(record, fallbackTimestamp = "") {
+  if (!record || typeof record !== "object") return null;
+  const timestamp = firstValue(record.timestamp, record.payload && record.payload.timestamp, fallbackTimestamp);
+  let role = "";
+  let text = "";
+  if (record.type === "event_msg" && record.payload && record.payload.type === "user_message") {
+    role = "user";
+    text = firstString(record.payload.message, record.payload.text);
+  } else if (
+    record.type === "response_item" &&
+    record.payload &&
+    record.payload.type === "message" &&
+    (record.payload.role === "user" || record.payload.role === "assistant")
+  ) {
+    role = record.payload.role;
+    text = textFromContentParts(record.payload.content);
+  }
+  if (!role || !text) return null;
+  if (role === "user" && !isUsefulThreadTitle(text)) return null;
+  return { role, text, timestamp };
+}
+
 function isUsefulThreadTitle(title) {
   const text = firstString(title);
   if (!text) return false;
@@ -207,24 +229,10 @@ function parseSessionFile(filePath, archived, options = {}) {
         thread.updatedAt = firstValue(record.payload.timestamp, record.timestamp, thread.updatedAt);
         continue;
       }
-      let role = "";
-      let text = "";
-      if (record.type === "event_msg" && record.payload && record.payload.type === "user_message") {
-        role = "user";
-        text = firstString(record.payload.message, record.payload.text);
-      } else if (
-        record.type === "response_item" &&
-        record.payload &&
-        record.payload.type === "message" &&
-        (record.payload.role === "user" || record.payload.role === "assistant")
-      ) {
-        role = record.payload.role;
-        text = textFromContentParts(record.payload.content);
-      }
-      if (!role || !text) continue;
-      if (role === "user" && !isUsefulThreadTitle(text)) continue;
-      if (!thread.title && role === "user") thread.title = text.slice(0, 80);
-      messages.push({ role, text, timestamp });
+      const message = mobileMessageFromRecord(record, timestamp);
+      if (!message) continue;
+      if (!thread.title && message.role === "user") thread.title = message.text.slice(0, 80);
+      messages.push(message);
       if (messages.length >= limit) break;
     }
   } catch {
@@ -293,6 +301,102 @@ function listLocalSessionThreadDetail(options = {}) {
   return parsed || { ok: false };
 }
 
+function sseWrite(res, { data, event, id }) {
+  if (id != null) res.write(`id: ${String(id)}\n`);
+  if (event) res.write(`event: ${event}\n`);
+  const body = data == null ? "" : JSON.stringify(data);
+  for (const line of body.split(/\r?\n/)) res.write(`data: ${line}\n`);
+  res.write("\n");
+}
+
+function createMobileThreadEventStream(options = {}) {
+  const req = options.req;
+  const res = options.res;
+  const filePath = options.filePath;
+  const pollMs = Math.max(10, Number(options.pollMs) || 1000);
+  const heartbeatMs = Math.max(pollMs, Number(options.heartbeatMs) || 30_000);
+  let closed = false;
+  let offset = 0;
+  let pending = "";
+  let pollTimer = null;
+  let heartbeatTimer = null;
+
+  function close() {
+    if (closed) return;
+    closed = true;
+    if (pollTimer) clearInterval(pollTimer);
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+  }
+
+  function readNewBytes() {
+    if (closed) return;
+    let stat = null;
+    try {
+      stat = fs.statSync(filePath);
+    } catch {
+      close();
+      return;
+    }
+    if (stat.size < offset) offset = stat.size;
+    if (stat.size === offset) return;
+    let chunk = "";
+    try {
+      const fd = fs.openSync(filePath, "r");
+      const length = stat.size - offset;
+      const buffer = Buffer.alloc(length);
+      fs.readSync(fd, buffer, 0, length, offset);
+      fs.closeSync(fd);
+      offset = stat.size;
+      chunk = buffer.toString("utf8");
+    } catch {
+      return;
+    }
+    pending += chunk;
+    const lines = pending.split(/\r?\n/);
+    pending = pending.endsWith("\n") || pending.endsWith("\r") ? "" : lines.pop() || "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let record = null;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const message = mobileMessageFromRecord(record);
+      if (message) sseWrite(res, { data: message, event: "message", id: offset });
+    }
+  }
+
+  try {
+    const stat = fs.statSync(filePath);
+    const rawSinceOffset = options.sinceOffset == null || options.sinceOffset === "" ? "" : String(options.sinceOffset);
+    const sinceOffset = rawSinceOffset ? Number(rawSinceOffset) : NaN;
+    offset = Number.isFinite(sinceOffset) && sinceOffset >= 0 && sinceOffset <= stat.size ? sinceOffset : stat.size;
+  } catch {
+    res.writeHead(404, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store" });
+    sseWrite(res, { data: { error: "Thread not found" }, event: "error" });
+    close();
+    return { closed: () => closed };
+  }
+
+  res.writeHead(200, {
+    "cache-control": "no-store",
+    "connection": "keep-alive",
+    "content-type": "text/event-stream; charset=utf-8",
+    "x-accel-buffering": "no",
+  });
+  // ready 只同步文件游标，避免手机端一连上 SSE 就重复接收全量历史。
+  sseWrite(res, { data: { offset, threadId: options.threadId || "" }, event: "ready", id: offset });
+  pollTimer = setInterval(readNewBytes, pollMs);
+  heartbeatTimer = setInterval(() => {
+    if (!closed) sseWrite(res, { data: { at: Date.now() }, event: "ping", id: offset });
+  }, heartbeatMs);
+  if (pollTimer && typeof pollTimer.unref === "function") pollTimer.unref();
+  if (heartbeatTimer && typeof heartbeatTimer.unref === "function") heartbeatTimer.unref();
+  if (req && typeof req.on === "function") req.on("close", close);
+  return { closed: () => closed };
+}
+
 function createMobileBootstrapPayload(options = {}) {
   const now = typeof options.now === "function" ? options.now : Date.now;
   const snapshot = typeof options.readThreadListSnapshot === "function" ? options.readThreadListSnapshot() : null;
@@ -350,7 +454,25 @@ function createMobileApi({ fastSyncCache }) {
     return sendJson(res, 200, payload, { "cache-control": "no-store" });
   }
 
-  return { handleBootstrap, handleThread };
+  function handleThreadEvents(req, res, url, threadId) {
+    const match = findLocalSessionFile({ threadId });
+    if (!match) {
+      res.writeHead(404, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store" });
+      sseWrite(res, { data: { error: "Thread not found" }, event: "error" });
+      res.end();
+      return null;
+    }
+    const lastEventId = firstString(req.headers && req.headers["last-event-id"], req.headers && req.headers["Last-Event-ID"]);
+    return createMobileThreadEventStream({
+      filePath: match.filePath,
+      req,
+      res,
+      sinceOffset: url.searchParams.get("sinceOffset") || lastEventId,
+      threadId,
+    });
+  }
+
+  return { handleBootstrap, handleThread, handleThreadEvents };
 }
 
 module.exports = {
@@ -359,6 +481,7 @@ module.exports = {
   MOBILE_THREAD_LIST_METHOD,
   createMobileApi,
   createMobileBootstrapPayload,
+  createMobileThreadEventStream,
   createMobileThreadPayload,
   listLocalSessionThreadDetail,
   listLocalSessionThreads,

@@ -354,6 +354,13 @@ function createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets
       return mobileApi.handleBootstrap(req, res, url);
     }
 
+    if (pathname.startsWith("/api/mobile/thread/") && pathname.endsWith("/events") && req.method === "GET") {
+      const rawThreadId = pathname.slice("/api/mobile/thread/".length, -"/events".length);
+      const threadId = decodeURIComponent(rawThreadId);
+      // SSE 只订阅当前会话文件追加内容，避免手机端挂上完整官方 WS 状态流。
+      return mobileApi.handleThreadEvents(req, res, url, threadId);
+    }
+
     if (pathname.startsWith("/api/mobile/thread/") && req.method === "GET") {
       const threadId = decodeURIComponent(pathname.slice("/api/mobile/thread/".length));
       // 只读取当前会话的轻量消息列表，为后续按会话增量订阅留出边界。
