@@ -64,6 +64,9 @@ const APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS = Number(
 const APP_SERVER_READ_ONLY_CACHE_FILE = path.join(RUNTIME_DIR, "cache", "app-server-read-only-cache.json");
 const DEFAULT_BROWSER_USE_AVAILABLE_BACKENDS = "chrome";
 const CODEX_RUNTIME_WATCH_FILENAMES = new Set(["config.toml", "auth.json"]);
+const CODEX_HISTORY_WATCH_FILENAMES = new Set([".jsonl"]);
+const CODEX_HISTORY_WATCH_DIRS = ["sessions", "archived_sessions"].map((name) => path.join(CODEX_HOME, name));
+const CC_SWITCH_SETTINGS_PATH = path.join(os.homedir(), ".cc-switch", "settings.json");
 const CODEX_RUNTIME_REFRESH_DEBOUNCE_MS = Math.max(
   100,
   Number(process.env.OPENCODEX_CODEX_RUNTIME_REFRESH_DEBOUNCE_MS || 800)
@@ -80,7 +83,7 @@ let appServerReadOnlyCacheLoaded = false;
 let appServerReadOnlyCacheSaveTimer = null;
 let officialBundle = null;
 let wsHub = null;
-let codexRuntimeWatcher = null;
+let codexRuntimeWatchers = [];
 let codexRuntimeRefreshTimer = null;
 
 const officialIpc = {
@@ -567,6 +570,19 @@ function codexRuntimeWatchPathFromFilename(filename) {
   return path.join(CODEX_HOME, basename);
 }
 
+function codexHistoryWatchPathFromFilename(rootDir, filename) {
+  if (filename == null) return rootDir;
+  const name = Buffer.isBuffer(filename) ? filename.toString("utf8") : String(filename);
+  if (!CODEX_HISTORY_WATCH_FILENAMES.has(path.extname(name))) return "";
+  return path.join(rootDir, name);
+}
+
+function ccSwitchSettingsWatchPathFromFilename(filename) {
+  if (filename == null) return CC_SWITCH_SETTINGS_PATH;
+  const name = Buffer.isBuffer(filename) ? filename.toString("utf8") : String(filename);
+  return path.basename(name) === path.basename(CC_SWITCH_SETTINGS_PATH) ? CC_SWITCH_SETTINGS_PATH : "";
+}
+
 function scheduleHiddenOfficialRuntimeRefresh(reason, changedPath) {
   if (codexRuntimeRefreshTimer) clearTimeout(codexRuntimeRefreshTimer);
   codexRuntimeRefreshTimer = setTimeout(() => {
@@ -576,25 +592,79 @@ function scheduleHiddenOfficialRuntimeRefresh(reason, changedPath) {
   if (codexRuntimeRefreshTimer && typeof codexRuntimeRefreshTimer.unref === "function") codexRuntimeRefreshTimer.unref();
 }
 
+function installCodexRuntimeFsWatcher(label, targetPath, options, onEvent) {
+  try {
+    const watcher = fs.watch(targetPath, options, (eventType, filename) => {
+      const changedPath = onEvent(eventType, filename);
+      if (!changedPath) return;
+      scheduleHiddenOfficialRuntimeRefresh(`${label}_${eventType || "change"}`, changedPath);
+    });
+    watcher.on("error", (error) => {
+      diagnosticWarn("official-runtime", "codex_runtime_watcher_error", {
+        error: error instanceof Error ? error.message : String(error),
+        label,
+        targetPath,
+      });
+    });
+    codexRuntimeWatchers.push(watcher);
+    return true;
+  } catch (error) {
+    diagnosticWarn("official-runtime", "codex_runtime_watcher_failed", {
+      error: error instanceof Error ? error.message : String(error),
+      label,
+      targetPath,
+    });
+    return false;
+  }
+}
+
+function installCodexHistoryWatcher(rootDir) {
+  if (!exists(rootDir)) return false;
+  const recursive = process.platform === "darwin" || process.platform === "win32";
+  const installed = installCodexRuntimeFsWatcher(
+    "codex_history",
+    rootDir,
+    { persistent: false, recursive },
+    (_eventType, filename) => codexHistoryWatchPathFromFilename(rootDir, filename)
+  );
+  if (installed || !recursive) return installed;
+  return installCodexRuntimeFsWatcher(
+    "codex_history",
+    rootDir,
+    { persistent: false },
+    (_eventType, filename) => codexHistoryWatchPathFromFilename(rootDir, filename)
+  );
+}
+
 function installCodexRuntimeWatcher() {
   if (process.env.OPENCODEX_DISABLE_CODEX_RUNTIME_WATCHER === "1") return;
-  if (codexRuntimeWatcher) return;
+  if (codexRuntimeWatchers.length > 0) return;
   try {
     ensureDir(CODEX_HOME);
-    codexRuntimeWatcher = fs.watch(CODEX_HOME, { persistent: false }, (eventType, filename) => {
-      const changedPath = codexRuntimeWatchPathFromFilename(filename);
-      if (!changedPath) return;
-      // ccswitch/登录状态会改 .codex 配置；隐藏官方 runtime 需要轻量重载才能读到新值。
-      scheduleHiddenOfficialRuntimeRefresh(`codex_${eventType || "change"}`, changedPath);
-    });
-    codexRuntimeWatcher.on("error", (error) => {
-      appServerSpawnHook.watcherInstalled = false;
-      appServerSpawnHook.lastError = error instanceof Error ? error.message : String(error);
-      diagnosticWarn("official-runtime", "codex_runtime_watcher_error", { error: appServerSpawnHook.lastError });
-    });
-    appServerSpawnHook.watcherInstalled = true;
-    appServerSpawnHook.watchedPaths = Array.from(CODEX_RUNTIME_WATCH_FILENAMES).map((name) => path.join(CODEX_HOME, name));
+    installCodexRuntimeFsWatcher(
+      "codex_config",
+      CODEX_HOME,
+      { persistent: false },
+      (_eventType, filename) => codexRuntimeWatchPathFromFilename(filename)
+    );
+    // 统一历史开关由 cc-switch 管理；迁入/恢复会话时也要让隐藏 app-server 立刻重读历史。
+    if (exists(path.dirname(CC_SWITCH_SETTINGS_PATH))) {
+      installCodexRuntimeFsWatcher(
+        "cc_switch_settings",
+        path.dirname(CC_SWITCH_SETTINGS_PATH),
+        { persistent: false },
+        (_eventType, filename) => ccSwitchSettingsWatchPathFromFilename(filename)
+      );
+    }
+    for (const historyDir of CODEX_HISTORY_WATCH_DIRS) installCodexHistoryWatcher(historyDir);
+    appServerSpawnHook.watcherInstalled = codexRuntimeWatchers.length > 0;
+    appServerSpawnHook.watchedPaths = [
+      ...Array.from(CODEX_RUNTIME_WATCH_FILENAMES).map((name) => path.join(CODEX_HOME, name)),
+      CC_SWITCH_SETTINGS_PATH,
+      ...CODEX_HISTORY_WATCH_DIRS,
+    ];
     diagnosticLog("official-runtime", "codex_runtime_watcher_ready", {
+      count: codexRuntimeWatchers.length,
       paths: appServerSpawnHook.watchedPaths,
     });
   } catch (error) {
