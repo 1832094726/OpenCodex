@@ -679,6 +679,90 @@ test("local mobile history reads avoid loading whole large session files", () =>
   }
 });
 
+test("listLocalSessionThreadDetail reuses a short cache while the session file is unchanged", () => {
+  const root = tempDir();
+  const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const file = path.join(sessionsDir, "rollout-2026-06-30T10-30-00-thread-detail-cache.jsonl");
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T10:30:00.000Z",
+        type: "session_meta",
+        payload: {
+          cwd: "/repo/detail-cache",
+          session_id: "thread-detail-cache",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T10:30:01.000Z",
+        type: "event_msg",
+        payload: {
+          message: "详情短缓存",
+          type: "user_message",
+        },
+      }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  let nowMs = 10_000;
+  const first = listLocalSessionThreadDetail({
+    codexHome: root,
+    detailCacheTtlMs: 1_000,
+    now: () => nowMs,
+    threadId: "thread-detail-cache",
+  });
+  const originalOpenSync = fs.openSync;
+  fs.openSync = function patchedOpenSync(target, ...args) {
+    if (path.resolve(String(target)) === file) throw new Error("unchanged detail should come from mobile cache");
+    return originalOpenSync.call(this, target, ...args);
+  };
+  try {
+    const cached = listLocalSessionThreadDetail({
+      codexHome: root,
+      detailCacheTtlMs: 1_000,
+      now: () => nowMs + 500,
+      threadId: "thread-detail-cache",
+    });
+
+    assert.equal(first.ok, true);
+    assert.deepEqual(cached.messages, first.messages);
+  } finally {
+    fs.openSync = originalOpenSync;
+  }
+
+  fs.appendFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T10:30:02.000Z",
+        type: "response_item",
+        payload: {
+          content: [{ text: "文件变化后重新读取", type: "output_text" }],
+          role: "assistant",
+          type: "message",
+        },
+      }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  nowMs += 600;
+  const refreshed = listLocalSessionThreadDetail({
+    codexHome: root,
+    detailCacheTtlMs: 1_000,
+    now: () => nowMs,
+    threadId: "thread-detail-cache",
+  });
+
+  assert.deepEqual(
+    refreshed.messages.map((message) => message.text),
+    ["详情短缓存", "文件变化后重新读取"]
+  );
+});
+
 test("listLocalSessionThreadDetail reads recent messages from the tail of large histories", () => {
   const root = tempDir();
   const sessionsDir = path.join(root, "sessions", "2026", "06", "30");

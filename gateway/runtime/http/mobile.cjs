@@ -21,12 +21,14 @@ const MOBILE_THREAD_EVENT_CHUNK_BYTES = 64 * 1024;
 const MOBILE_THREAD_EVENT_PENDING_MAX_BYTES = 256 * 1024;
 const MOBILE_THREAD_EVENT_RETRY_MS = 5_000;
 const MOBILE_THREAD_FIND_RECENT_FILE_LIMIT = 600;
+const MOBILE_THREAD_DETAIL_CACHE_TTL_MS = 2_000;
 const MOBILE_SESSION_META_HEAD_BYTES = 64 * 1024;
 const MOBILE_THREAD_ID_MAX_CHARS = 160;
 const MOBILE_THREAD_TITLE_MAX_CHARS = 160;
 const MOBILE_THREAD_PATH_MAX_CHARS = 320;
 const MOBILE_THREAD_TIME_MAX_CHARS = 80;
 const localSessionFileCache = new Map();
+const localThreadDetailCache = new Map();
 const localThreadListCache = new Map();
 
 function mobilePayloadEtag(payload) {
@@ -238,6 +240,47 @@ function rememberLocalThreadList(options = {}, threads = []) {
   localThreadListCache.set(localThreadListCacheKey(options), {
     expiresAtMs: now + ttlMs,
     threads: cloneMobileThreadList(threads),
+  });
+}
+
+function cloneMobileThreadDetail(detail) {
+  return detail && typeof detail === "object" ? JSON.parse(JSON.stringify(detail)) : detail;
+}
+
+function localThreadDetailCacheKey(options = {}, match = {}) {
+  return [
+    path.resolve(options.codexHome || CODEX_HOME),
+    firstString(options.threadId),
+    Math.max(1, Math.min(Number(options.limit) || 120, 500)),
+    Math.max(1024, Number(options.headBytes) || MOBILE_THREAD_DETAIL_HEAD_BYTES),
+    Math.max(1024, Number(options.tailBytes) || MOBILE_THREAD_DETAIL_TAIL_BYTES),
+    match.filePath || "",
+  ].join("|");
+}
+
+function cachedLocalThreadDetail(options = {}, match = {}, stat = null) {
+  const ttlMs = Math.max(0, Number(options.detailCacheTtlMs ?? MOBILE_THREAD_DETAIL_CACHE_TTL_MS));
+  if (ttlMs === 0 || !stat) return null;
+  const now = typeof options.now === "function" ? options.now() : Date.now();
+  const key = localThreadDetailCacheKey(options, match);
+  const cached = localThreadDetailCache.get(key);
+  if (!cached || cached.expiresAtMs <= now || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
+    localThreadDetailCache.delete(key);
+    return null;
+  }
+  return cloneMobileThreadDetail(cached.detail);
+}
+
+function rememberLocalThreadDetail(options = {}, match = {}, stat = null, detail = null) {
+  const ttlMs = Math.max(0, Number(options.detailCacheTtlMs ?? MOBILE_THREAD_DETAIL_CACHE_TTL_MS));
+  if (ttlMs === 0 || !stat || !detail || detail.ok !== true) return;
+  const now = typeof options.now === "function" ? options.now() : Date.now();
+  // 缓存的是已裁剪的 mobile-lite DTO；文件 stat 改变时立即失效，实时新增仍由 SSE 补齐。
+  localThreadDetailCache.set(localThreadDetailCacheKey(options, match), {
+    detail: cloneMobileThreadDetail(detail),
+    expiresAtMs: now + ttlMs,
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
   });
 }
 
@@ -573,8 +616,17 @@ function findLocalSessionFile(options = {}) {
 function listLocalSessionThreadDetail(options = {}) {
   const match = findLocalSessionFile(options);
   if (!match) return { ok: false };
+  let stat = null;
+  try {
+    stat = fs.statSync(match.filePath);
+  } catch {
+    return { ok: false };
+  }
+  const cached = cachedLocalThreadDetail(options, match, stat);
+  if (cached) return cached;
   const parsed = parseSessionFile(match.filePath, match.archived, options);
   if (parsed && parsed.metrics && match.lookupSource) parsed.metrics.lookupSource = match.lookupSource;
+  rememberLocalThreadDetail(options, match, stat, parsed);
   return parsed || { ok: false };
 }
 
