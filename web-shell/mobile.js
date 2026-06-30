@@ -89,7 +89,8 @@
 
     const role = document.createElement("span");
     role.className = "message-role";
-    role.textContent = options && options.pending ? "你 · 发送中" : message.role === "user" ? "你" : "Codex";
+    const roleText = options && options.pending ? "你 · 发送中" : message.role === "user" ? "你" : "Codex";
+    role.textContent = message.truncated ? `${roleText} · 已截断` : roleText;
 
     const text = document.createElement("p");
     text.className = "message-text";

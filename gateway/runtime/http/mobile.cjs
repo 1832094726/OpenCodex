@@ -9,6 +9,10 @@ const MOBILE_THREAD_LIST_METHOD = "thread/list";
 const MOBILE_THREAD_LIST_ARGS = [];
 const MOBILE_TURN_TEXT_MAX_CHARS = 20_000;
 const MOBILE_TURN_SEND_TTL_MS = 10 * 60 * 1000;
+const MOBILE_THREAD_DETAIL_HEAD_BYTES = 64 * 1024;
+const MOBILE_THREAD_DETAIL_TAIL_BYTES = 512 * 1024;
+const MOBILE_MESSAGE_TEXT_MAX_CHARS = 12_000;
+const localSessionFileCache = new Map();
 
 function firstString(...values) {
   for (const value of values) {
@@ -78,22 +82,49 @@ function normalizeMobileThreads(value, options = {}) {
   return result;
 }
 
-function walkJsonlFiles(root, files = []) {
+function walkJsonlFiles(root, files = [], options = {}) {
+  const maxFiles = Number(options.maxFiles) > 0 ? Number(options.maxFiles) : 0;
+  if (maxFiles > 0 && files.length >= maxFiles) return files;
   let entries = [];
   try {
     entries = fs.readdirSync(root, { withFileTypes: true });
   } catch {
     return files;
   }
+  if (options.newestFirst) entries.sort((left, right) => right.name.localeCompare(left.name));
   for (const entry of entries) {
+    if (maxFiles > 0 && files.length >= maxFiles) break;
     const fullPath = path.join(root, entry.name);
     if (entry.isDirectory()) {
-      walkJsonlFiles(fullPath, files);
+      walkJsonlFiles(fullPath, files, options);
     } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
       files.push(fullPath);
     }
   }
   return files;
+}
+
+function rememberLocalSessionFile(threadId, item) {
+  const id = firstString(threadId);
+  if (!id || !item || !item.filePath) return;
+  localSessionFileCache.set(id, {
+    archived: Boolean(item.archived),
+    filePath: item.filePath,
+  });
+}
+
+function cachedLocalSessionFile(threadId) {
+  const id = firstString(threadId);
+  if (!id) return null;
+  const cached = localSessionFileCache.get(id);
+  if (!cached || !cached.filePath) return null;
+  try {
+    fs.accessSync(cached.filePath, fs.constants.R_OK);
+    return cached;
+  } catch {
+    localSessionFileCache.delete(id);
+    return null;
+  }
 }
 
 function titleFromRecord(record) {
@@ -120,6 +151,14 @@ function textFromContentParts(content) {
     .trim();
 }
 
+function truncateMobileMessageText(text, maxChars = MOBILE_MESSAGE_TEXT_MAX_CHARS) {
+  const value = firstString(text);
+  if (!value) return { text: "", truncated: false };
+  const limit = Math.max(200, Number(maxChars) || MOBILE_MESSAGE_TEXT_MAX_CHARS);
+  if (value.length <= limit) return { text: value, truncated: false };
+  return { text: value.slice(0, limit), truncated: true };
+}
+
 function mobileMessageFromRecord(record, fallbackTimestamp = "") {
   if (!record || typeof record !== "object") return null;
   const timestamp = firstValue(record.timestamp, record.payload && record.payload.timestamp, fallbackTimestamp);
@@ -139,7 +178,13 @@ function mobileMessageFromRecord(record, fallbackTimestamp = "") {
   }
   if (!role || !text) return null;
   if (role === "user" && !isUsefulThreadTitle(text)) return null;
-  return { role, text, timestamp };
+  const normalized = truncateMobileMessageText(text);
+  return {
+    role,
+    text: normalized.text,
+    timestamp,
+    ...(normalized.truncated ? { truncated: true } : {}),
+  };
 }
 
 function isUsefulThreadTitle(title) {
@@ -198,6 +243,26 @@ function sessionThreadFromFile(filePath, archived) {
   return thread;
 }
 
+function readFileWindow(filePath, start, length) {
+  if (length <= 0) return "";
+  try {
+    const fd = fs.openSync(filePath, "r");
+    const buffer = Buffer.alloc(length);
+    const bytesRead = fs.readSync(fd, buffer, 0, length, start);
+    fs.closeSync(fd);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
+function jsonlLinesFromWindow(text, options = {}) {
+  if (!text) return [];
+  const lines = text.split(/\r?\n/);
+  if (options.dropFirstPartial) lines.shift();
+  return lines.filter(Boolean);
+}
+
 function parseSessionFile(filePath, archived, options = {}) {
   let stat = null;
   try {
@@ -214,16 +279,22 @@ function parseSessionFile(filePath, archived, options = {}) {
     updatedAt: stat.mtime.toISOString(),
   };
   const messages = [];
+  const headBytes = Math.max(1024, Number(options.headBytes) || MOBILE_THREAD_DETAIL_HEAD_BYTES);
+  const tailBytes = Math.max(1024, Number(options.tailBytes) || MOBILE_THREAD_DETAIL_TAIL_BYTES);
   try {
-    const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/).filter(Boolean);
-    for (const line of lines) {
+    const head = readFileWindow(filePath, 0, Math.min(stat.size, headBytes));
+    const tailStart = Math.max(0, stat.size - tailBytes);
+    const tail = tailStart === 0 ? head : readFileWindow(filePath, tailStart, stat.size - tailStart);
+    const headLines = jsonlLinesFromWindow(head);
+    const tailLines = jsonlLinesFromWindow(tail, { dropFirstPartial: tailStart > 0 });
+
+    for (const line of headLines) {
       let record = null;
       try {
         record = JSON.parse(line);
       } catch {
         continue;
       }
-      const timestamp = firstValue(record.timestamp, record.payload && record.payload.timestamp, thread.updatedAt);
       if (record && record.type === "session_meta" && record.payload && typeof record.payload === "object") {
         // 详情页同样只抽元信息，不透传 session_meta 里的完整上下文和内部配置。
         thread.id = firstString(record.payload.session_id, record.payload.id, thread.id) || thread.id;
@@ -231,11 +302,26 @@ function parseSessionFile(filePath, archived, options = {}) {
         thread.updatedAt = firstValue(record.payload.timestamp, record.timestamp, thread.updatedAt);
         continue;
       }
-      const message = mobileMessageFromRecord(record, timestamp);
+      if (!thread.title) {
+        const title = titleFromRecord(record);
+        if (isUsefulThreadTitle(title)) thread.title = title;
+      }
+      if (thread.projectPath && thread.title) break;
+    }
+
+    for (const line of tailLines) {
+      let record = null;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const message = mobileMessageFromRecord(record, firstValue(record.timestamp, record.payload && record.payload.timestamp, thread.updatedAt));
       if (!message) continue;
       if (!thread.title && message.role === "user") thread.title = message.text.slice(0, 80);
+      // 详情页面向手机弱网，只保留最近可见消息，避免大历史一次性压过链路。
       messages.push(message);
-      if (messages.length >= limit) break;
+      if (messages.length > limit) messages.shift();
     }
   } catch {
     return null;
@@ -253,7 +339,10 @@ function listLocalSessionThreads(options = {}) {
   ];
   const files = [];
   for (const root of roots) {
-    for (const filePath of walkJsonlFiles(root.dir)) files.push({ archived: root.archived, filePath });
+    // 手机首屏只需要最近候选；按日期目录/文件名倒序提前停止，避免每次弱网打开都遍历全部历史。
+    for (const filePath of walkJsonlFiles(root.dir, [], { maxFiles: limit * 6, newestFirst: true })) {
+      files.push({ archived: root.archived, filePath });
+    }
   }
   const filesWithMtime = files
     .map((item) => {
@@ -268,7 +357,11 @@ function listLocalSessionThreads(options = {}) {
   const threads = [];
   for (const item of filesWithMtime.slice(0, limit * 3)) {
     const thread = sessionThreadFromFile(item.filePath, item.archived);
-    if (thread) threads.push(thread);
+    if (thread) {
+      // 列表页已经定位过文件，缓存映射后详情页无需再次全量扫描历史目录。
+      rememberLocalSessionFile(thread.id, item);
+      threads.push(thread);
+    }
     if (threads.length >= limit) break;
   }
   return threads;
@@ -278,18 +371,28 @@ function findLocalSessionFile(options = {}) {
   const codexHome = options.codexHome || CODEX_HOME;
   const threadId = firstString(options.threadId);
   if (!threadId) return null;
+  const cached = cachedLocalSessionFile(threadId);
+  if (cached) return cached;
   const roots = [
     { archived: false, dir: path.join(codexHome, "sessions") },
     { archived: true, dir: path.join(codexHome, "archived_sessions") },
   ];
   for (const root of roots) {
     for (const filePath of walkJsonlFiles(root.dir)) {
-      if (path.basename(filePath, ".jsonl").endsWith(threadId)) return { archived: root.archived, filePath };
+      if (path.basename(filePath, ".jsonl").endsWith(threadId)) {
+        const item = { archived: root.archived, filePath };
+        rememberLocalSessionFile(threadId, item);
+        return item;
+      }
       try {
         const firstLine = fs.readFileSync(filePath, "utf8").split(/\r?\n/, 1)[0] || "";
         const record = JSON.parse(firstLine);
         const payload = record && record.payload && typeof record.payload === "object" ? record.payload : {};
-        if (firstString(payload.session_id, payload.id) === threadId) return { archived: root.archived, filePath };
+        if (firstString(payload.session_id, payload.id) === threadId) {
+          const item = { archived: root.archived, filePath };
+          rememberLocalSessionFile(threadId, item);
+          return item;
+        }
       } catch {}
     }
   }

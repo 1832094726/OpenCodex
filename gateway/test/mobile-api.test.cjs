@@ -298,6 +298,118 @@ test("listLocalSessionThreadDetail returns only visible user and assistant messa
   ]);
 });
 
+test("listLocalSessionThreadDetail reads recent messages from the tail of large histories", () => {
+  const root = tempDir();
+  const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const file = path.join(sessionsDir, "rollout-2026-06-30T09-00-00-thread-large-1.jsonl");
+  const filler = Array.from({ length: 80 }, (_, index) =>
+    JSON.stringify({
+      type: "internal_state",
+      payload: {
+        index,
+        blob: "x".repeat(180),
+      },
+    })
+  );
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T09:00:00.000Z",
+        type: "session_meta",
+        payload: {
+          cwd: "/repo/large-mobile",
+          session_id: "thread-large-1",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T09:00:01.000Z",
+        type: "event_msg",
+        payload: {
+          message: "这是很早之前的消息，不应该压到手机详情",
+          type: "user_message",
+        },
+      }),
+      ...filler,
+      JSON.stringify({
+        timestamp: "2026-06-30T09:10:01.000Z",
+        type: "event_msg",
+        payload: {
+          message: "最近用户消息",
+          type: "user_message",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T09:10:02.000Z",
+        type: "response_item",
+        payload: {
+          content: [{ text: "最近助手回复", type: "output_text" }],
+          role: "assistant",
+          type: "message",
+        },
+      }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const detail = listLocalSessionThreadDetail({
+    codexHome: root,
+    headBytes: 2048,
+    limit: 5,
+    tailBytes: 2048,
+    threadId: "thread-large-1",
+  });
+
+  assert.equal(detail.ok, true);
+  assert.equal(detail.thread.id, "thread-large-1");
+  assert.equal(detail.thread.projectPath, "/repo/large-mobile");
+  assert.equal(detail.thread.title, "这是很早之前的消息，不应该压到手机详情");
+  assert.deepEqual(
+    detail.messages.map((message) => message.text),
+    ["最近用户消息", "最近助手回复"]
+  );
+});
+
+test("listLocalSessionThreadDetail truncates very large visible messages", () => {
+  const root = tempDir();
+  const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const file = path.join(sessionsDir, "rollout-2026-06-30T09-20-00-thread-huge-message.jsonl");
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T09:20:00.000Z",
+        type: "session_meta",
+        payload: {
+          cwd: "/repo/huge-message",
+          session_id: "thread-huge-message",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T09:20:01.000Z",
+        type: "response_item",
+        payload: {
+          content: [{ text: "a".repeat(14_000), type: "output_text" }],
+          role: "assistant",
+          type: "message",
+        },
+      }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const detail = listLocalSessionThreadDetail({ codexHome: root, threadId: "thread-huge-message" });
+
+  assert.equal(detail.ok, true);
+  assert.equal(detail.messages.length, 1);
+  assert.equal(detail.messages[0].text.length, 12_000);
+  assert.equal(detail.messages[0].truncated, true);
+});
+
 test("createMobileThreadPayload reports not found without falling back to desktop state", async () => {
   const payload = await createMobileThreadPayload({
     readLocalThreadDetail: () => ({ ok: false }),
