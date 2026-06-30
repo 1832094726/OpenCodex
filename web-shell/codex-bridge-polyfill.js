@@ -359,6 +359,7 @@
     "3903742690": true,
     artifacts: true,
   };
+  const OPENCODEX_DISABLED_STATSIG_GATES = ["4261455886"];
   const OPENCODEX_CLIENT_ID_STORAGE_KEY = "opencodex_browser_client_id_v1";
   const OPENCODEX_LAST_ROUTE_STORAGE_KEY = "opencodex_last_thread_route_v1";
 
@@ -2109,18 +2110,36 @@
     };
   }
 
-  function patchStatsigPayloadForOfficialI18n(statsigPayload) {
+  function disabledStatsigGateConfig(name) {
+    return {
+      name,
+      value: false,
+      rule_id: "opencodex_disabled",
+      secondary_exposures: [],
+    };
+  }
+
+  function patchStatsigPayloadForOpenCodex(statsigPayload) {
     if (!statsigPayload || typeof statsigPayload !== "object") return false;
     statsigPayload.layer_configs =
       statsigPayload.layer_configs && typeof statsigPayload.layer_configs === "object"
         ? statsigPayload.layer_configs
         : {};
     statsigPayload.layer_configs[STATSIG_I18N_LAYER_CONFIG] = i18nStatsigLayerConfig();
+    statsigPayload.feature_gates =
+      statsigPayload.feature_gates && typeof statsigPayload.feature_gates === "object"
+        ? statsigPayload.feature_gates
+        : {};
+    for (const gateName of OPENCODEX_DISABLED_STATSIG_GATES) {
+      // tail hydration 在 OpenCodex Web 桥下会让历史正文依赖 resume 的 initialTurnsPage；
+      // 该页偶发为空时用户会看到空/错对话，禁用后回到官方稳定的普通 hydration 路径。
+      statsigPayload.feature_gates[gateName] = disabledStatsigGateConfig(gateName);
+    }
     statsigPayload.has_updates = true;
     return true;
   }
 
-  /** 官方返回的 statsigPayload 是 JSON 字符串；只补 i18n layer，仍让官方 IntlProvider 加载官方 zh-CN 语言包。 */
+  /** 官方返回的 statsigPayload 是 JSON 字符串；这里补 Web 侧必须的 OpenCodex 覆写。 */
   function patchStatsigBootstrapFetchResponse(payload) {
     if (!payload || typeof payload !== "object") return payload;
     const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
@@ -2130,10 +2149,11 @@
     try {
       const body = JSON.parse(payload.bodyJsonString);
       const statsigPayload = body && typeof body.statsigPayload === "string" ? JSON.parse(body.statsigPayload) : null;
-      if (!patchStatsigPayloadForOfficialI18n(statsigPayload)) return payload;
+      if (!patchStatsigPayloadForOpenCodex(statsigPayload)) return payload;
       body.statsigPayload = JSON.stringify(statsigPayload);
       payload.bodyJsonString = JSON.stringify(body);
-      clientDiagnostic("statsig-bootstrap-i18n-layer-patched", {
+      clientDiagnostic("statsig-bootstrap-opencodex-patched", {
+        disabledGates: OPENCODEX_DISABLED_STATSIG_GATES.join(","),
         locale: OPENCODEX_LOCALE,
         requestId,
       });
@@ -2696,8 +2716,6 @@
     "config/read",
     "model/list",
     "thread/list",
-    "thread/read",
-    "thread/turns/list",
   ]);
 
   /** 提取官方 app-server 只读方法名；这些方法多次并发调用时结果可短时间复用。 */

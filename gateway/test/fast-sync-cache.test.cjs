@@ -20,8 +20,8 @@ function tempDir() {
 
 test("allows only first-screen read methods", () => {
   assert.equal(isFastSyncCacheableMethod("thread/list"), true);
-  assert.equal(isFastSyncCacheableMethod("thread/read"), true);
-  assert.equal(isFastSyncCacheableMethod("thread/turns/list"), true);
+  assert.equal(isFastSyncCacheableMethod("thread/read"), false);
+  assert.equal(isFastSyncCacheableMethod("thread/turns/list"), false);
   assert.equal(isFastSyncCacheableMethod("config/read"), true);
   assert.equal(isFastSyncCacheableMethod("model/list"), true);
   assert.equal(isFastSyncCacheableMethod("plugin/list"), false);
@@ -109,23 +109,22 @@ test("cache keys handle non-json args without throwing", () => {
 test("writes and reads a snapshot from disk", () => {
   const dir = tempDir();
   const cache = createFastSyncCache({ dir, ttlMs: 60_000 });
-  const key = cacheKeyForSnapshot("thread/read", [{ threadId: "t1" }]);
-  cache.writeSnapshot({ key, method: "thread/read", value: { threadId: "t1", title: "Hello" } });
-  assert.deepEqual(cache.readSnapshot({ key })?.value, { threadId: "t1", title: "Hello" });
+  const key = cacheKeyForSnapshot("thread/list", []);
+  cache.writeSnapshot({ key, method: "thread/list", value: { items: [{ threadId: "t1", title: "Hello" }] } });
+  assert.deepEqual(cache.readSnapshot({ key })?.value, { items: [{ threadId: "t1", title: "Hello" }] });
 });
 
 test("redacts sensitive fields before writing snapshots", () => {
   const dir = tempDir();
   const cache = createFastSyncCache({ dir, ttlMs: 60_000 });
-  const key = cacheKeyForSnapshot("thread/read", [{ threadId: "t1" }]);
+  const key = cacheKeyForSnapshot("thread/list", []);
 
   assert.equal(
     cache.writeSnapshot({
       key,
-      method: "thread/read",
+      method: "thread/list",
       value: {
-        threadId: "t1",
-        title: "Hello",
+        items: [{ threadId: "t1", title: "Hello" }],
         model: "gpt-test",
         socketId: "socket-1",
         token: "token-value",
@@ -150,8 +149,7 @@ test("redacts sensitive fields before writing snapshots", () => {
   );
 
   assert.deepEqual(cache.readSnapshot({ key })?.value, {
-    threadId: "t1",
-    title: "Hello",
+    items: [{ threadId: "t1", title: "Hello" }],
     model: "gpt-test",
     socketId: "socket-1",
     token: "[redacted]",
@@ -180,11 +178,11 @@ test("writeSnapshot returns false for circular or bigint values", () => {
   circular.self = circular;
 
   assert.equal(
-    cache.writeSnapshot({ key: cacheKeyForSnapshot("thread/read", [{ threadId: "t1" }]), method: "thread/read", value: circular }),
+    cache.writeSnapshot({ key: cacheKeyForSnapshot("thread/list", []), method: "thread/list", value: circular }),
     false
   );
   assert.equal(
-    cache.writeSnapshot({ key: cacheKeyForSnapshot("thread/read", [{ threadId: "t2" }]), method: "thread/read", value: { count: 1n } }),
+    cache.writeSnapshot({ key: cacheKeyForSnapshot("thread/list", [{ page: 2 }]), method: "thread/list", value: { count: 1n } }),
     false
   );
   assert.deepEqual(fs.readdirSync(dir, { recursive: true }), []);
@@ -233,7 +231,7 @@ test("invalid env default ttl falls back to ten minutes", () => {
 test("corrupt snapshots are deleted and treated as missing", () => {
   const dir = tempDir();
   const cache = createFastSyncCache({ dir, ttlMs: 60_000 });
-  const key = cacheKeyForSnapshot("thread/read", [{ threadId: "t1" }]);
+  const key = cacheKeyForSnapshot("thread/list", []);
   fs.writeFileSync(cache.filePathForKey(key), "{not-json", "utf8");
   assert.equal(cache.readSnapshot({ key }), null);
   assert.equal(fs.existsSync(cache.filePathForKey(key)), false);

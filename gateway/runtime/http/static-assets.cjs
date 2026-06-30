@@ -47,6 +47,7 @@ const WEB_SHELL_STATIC_FILES = new Map([
 // 静态资源层把官方 renderer/web-shell 的路径差异统一隐藏起来，server 只需要按 URL 取文件。
 function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   let hasWarnedHistoryPatchMiss = false;
+  let hasWarnedTailHydrationPatchMiss = false;
   // 旧版本曾经使用 /official-patched/；浏览器缓存的旧 chunk 可能还会懒加载这个前缀。
   const patchedOfficialPrefixes = Array.from(new Set([PATCHED_OFFICIAL_PREFIX, "/official-patched/"]));
 
@@ -367,13 +368,29 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     );
   }
 
+  /** 官方 tail hydration 实验会让首屏历史依赖 resume.initialTurnsPage；Web 桥下该字段缺失时会空屏到用户发消息。 */
+  function patchTailHydrationGate(source) {
+    if (!source.includes("4261455886")) return source;
+    const tailHydrationGate =
+      /[A-Za-z_$][\w$]*\?\.get\([A-Za-z_$][\w$]*\)\?\.checkGate\((["'`])4261455886\1\)\?\?!1/g;
+    if (!tailHydrationGate.test(source)) {
+      if (!hasWarnedTailHydrationPatchMiss) {
+        hasWarnedTailHydrationPatchMiss = true;
+        console.warn("[gateway] tail hydration gate patch skipped: current bundle shape did not match");
+      }
+      return source;
+    }
+    return source.replace(tailHydrationGate, "false");
+  }
+
   /** 对官方 chunk 做响应期 patch，不落盘改 vendor/官方构建产物。 */
   function patchOfficialAsset(reqPath, data) {
     if (!shouldPatchOfficialAsset(reqPath)) return data;
     const source = data.toString("utf-8");
-    const patched = /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath)
+    const historyPatched = /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath)
       ? patchAppServerManagerSignalsChunk(source)
       : source;
+    const patched = patchTailHydrationGate(historyPatched);
     return Buffer.from(patched, "utf-8");
   }
 

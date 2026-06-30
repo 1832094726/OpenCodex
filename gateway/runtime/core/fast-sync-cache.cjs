@@ -9,8 +9,6 @@ const CACHEABLE_METHODS = new Set([
   "config/read",
   "model/list",
   "thread/list",
-  "thread/read",
-  "thread/turns/list",
 ]);
 const REDACTED_VALUE = "[redacted]";
 const SENSITIVE_FIELD_PARTS = [

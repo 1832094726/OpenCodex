@@ -16,6 +16,7 @@ const {
   mobileThreadDetailTailBytesForLimit,
   normalizeMobileThreads,
 } = require("../runtime/http/mobile.cjs");
+const { PATCHED_OFFICIAL_PREFIX } = require("../runtime/core/config.cjs");
 const { createStaticAssetService } = require("../runtime/http/static-assets.cjs");
 
 function collectResponse(handler, req) {
@@ -1504,6 +1505,34 @@ test("official renderer skips token usage capability only for mobile traffic mod
     assert.match(desktop, /codex-token-usage-capability\.js/);
     assert.doesNotMatch(mobile, /codex-token-usage-capability\.js/);
     assert.match(mobile, /跳过 token usage capability/);
+  } finally {
+    fs.rmSync(tempRoot, { force: true, recursive: true });
+  }
+});
+
+test("patched official chunks force-disable tail hydration gate", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-official-tail-hydration-"));
+  try {
+    const chunk = path.join(tempRoot, "remote-conversation.js");
+    fs.writeFileSync(
+      chunk,
+      // 官方 useTailHydration gate 走到 true 时会依赖 resume.initialTurnsPage；这里确认服务端响应期 patch 会钉到 false。
+      "const useTailHydration=()=>client?.get(Vs)?.checkGate(`4261455886`)??!1;",
+      "utf8"
+    );
+    const staticAssets = createStaticAssetService({
+      getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+      getOfficialBundle: () => null,
+    });
+
+    const response = await collectResponse(
+      (req, res) => staticAssets.serveFile(req, res, chunk, 200, `${PATCHED_OFFICIAL_PREFIX}assets/remote-conversation.js`),
+      { headers: {}, method: "GET", socket: { remoteAddress: "127.0.0.1" }, url: "/asset.js" }
+    );
+
+    assert.equal(response.statusCode, 200);
+    assert.match(response.body, /useTailHydration=\(\)=>false/);
+    assert.doesNotMatch(response.body, /checkGate\(`4261455886`\)/);
   } finally {
     fs.rmSync(tempRoot, { force: true, recursive: true });
   }

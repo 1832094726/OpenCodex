@@ -25,8 +25,6 @@ test("fast sync snapshot allowlist stays limited to first-screen reads", () => {
     "config/read",
     "model/list",
     "thread/list",
-    "thread/read",
-    "thread/turns/list",
   ];
 
   assert.match(source, /FAST_SYNC_SNAPSHOT_METHODS/);
@@ -38,6 +36,8 @@ test("fast sync snapshot allowlist stays limited to first-screen reads", () => {
   assert.ok(allowlistBlock, "expected a local fast-sync allowlist block");
   // 浏览器首屏快照只能服务安全只读方法，避免插件列表、发起 turn 和未知写操作被错误复用。
   assert.doesNotMatch(allowlistBlock[0], /"plugin\/list"/);
+  assert.doesNotMatch(allowlistBlock[0], /"thread\/read"/);
+  assert.doesNotMatch(allowlistBlock[0], /"thread\/turns\/list"/);
   assert.doesNotMatch(allowlistBlock[0], /"turn\/start"/);
 });
 
@@ -88,6 +88,14 @@ test("client diagnostics upload only flow events by default", () => {
   assert.match(source, /CLIENT_DIAGNOSTIC_UPLOAD_ENABLED/);
   assert.match(source, /event === "fast-sync-flow"/);
   assert.match(source, /shouldUploadClientDiagnostic\(event\)/);
+});
+
+test("desktop disables official tail hydration gate in web statsig payload", () => {
+  const source = readPolyfillSource();
+  // tail hydration 依赖 resume.initialTurnsPage；Web 桥下该页缺失会导致历史正文要等发消息后才显示。
+  assert.match(source, /OPENCODEX_DISABLED_STATSIG_GATES = \["4261455886"\]/);
+  assert.match(source, /statsigPayload\.feature_gates\[gateName\] = disabledStatsigGateConfig\(gateName\)/);
+  assert.match(source, /statsig-bootstrap-opencodex-patched/);
 });
 
 test("desktop conversation entry auxiliary reads use browser read-only cache", () => {
