@@ -764,6 +764,16 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     }
   }
 
+  function closeAllAppHostRelays(reason) {
+    let closed = 0;
+    for (const ws of clients) {
+      const relays = ws.__codexAppHostRelays;
+      if (relays) closed += relays.size;
+      closeAppHostRelays(ws, reason);
+    }
+    return closed;
+  }
+
   function removeClient(ws) {
     flushAppHostTrafficForClient(socketClientId(ws));
     closeAppHostRelays(ws, "client_disconnected");
@@ -1355,7 +1365,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     });
   });
 
-  return { broadcast, broadcastExcept, clients, sendTo, hasClient };
+  return { broadcast, broadcastExcept, clients, closeAllAppHostRelays, sendTo, hasClient };
 }
 
 module.exports = { createWsHub };

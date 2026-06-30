@@ -63,6 +63,15 @@ const APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS = Number(
 );
 const APP_SERVER_READ_ONLY_CACHE_FILE = path.join(RUNTIME_DIR, "cache", "app-server-read-only-cache.json");
 const DEFAULT_BROWSER_USE_AVAILABLE_BACKENDS = "chrome";
+const CODEX_RUNTIME_WATCH_FILENAMES = new Set(["config.toml", "auth.json"]);
+const CODEX_RUNTIME_REFRESH_DEBOUNCE_MS = Math.max(
+  100,
+  Number(process.env.OPENCODEX_CODEX_RUNTIME_REFRESH_DEBOUNCE_MS || 800)
+);
+const CODEX_APP_SERVER_KILL_GRACE_MS = Math.max(
+  100,
+  Number(process.env.OPENCODEX_CODEX_APP_SERVER_KILL_GRACE_MS || 2500)
+);
 const appServerReadOnlyCache = new Map();
 const fastSyncCache = createFastSyncCache({
   dir: path.join(RUNTIME_DIR, "cache", "fast-sync"),
@@ -71,6 +80,8 @@ let appServerReadOnlyCacheLoaded = false;
 let appServerReadOnlyCacheSaveTimer = null;
 let officialBundle = null;
 let wsHub = null;
+let codexRuntimeWatcher = null;
+let codexRuntimeRefreshTimer = null;
 
 const officialIpc = {
   // 官方 main 调 ipcMain.handle/on 注册的 handler 会被这里记录，再由 HTTP IPC invoke 复用。
@@ -91,6 +102,18 @@ const appServerSpawnHook = {
   lastArgs: null,
   replacementBinaryPath: null,
   lastError: null,
+  activeChildren: new Set(),
+  lastChildPid: null,
+  lastChildExit: null,
+  restartCount: 0,
+  lastRestartAt: null,
+  lastRestartReason: null,
+  lastRestartChangedPath: null,
+  lastRestartClosedRelays: 0,
+  lastRestartTerminatedPids: [],
+  lastHiddenReloadAt: null,
+  watcherInstalled: false,
+  watchedPaths: [],
 };
 const COMPUTER_USE_AUTH_URLS = new Set([
   "computer-use-background-auth-read",
@@ -297,12 +320,39 @@ function recordHiddenAppServerRedirect(launcher, command, normalizedArgs, replac
   });
 }
 
+function trackHiddenAppServerChild(child, launcher) {
+  if (!child || typeof child !== "object" || typeof child.on !== "function") return child;
+  appServerSpawnHook.activeChildren.add(child);
+  appServerSpawnHook.lastChildPid = typeof child.pid === "number" ? child.pid : null;
+  diagnosticLog("official-runtime", "app_server_child_tracked", {
+    launcher,
+    pid: appServerSpawnHook.lastChildPid,
+  });
+
+  function rememberExit(event, code, signal, error) {
+    appServerSpawnHook.activeChildren.delete(child);
+    appServerSpawnHook.lastChildExit = {
+      at: new Date().toISOString(),
+      code: code == null ? null : code,
+      event,
+      error: error instanceof Error ? error.message : error ? String(error) : "",
+      pid: typeof child.pid === "number" ? child.pid : null,
+      signal: signal || null,
+    };
+  }
+
+  child.once("exit", (code, signal) => rememberExit("exit", code, signal, null));
+  child.once("error", (error) => rememberExit("error", null, null, error));
+  return child;
+}
+
 function redirectHiddenAppServerSpawn(originalSpawn, bundle, self, command, args, options, rawArguments) {
   const spawnOptions = spawnOptionsFromArgs(args, options);
   const normalizedArgs = spawnArgList(args);
   if (looksLikeOfficialCodexBinary(command, bundle, spawnOptions) && isHiddenOfficialAppServerArgs(normalizedArgs)) {
     recordHiddenAppServerRedirect("spawn", command, normalizedArgs, bundle.codexBinaryPath);
-    return originalSpawn.call(self, bundle.codexBinaryPath, normalizedArgs, appServerSpawnOptions(spawnOptions));
+    const child = originalSpawn.call(self, bundle.codexBinaryPath, normalizedArgs, appServerSpawnOptions(spawnOptions));
+    return trackHiddenAppServerChild(child, "spawn");
   }
   return originalSpawn.apply(self, rawArguments);
 }
@@ -313,7 +363,14 @@ function redirectHiddenAppServerExecFile(originalExecFile, bundle, self, command
   if (looksLikeOfficialCodexBinary(command, bundle, execOptions) && isHiddenOfficialAppServerArgs(normalizedArgs)) {
     const execCallback = execFileCallbackFromArgs(args, options, callback);
     recordHiddenAppServerRedirect("execFile", command, normalizedArgs, bundle.codexBinaryPath);
-    return originalExecFile.call(self, bundle.codexBinaryPath, normalizedArgs, appServerSpawnOptions(execOptions), execCallback);
+    const child = originalExecFile.call(
+      self,
+      bundle.codexBinaryPath,
+      normalizedArgs,
+      appServerSpawnOptions(execOptions),
+      execCallback
+    );
+    return trackHiddenAppServerChild(child, "execFile");
   }
   if (looksLikeComputerUseInstaller(command)) {
     const execCallback = execFileCallbackFromArgs(args, options, callback);
@@ -401,7 +458,150 @@ function appServerSpawnHookStatus() {
     lastArgs: appServerSpawnHook.lastArgs,
     replacementBinaryPath: appServerSpawnHook.replacementBinaryPath,
     lastError: appServerSpawnHook.lastError,
+    activeChildPids: Array.from(appServerSpawnHook.activeChildren)
+      .map((child) => (typeof child.pid === "number" ? child.pid : null))
+      .filter((pid) => pid != null),
+    lastChildPid: appServerSpawnHook.lastChildPid,
+    lastChildExit: appServerSpawnHook.lastChildExit,
+    restartCount: appServerSpawnHook.restartCount,
+    lastRestartAt: appServerSpawnHook.lastRestartAt,
+    lastRestartReason: appServerSpawnHook.lastRestartReason,
+    lastRestartChangedPath: appServerSpawnHook.lastRestartChangedPath,
+    lastRestartClosedRelays: appServerSpawnHook.lastRestartClosedRelays,
+    lastRestartTerminatedPids: appServerSpawnHook.lastRestartTerminatedPids,
+    lastHiddenReloadAt: appServerSpawnHook.lastHiddenReloadAt,
+    watcherInstalled: appServerSpawnHook.watcherInstalled,
+    watchedPaths: appServerSpawnHook.watchedPaths,
   };
+}
+
+function terminateTrackedAppServerChildren(reason) {
+  const children = Array.from(appServerSpawnHook.activeChildren);
+  const terminatedPids = [];
+  for (const child of children) {
+    if (!child || child.killed) continue;
+    const pid = typeof child.pid === "number" ? child.pid : null;
+    if (pid != null) terminatedPids.push(pid);
+    try {
+      child.kill("SIGTERM");
+    } catch (error) {
+      diagnosticWarn("official-runtime", "app_server_child_sigterm_failed", {
+        error: error instanceof Error ? error.message : String(error),
+        pid,
+        reason,
+      });
+      continue;
+    }
+    const killTimer = setTimeout(() => {
+      if (!appServerSpawnHook.activeChildren.has(child) || child.killed) return;
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+    }, CODEX_APP_SERVER_KILL_GRACE_MS);
+    if (killTimer && typeof killTimer.unref === "function") killTimer.unref();
+  }
+  return terminatedPids;
+}
+
+function reloadHiddenOfficialRuntime(reason) {
+  const webContents = officialIpc.hiddenWebContents;
+  if (!webContents || webContents.isDestroyed()) return false;
+  try {
+    if (typeof webContents.reloadIgnoringCache === "function") {
+      webContents.reloadIgnoringCache();
+    } else {
+      webContents.reload();
+    }
+    appServerSpawnHook.lastHiddenReloadAt = new Date().toISOString();
+    diagnosticLog("official-runtime", "hidden_runtime_reloaded", { reason });
+    return true;
+  } catch (error) {
+    diagnosticWarn("official-runtime", "hidden_runtime_reload_failed", {
+      error: error instanceof Error ? error.message : String(error),
+      reason,
+    });
+    return false;
+  }
+}
+
+function refreshHiddenOfficialRuntime(reason, changedPath) {
+  appServerSpawnHook.restartCount += 1;
+  appServerSpawnHook.lastRestartAt = new Date().toISOString();
+  appServerSpawnHook.lastRestartReason = reason;
+  appServerSpawnHook.lastRestartChangedPath = changedPath || null;
+  appServerReadOnlyCache.clear();
+  const closedRelays = wsHub && typeof wsHub.closeAllAppHostRelays === "function"
+    ? wsHub.closeAllAppHostRelays("official_runtime_refresh")
+    : 0;
+  const terminatedPids = terminateTrackedAppServerChildren(reason);
+  const hiddenReloaded = reloadHiddenOfficialRuntime(reason);
+  appServerSpawnHook.lastRestartClosedRelays = closedRelays;
+  appServerSpawnHook.lastRestartTerminatedPids = terminatedPids;
+  diagnosticLog("official-runtime", "hidden_runtime_refresh_requested", {
+    changedPath,
+    closedRelays,
+    hiddenReloaded,
+    reason,
+    terminatedPids,
+  });
+  if (wsHub && typeof wsHub.broadcast === "function") {
+    wsHub.broadcast(
+      {
+        type: "opencodex:official-runtime-refresh",
+        changedPath,
+        closedRelays,
+        hiddenReloaded,
+        reason,
+        terminatedPids,
+      },
+      { suppressDiagnostic: true }
+    );
+  }
+}
+
+function codexRuntimeWatchPathFromFilename(filename) {
+  if (filename == null) return "";
+  const name = Buffer.isBuffer(filename) ? filename.toString("utf8") : String(filename);
+  const basename = path.basename(name);
+  if (!CODEX_RUNTIME_WATCH_FILENAMES.has(basename)) return "";
+  return path.join(CODEX_HOME, basename);
+}
+
+function scheduleHiddenOfficialRuntimeRefresh(reason, changedPath) {
+  if (codexRuntimeRefreshTimer) clearTimeout(codexRuntimeRefreshTimer);
+  codexRuntimeRefreshTimer = setTimeout(() => {
+    codexRuntimeRefreshTimer = null;
+    refreshHiddenOfficialRuntime(reason, changedPath);
+  }, CODEX_RUNTIME_REFRESH_DEBOUNCE_MS);
+  if (codexRuntimeRefreshTimer && typeof codexRuntimeRefreshTimer.unref === "function") codexRuntimeRefreshTimer.unref();
+}
+
+function installCodexRuntimeWatcher() {
+  if (process.env.OPENCODEX_DISABLE_CODEX_RUNTIME_WATCHER === "1") return;
+  if (codexRuntimeWatcher) return;
+  try {
+    ensureDir(CODEX_HOME);
+    codexRuntimeWatcher = fs.watch(CODEX_HOME, { persistent: false }, (eventType, filename) => {
+      const changedPath = codexRuntimeWatchPathFromFilename(filename);
+      if (!changedPath) return;
+      // ccswitch/登录状态会改 .codex 配置；隐藏官方 runtime 需要轻量重载才能读到新值。
+      scheduleHiddenOfficialRuntimeRefresh(`codex_${eventType || "change"}`, changedPath);
+    });
+    codexRuntimeWatcher.on("error", (error) => {
+      appServerSpawnHook.watcherInstalled = false;
+      appServerSpawnHook.lastError = error instanceof Error ? error.message : String(error);
+      diagnosticWarn("official-runtime", "codex_runtime_watcher_error", { error: appServerSpawnHook.lastError });
+    });
+    appServerSpawnHook.watcherInstalled = true;
+    appServerSpawnHook.watchedPaths = Array.from(CODEX_RUNTIME_WATCH_FILENAMES).map((name) => path.join(CODEX_HOME, name));
+    diagnosticLog("official-runtime", "codex_runtime_watcher_ready", {
+      paths: appServerSpawnHook.watchedPaths,
+    });
+  } catch (error) {
+    appServerSpawnHook.watcherInstalled = false;
+    appServerSpawnHook.lastError = error instanceof Error ? error.message : String(error);
+    diagnosticWarn("official-runtime", "codex_runtime_watcher_failed", { error: appServerSpawnHook.lastError });
+  }
 }
 
 function setWsHub(nextWsHub) {
@@ -2320,6 +2520,7 @@ function startOfficialRuntime() {
 
   // 官方 bootstrap 负责注册 IPC handler、创建隐藏 BrowserWindow 和启动自己的 app-server 连接。
   require(officialBundle.bootstrapPath);
+  installCodexRuntimeWatcher();
 }
 
 function rejectPendingInternalResponses(error) {

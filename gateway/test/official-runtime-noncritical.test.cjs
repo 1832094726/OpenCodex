@@ -19,3 +19,19 @@ test("account usage fetch is not treated as non-critical", () => {
   // /wham/usage 驱动头像菜单里的剩余用量，不能像遥测接口一样返回空对象。
   assert.doesNotMatch(body, /pathname\s*===\s*["']\/wham\/usage["']/);
 });
+
+test("codex runtime watcher refreshes hidden official app-server on config changes", () => {
+  const watcherBody = officialRuntimeFunctionSource("installCodexRuntimeWatcher", "setWsHub");
+  // ccswitch 会更新这两个文件；OpenCodex 需要在不刷新前台页面的情况下重启隐藏官方 runtime。
+  assert.match(source, /CODEX_RUNTIME_WATCH_FILENAMES\s*=\s*new Set\(\["config\.toml", "auth\.json"\]\)/);
+  assert.match(watcherBody, /fs\.watch\(CODEX_HOME/);
+  assert.match(watcherBody, /scheduleHiddenOfficialRuntimeRefresh/);
+});
+
+test("hidden official runtime refresh closes app-host relays and reloads hidden webContents", () => {
+  const refreshBody = officialRuntimeFunctionSource("refreshHiddenOfficialRuntime", "codexRuntimeWatchPathFromFilename");
+  assert.match(refreshBody, /closeAllAppHostRelays\("official_runtime_refresh"\)/);
+  assert.match(refreshBody, /terminateTrackedAppServerChildren\(reason\)/);
+  assert.match(refreshBody, /reloadHiddenOfficialRuntime\(reason\)/);
+  assert.match(source, /webContents\.reloadIgnoringCache\(\)/);
+});
