@@ -25,11 +25,12 @@ test("codex runtime watcher refreshes hidden official app-server on config chang
   // ccswitch 会更新这两个文件；OpenCodex 需要在不刷新前台页面的情况下重启隐藏官方 runtime。
   assert.match(source, /CODEX_RUNTIME_WATCH_FILENAMES\s*=\s*new Set\(\["config\.toml", "auth\.json"\]\)/);
   assert.match(source, /CC_SWITCH_SETTINGS_PATH\s*=\s*path\.join\(os\.homedir\(\), "\.cc-switch", "settings\.json"\)/);
-  assert.match(source, /CODEX_HISTORY_WATCH_DIRS\s*=\s*\["sessions", "archived_sessions"\]/);
   assert.match(source, /fs\.watch\(targetPath/);
   assert.match(source, /scheduleHiddenOfficialRuntimeRefresh/);
-  assert.match(watcherBody, /installCodexHistoryWatcher/);
   assert.match(watcherBody, /ccSwitchSettingsWatchPathFromFilename/);
+  // 会话 JSONL 是高频写入文件，不能作为 app-server 重启触发源，否则前台会看到 SIGTERM 伪 fatal。
+  assert.doesNotMatch(source, /CODEX_HISTORY_WATCH_DIRS/);
+  assert.doesNotMatch(watcherBody, /installCodexHistoryWatcher/);
 });
 
 test("hidden official runtime refresh closes app-host relays and reloads hidden webContents", () => {
