@@ -65,6 +65,17 @@ function gatewayUrl(req) {
   return new URL(req.url, `http://${req.headers.host || "localhost"}`);
 }
 
+function isMobileHtmlRequest(req, pathname, url) {
+  if (!req || req.method !== "GET") return false;
+  if (pathname !== "/" && pathname !== "") return false;
+  if (url && url.searchParams.get("full") === "1") return false;
+  const accept = String(req.headers.accept || "");
+  if (accept && !accept.includes("text/html") && !accept.includes("*/*")) return false;
+  const userAgent = String(req.headers["user-agent"] || "");
+  // 手机裸域名访问默认进入轻量页，避免完整官方 renderer 在弱网下拉取插件、shared-object 和 app-server 状态。
+  return /Android|iPhone|iPad|iPod|Mobile|Windows Phone|Mobi/i.test(userAgent);
+}
+
 function remoteAddressFromRequest(req) {
   return String(req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "");
 }
@@ -313,6 +324,10 @@ function createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets
 
     if ((pathname === "/m" || pathname.startsWith("/m/thread/")) && req.method === "GET") {
       // 手机轻量入口必须早于通用 SPA fallback，否则会加载完整官方 renderer 和大量桌面状态。
+      return staticAssets.serveMobileShell(req, res);
+    }
+
+    if (isMobileHtmlRequest(req, pathname, url)) {
       return staticAssets.serveMobileShell(req, res);
     }
 
