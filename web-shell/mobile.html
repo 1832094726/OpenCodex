@@ -12,10 +12,13 @@
     <main class="mobile-shell">
       <header class="topbar">
         <div>
-          <h1>OpenCodex</h1>
+          <h1 id="mobile-title">OpenCodex</h1>
           <p id="mobile-status">正在读取会话快照</p>
         </div>
-        <a class="full-mode" href="/">完整模式</a>
+        <nav class="actions" aria-label="移动端操作">
+          <a id="mobile-back" class="ghost-action" href="/m" hidden>返回</a>
+          <a class="full-mode" href="/">完整模式</a>
+        </nav>
       </header>
       <section class="summary" aria-label="移动端状态">
         <div>
@@ -32,8 +35,9 @@
         </div>
       </section>
       <section>
-        <h2>最近会话</h2>
+        <h2 id="mobile-section-title">最近会话</h2>
         <div id="mobile-thread-list" class="thread-list" aria-live="polite"></div>
+        <div id="mobile-message-list" class="message-list" aria-live="polite" hidden></div>
       </section>
     </main>
     <script src="/mobile.js"></script>

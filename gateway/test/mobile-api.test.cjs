@@ -6,6 +6,8 @@ const test = require("node:test");
 
 const {
   createMobileBootstrapPayload,
+  createMobileThreadPayload,
+  listLocalSessionThreadDetail,
   listLocalSessionThreads,
   normalizeMobileThreads,
 } = require("../runtime/http/mobile.cjs");
@@ -176,6 +178,85 @@ test("createMobileBootstrapPayload falls back to local history when thread snaps
   assert.equal(payload.threads.length, 1);
 });
 
+test("listLocalSessionThreadDetail returns only visible user and assistant messages", () => {
+  const root = tempDir();
+  const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const file = path.join(sessionsDir, "rollout-2026-06-30T08-00-00-thread-detail-1.jsonl");
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:00.000Z",
+        type: "session_meta",
+        payload: {
+          cwd: "/repo/mobile",
+          session_id: "thread-detail-1",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:01.000Z",
+        type: "response_item",
+        payload: {
+          content: [{ text: "<environment_context>\n  <cwd>/repo/mobile</cwd>", type: "input_text" }],
+          role: "user",
+          type: "message",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:02.000Z",
+        type: "event_msg",
+        payload: {
+          message: "页面还是尽量保持官方的样子",
+          type: "user_message",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:03.000Z",
+        type: "response_item",
+        payload: {
+          content: [{ text: "我会保持官方浅色列表，并只同步当前会话。", type: "output_text" }],
+          role: "assistant",
+          type: "message",
+        },
+      }),
+    ].join("\n"),
+    "utf8"
+  );
+
+  const detail = listLocalSessionThreadDetail({ codexHome: root, threadId: "thread-detail-1" });
+
+  assert.equal(detail.ok, true);
+  assert.deepEqual(detail.thread, {
+    archived: false,
+    id: "thread-detail-1",
+    projectPath: "/repo/mobile",
+    title: "页面还是尽量保持官方的样子",
+    updatedAt: "2026-06-30T08:00:00.000Z",
+  });
+  assert.deepEqual(detail.messages, [
+    {
+      role: "user",
+      text: "页面还是尽量保持官方的样子",
+      timestamp: "2026-06-30T08:00:02.000Z",
+    },
+    {
+      role: "assistant",
+      text: "我会保持官方浅色列表，并只同步当前会话。",
+      timestamp: "2026-06-30T08:00:03.000Z",
+    },
+  ]);
+});
+
+test("createMobileThreadPayload reports not found without falling back to desktop state", async () => {
+  const payload = await createMobileThreadPayload({
+    readLocalThreadDetail: () => ({ ok: false }),
+    threadId: "missing-thread",
+  });
+
+  assert.deepEqual(payload, { ok: false, error: "Thread not found" });
+});
+
 test("request handler serves the mobile-lite shell at /m before the full app shell fallback", async () => {
   const { createRequestHandler } = require("../runtime/server.cjs");
   const staticAssets = createStaticAssetService({
@@ -198,5 +279,29 @@ test("request handler serves the mobile-lite shell at /m before the full app she
 
   assert.equal(response.statusCode, 200);
   assert.match(response.headers["content-type"], /text\/html/);
+  assert.match(response.body, /data-opencodex-mobile-lite/);
+});
+
+test("request handler serves the mobile-lite shell for thread deep links", async () => {
+  const { createRequestHandler } = require("../runtime/server.cjs");
+  const staticAssets = createStaticAssetService({
+    getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+    getOfficialBundle: () => null,
+  });
+  const handler = createRequestHandler({
+    localFiles: {},
+    mobileApi: { handleBootstrap: () => assert.fail("mobile bootstrap should not handle shell HTML") },
+    pickedFiles: {},
+    staticAssets,
+  });
+
+  const response = await collectResponse(handler, {
+    headers: { accept: "text/html", host: "127.0.0.1:8080" },
+    method: "GET",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/m/thread/thread-detail-1",
+  });
+
+  assert.equal(response.statusCode, 200);
   assert.match(response.body, /data-opencodex-mobile-lite/);
 });

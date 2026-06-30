@@ -311,7 +311,7 @@ function createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets
       if (file && exists(file)) return staticAssets.serveFile(req, res, file, 200, pathname);
     }
 
-    if (pathname === "/m" && req.method === "GET") {
+    if ((pathname === "/m" || pathname.startsWith("/m/thread/")) && req.method === "GET") {
       // 手机轻量入口必须早于通用 SPA fallback，否则会加载完整官方 renderer 和大量桌面状态。
       return staticAssets.serveMobileShell(res);
     }
@@ -352,6 +352,12 @@ function createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets
     if (pathname === "/api/mobile/bootstrap" && req.method === "GET") {
       // 手机首屏只读裁剪后的快照；完整插件、MCP 和桌面状态留给完整模式按需加载。
       return mobileApi.handleBootstrap(req, res, url);
+    }
+
+    if (pathname.startsWith("/api/mobile/thread/") && req.method === "GET") {
+      const threadId = decodeURIComponent(pathname.slice("/api/mobile/thread/".length));
+      // 只读取当前会话的轻量消息列表，为后续按会话增量订阅留出边界。
+      return mobileApi.handleThread(req, res, url, threadId);
     }
 
     if (pathname === "/api/diagnostics/flow" && req.method === "GET") {

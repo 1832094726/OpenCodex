@@ -1,8 +1,12 @@
 (function () {
   const statusEl = document.getElementById("mobile-status");
+  const titleEl = document.getElementById("mobile-title");
+  const sectionTitleEl = document.getElementById("mobile-section-title");
+  const backEl = document.getElementById("mobile-back");
   const sourceEl = document.getElementById("mobile-source");
   const countEl = document.getElementById("mobile-count");
   const listEl = document.getElementById("mobile-thread-list");
+  const messageListEl = document.getElementById("mobile-message-list");
 
   function setText(node, value) {
     if (node) node.textContent = String(value == null ? "" : value);
@@ -17,11 +21,13 @@
 
   function threadHref(thread) {
     const id = encodeURIComponent(thread.id);
-    return `/local/${id}`;
+    return `/m/thread/${id}`;
   }
 
   function renderThreads(threads) {
     listEl.innerHTML = "";
+    listEl.hidden = false;
+    messageListEl.hidden = true;
     if (!threads.length) {
       const empty = document.createElement("div");
       empty.className = "empty";
@@ -47,6 +53,34 @@
     }
   }
 
+  function renderMessages(messages) {
+    messageListEl.innerHTML = "";
+    listEl.hidden = true;
+    messageListEl.hidden = false;
+    if (!messages.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "当前会话没有可展示的轻量消息";
+      messageListEl.append(empty);
+      return;
+    }
+    for (const message of messages) {
+      const item = document.createElement("article");
+      item.className = `message ${message.role === "user" ? "user" : "assistant"}`;
+
+      const role = document.createElement("span");
+      role.className = "message-role";
+      role.textContent = message.role === "user" ? "你" : "Codex";
+
+      const text = document.createElement("p");
+      text.className = "message-text";
+      text.textContent = message.text || "";
+
+      item.append(role, text);
+      messageListEl.append(item);
+    }
+  }
+
   async function loadBootstrap() {
     // 手机入口只请求合并后的轻量状态，不加载官方 bridge，避免弱网下被插件/MCP/桌面状态拖慢。
     const response = await fetch("/api/mobile/bootstrap", {
@@ -68,9 +102,48 @@
     renderThreads(threads);
   }
 
-  loadBootstrap().catch((error) => {
-    setText(statusEl, `读取失败：${error && error.message ? error.message : String(error)}`);
-    if (statusEl) statusEl.classList.add("error");
-    renderThreads([]);
-  });
+  async function loadThread(threadId) {
+    // 详情页只读取当前会话的轻量消息，实时增量会在这个边界上继续扩展。
+    const response = await fetch(`/api/mobile/thread/${encodeURIComponent(threadId)}`, {
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: { accept: "application/json" },
+    });
+    if (response.status === 401) {
+      location.href = "/";
+      return;
+    }
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const messages = Array.isArray(payload.messages) ? payload.messages : [];
+    const thread = payload.thread || {};
+    document.title = thread.title ? `${thread.title} - OpenCodex Mobile` : "OpenCodex Mobile";
+    setText(titleEl, thread.title || "OpenCodex");
+    setText(sectionTitleEl, "当前会话");
+    setText(statusEl, "已加载当前会话轻量消息");
+    setText(sourceEl, payload.source || "-");
+    setText(countEl, messages.length);
+    if (backEl) backEl.hidden = false;
+    renderMessages(messages);
+  }
+
+  function currentThreadId() {
+    const prefix = "/m/thread/";
+    return location.pathname.startsWith(prefix) ? decodeURIComponent(location.pathname.slice(prefix.length)) : "";
+  }
+
+  const threadId = currentThreadId();
+  if (threadId) {
+    loadThread(threadId).catch((error) => {
+      setText(statusEl, `读取失败：${error && error.message ? error.message : String(error)}`);
+      if (statusEl) statusEl.classList.add("error");
+      renderMessages([]);
+    });
+  } else {
+    loadBootstrap().catch((error) => {
+      setText(statusEl, `读取失败：${error && error.message ? error.message : String(error)}`);
+      if (statusEl) statusEl.classList.add("error");
+      renderThreads([]);
+    });
+  }
 })();

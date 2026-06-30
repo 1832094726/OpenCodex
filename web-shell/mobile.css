@@ -38,7 +38,8 @@ body {
 .topbar,
 .summary,
 .thread-list,
-.thread-card {
+.thread-card,
+.message-list {
   border: 1px solid var(--line);
   background: var(--panel);
   border-radius: 12px;
@@ -80,7 +81,14 @@ p,
   line-height: 1.45;
 }
 
-.full-mode {
+.actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.full-mode,
+.ghost-action {
   flex: 0 0 auto;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -92,7 +100,9 @@ p,
 }
 
 .full-mode:active,
-.full-mode:hover {
+.full-mode:hover,
+.ghost-action:active,
+.ghost-action:hover {
   background: var(--hover);
 }
 
@@ -128,6 +138,12 @@ strong {
 
 .thread-list {
   display: grid;
+}
+
+.message-list {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
 }
 
 .thread-card {
@@ -171,4 +187,38 @@ strong {
 
 .error {
   color: var(--error);
+}
+
+.message {
+  display: grid;
+  gap: 6px;
+  max-width: 92%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.message.user {
+  justify-self: end;
+  background: #f7f7f8;
+}
+
+.message.assistant {
+  justify-self: start;
+}
+
+.message-role {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.message-text {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

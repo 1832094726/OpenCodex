@@ -106,6 +106,18 @@ function titleFromRecord(record) {
   return "";
 }
 
+function textFromContentParts(content) {
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (!part || typeof part !== "object") return "";
+      return firstString(part.text, part.content, part.value);
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
 function isUsefulThreadTitle(title) {
   const text = firstString(title);
   if (!text) return false;
@@ -149,7 +161,7 @@ function sessionThreadFromFile(filePath, archived) {
         // session_meta 通常在首行，读取它即可得到会话 ID、工作目录和创建时间，不需要解析整段历史。
         thread.id = firstString(record.payload.session_id, record.payload.id, thread.id) || thread.id;
         thread.projectPath = firstString(record.payload.cwd, record.payload.workspace, thread.projectPath);
-        thread.updatedAt = firstValue(record.payload.timestamp, thread.updatedAt);
+        thread.updatedAt = firstValue(record.payload.timestamp, record.timestamp, thread.updatedAt);
       }
       if (!thread.title) {
         const title = titleFromRecord(record);
@@ -160,6 +172,66 @@ function sessionThreadFromFile(filePath, archived) {
   } catch {}
   thread.title = thread.title || "Untitled";
   return thread;
+}
+
+function parseSessionFile(filePath, archived, options = {}) {
+  let stat = null;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    return null;
+  }
+  const limit = Math.max(1, Math.min(Number(options.limit) || 120, 500));
+  const thread = {
+    archived,
+    id: path.basename(filePath, ".jsonl"),
+    projectPath: "",
+    title: "",
+    updatedAt: stat.mtime.toISOString(),
+  };
+  const messages = [];
+  try {
+    const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/).filter(Boolean);
+    for (const line of lines) {
+      let record = null;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const timestamp = firstValue(record.timestamp, record.payload && record.payload.timestamp, thread.updatedAt);
+      if (record && record.type === "session_meta" && record.payload && typeof record.payload === "object") {
+        // 详情页同样只抽元信息，不透传 session_meta 里的完整上下文和内部配置。
+        thread.id = firstString(record.payload.session_id, record.payload.id, thread.id) || thread.id;
+        thread.projectPath = firstString(record.payload.cwd, record.payload.workspace, thread.projectPath);
+        thread.updatedAt = firstValue(record.payload.timestamp, record.timestamp, thread.updatedAt);
+        continue;
+      }
+      let role = "";
+      let text = "";
+      if (record.type === "event_msg" && record.payload && record.payload.type === "user_message") {
+        role = "user";
+        text = firstString(record.payload.message, record.payload.text);
+      } else if (
+        record.type === "response_item" &&
+        record.payload &&
+        record.payload.type === "message" &&
+        (record.payload.role === "user" || record.payload.role === "assistant")
+      ) {
+        role = record.payload.role;
+        text = textFromContentParts(record.payload.content);
+      }
+      if (!role || !text) continue;
+      if (role === "user" && !isUsefulThreadTitle(text)) continue;
+      if (!thread.title && role === "user") thread.title = text.slice(0, 80);
+      messages.push({ role, text, timestamp });
+      if (messages.length >= limit) break;
+    }
+  } catch {
+    return null;
+  }
+  thread.title = thread.title || "Untitled";
+  return { messages, ok: true, thread };
 }
 
 function listLocalSessionThreads(options = {}) {
@@ -192,6 +264,35 @@ function listLocalSessionThreads(options = {}) {
   return threads;
 }
 
+function findLocalSessionFile(options = {}) {
+  const codexHome = options.codexHome || CODEX_HOME;
+  const threadId = firstString(options.threadId);
+  if (!threadId) return null;
+  const roots = [
+    { archived: false, dir: path.join(codexHome, "sessions") },
+    { archived: true, dir: path.join(codexHome, "archived_sessions") },
+  ];
+  for (const root of roots) {
+    for (const filePath of walkJsonlFiles(root.dir)) {
+      if (path.basename(filePath, ".jsonl").endsWith(threadId)) return { archived: root.archived, filePath };
+      try {
+        const firstLine = fs.readFileSync(filePath, "utf8").split(/\r?\n/, 1)[0] || "";
+        const record = JSON.parse(firstLine);
+        const payload = record && record.payload && typeof record.payload === "object" ? record.payload : {};
+        if (firstString(payload.session_id, payload.id) === threadId) return { archived: root.archived, filePath };
+      } catch {}
+    }
+  }
+  return null;
+}
+
+function listLocalSessionThreadDetail(options = {}) {
+  const match = findLocalSessionFile(options);
+  if (!match) return { ok: false };
+  const parsed = parseSessionFile(match.filePath, match.archived, options);
+  return parsed || { ok: false };
+}
+
 function createMobileBootstrapPayload(options = {}) {
   const now = typeof options.now === "function" ? options.now : Date.now;
   const snapshot = typeof options.readThreadListSnapshot === "function" ? options.readThreadListSnapshot() : null;
@@ -211,6 +312,18 @@ function createMobileBootstrapPayload(options = {}) {
   });
 }
 
+function createMobileThreadPayload(options = {}) {
+  const detail = typeof options.readLocalThreadDetail === "function" ? options.readLocalThreadDetail() : null;
+  if (!detail || detail.ok !== true) return Promise.resolve({ ok: false, error: "Thread not found" });
+  return Promise.resolve({
+    messages: Array.isArray(detail.messages) ? detail.messages : [],
+    mode: "mobile-lite",
+    ok: true,
+    source: detail.source || "local-history",
+    thread: detail.thread,
+  });
+}
+
 function createMobileApi({ fastSyncCache }) {
   function readThreadListSnapshot() {
     const key = cacheKeyForSnapshot(MOBILE_THREAD_LIST_METHOD, MOBILE_THREAD_LIST_ARGS);
@@ -227,7 +340,17 @@ function createMobileApi({ fastSyncCache }) {
     return sendJson(res, 200, payload, { "cache-control": "no-store" });
   }
 
-  return { handleBootstrap };
+  async function handleThread(_req, res, url, threadId) {
+    const limit = Number(url.searchParams.get("limit") || 120);
+    const payload = await createMobileThreadPayload({
+      readLocalThreadDetail: () => listLocalSessionThreadDetail({ limit, threadId }),
+      threadId,
+    });
+    if (!payload.ok) return sendJson(res, 404, payload, { "cache-control": "no-store" });
+    return sendJson(res, 200, payload, { "cache-control": "no-store" });
+  }
+
+  return { handleBootstrap, handleThread };
 }
 
 module.exports = {
@@ -236,6 +359,8 @@ module.exports = {
   MOBILE_THREAD_LIST_METHOD,
   createMobileApi,
   createMobileBootstrapPayload,
+  createMobileThreadPayload,
+  listLocalSessionThreadDetail,
   listLocalSessionThreads,
   normalizeMobileThreads,
 };
