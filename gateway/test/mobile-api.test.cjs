@@ -263,6 +263,7 @@ test("listLocalSessionThreads reuses a short cache for repeated mobile opens", (
     ].join("\n"),
     "utf8"
   );
+  fs.utimesSync(firstFile, new Date("2026-06-30T08:00:00.000Z"), new Date("2026-06-30T08:00:00.000Z"));
 
   const first = listLocalSessionThreads({ cacheTtlMs: 1_000, codexHome: root, limit: 5, now: () => 10_000 });
   const secondFile = path.join(sessionsDir, "rollout-2026-06-30T08-01-00-thread-cache-2.jsonl");

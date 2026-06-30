@@ -15,6 +15,9 @@
   const MOBILE_CACHE_TTL_MS = 60_000;
   const MOBILE_READ_TIMEOUT_MS = 8_000;
   const MOBILE_SEND_TIMEOUT_MS = 30_000;
+  const MOBILE_BOOTSTRAP_LIMIT_DEFAULT = 50;
+  const MOBILE_BOOTSTRAP_LIMIT_CONSTRAINED = 12;
+  const MOBILE_BOOTSTRAP_LIMIT_CELLULAR = 24;
   let threadEvents = null;
   let activeThreadId = "";
 
@@ -48,6 +51,20 @@
 
   function mobileCacheKey(kind, id) {
     return `${MOBILE_CACHE_PREFIX}${kind}:${id || "default"}`;
+  }
+
+  function bootstrapThreadLimit() {
+    const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if (!connection) return MOBILE_BOOTSTRAP_LIMIT_DEFAULT;
+    const effectiveType = String(connection.effectiveType || "").toLowerCase();
+    // 省流量或极慢网络下只拉最近少量会话；当前会话详情和 SSE 增量仍按需单独加载。
+    if (connection.saveData || effectiveType === "slow-2g" || effectiveType === "2g") return MOBILE_BOOTSTRAP_LIMIT_CONSTRAINED;
+    if (effectiveType === "3g") return MOBILE_BOOTSTRAP_LIMIT_CELLULAR;
+    return MOBILE_BOOTSTRAP_LIMIT_DEFAULT;
+  }
+
+  function mobileBootstrapUrl() {
+    return `/api/mobile/bootstrap?limit=${encodeURIComponent(String(bootstrapThreadLimit()))}`;
   }
 
   function readMobileCache(kind, id) {
@@ -264,7 +281,7 @@
     }
     // 手机入口只请求合并后的轻量状态，不加载官方 bridge，避免弱网下被插件/MCP/桌面状态拖慢。
     try {
-      const payload = await fetchJsonWithTimeout("/api/mobile/bootstrap", {
+      const payload = await fetchJsonWithTimeout(mobileBootstrapUrl(), {
         cache: "no-store",
         credentials: "same-origin",
         headers: { accept: "application/json" },

@@ -51,7 +51,21 @@ test("mobile lite fetches use timeouts so weak networks do not hang forever", ()
   assert.match(source, /AbortController/);
   assert.match(source, /controller\.abort\(\)/);
   assert.match(source, /请求超时/);
-  assert.match(source, /fetchJsonWithTimeout\("\/api\/mobile\/bootstrap"/);
+  assert.match(source, /fetchJsonWithTimeout\(mobileBootstrapUrl\(\)/);
   assert.match(source, /fetchJsonWithTimeout\(`\/api\/mobile\/thread\/\$\{encodeURIComponent\(threadId\)\}`/);
   assert.match(source, /fetchJsonWithTimeout\(`\/api\/mobile\/thread\/\$\{encodeURIComponent\(activeThreadId\)\}\/turns`/);
+});
+
+test("mobile lite adapts bootstrap list size to constrained phone networks", () => {
+  const source = readMobileSource();
+
+  assert.match(source, /MOBILE_BOOTSTRAP_LIMIT_DEFAULT = 50/);
+  assert.match(source, /MOBILE_BOOTSTRAP_LIMIT_CONSTRAINED = 12/);
+  assert.match(source, /MOBILE_BOOTSTRAP_LIMIT_CELLULAR = 24/);
+  assert.match(source, /navigator\.connection \|\| navigator\.mozConnection \|\| navigator\.webkitConnection/);
+  assert.match(source, /connection\.saveData/);
+  assert.match(source, /slow-2g/);
+  assert.match(source, /effectiveType === "3g"/);
+  assert.match(source, /\/api\/mobile\/bootstrap\?limit=/);
+  assert.match(source, /fetchJsonWithTimeout\(mobileBootstrapUrl\(\)/);
 });
