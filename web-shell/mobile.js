@@ -13,6 +13,7 @@
   const composeSendEl = document.getElementById("mobile-compose-send");
   const MOBILE_CACHE_PREFIX = "opencodex.mobile-lite.";
   const MOBILE_CACHE_TTL_MS = 60_000;
+  const MOBILE_PERSISTENT_CACHE_TTL_MS = 5 * 60_000;
   const MOBILE_READ_TIMEOUT_MS = 8_000;
   const MOBILE_SEND_TIMEOUT_MS = 30_000;
   const MOBILE_BOOTSTRAP_LIMIT_DEFAULT = 50;
@@ -56,6 +57,38 @@
     return `${MOBILE_CACHE_PREFIX}${kind}:${id || "default"}`;
   }
 
+  function readMobileCacheFrom(storage, kind, id, ttlMs) {
+    if (!storage) return null;
+    const key = mobileCacheKey(kind, id);
+    try {
+      const raw = storage.getItem(key);
+      if (!raw) return null;
+      const cached = JSON.parse(raw);
+      if (!cached || cached.version !== 1 || !cached.payload || Date.now() - Number(cached.savedAtMs || 0) > ttlMs) {
+        storage.removeItem(key);
+        return null;
+      }
+      return cached.payload;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeMobileCacheTo(storage, kind, id, payload) {
+    if (!storage || !payload || payload.ok !== true) return;
+    try {
+      // 两层缓存都只保存裁剪后的 mobile-lite DTO；完整官方状态、插件状态和 MCP 状态不落入浏览器存储。
+      storage.setItem(
+        mobileCacheKey(kind, id),
+        JSON.stringify({
+          payload,
+          savedAtMs: Date.now(),
+          version: 1,
+        })
+      );
+    } catch {}
+  }
+
   function mobileNetworkTier() {
     const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
     if (!connection) return "default";
@@ -89,33 +122,17 @@
   }
 
   function readMobileCache(kind, id) {
-    try {
-      const raw = sessionStorage.getItem(mobileCacheKey(kind, id));
-      if (!raw) return null;
-      const cached = JSON.parse(raw);
-      if (!cached || cached.version !== 1 || !cached.payload || Date.now() - Number(cached.savedAtMs || 0) > MOBILE_CACHE_TTL_MS) {
-        sessionStorage.removeItem(mobileCacheKey(kind, id));
-        return null;
-      }
-      return cached.payload;
-    } catch {
-      return null;
-    }
+    const cached = readMobileCacheFrom(sessionStorage, kind, id, MOBILE_CACHE_TTL_MS);
+    if (cached) return cached;
+    const persistent = readMobileCacheFrom(localStorage, kind, id, MOBILE_PERSISTENT_CACHE_TTL_MS);
+    if (persistent) writeMobileCacheTo(sessionStorage, kind, id, persistent);
+    return persistent;
   }
 
   function writeMobileCache(kind, id, payload) {
     if (!payload || payload.ok !== true) return;
-    try {
-      // 只缓存 mobile-lite API 已裁剪 DTO，不缓存完整官方 renderer 状态。
-      sessionStorage.setItem(
-        mobileCacheKey(kind, id),
-        JSON.stringify({
-          payload,
-          savedAtMs: Date.now(),
-          version: 1,
-        })
-      );
-    } catch {}
+    writeMobileCacheTo(sessionStorage, kind, id, payload);
+    writeMobileCacheTo(localStorage, kind, id, payload);
   }
 
   async function fetchJsonWithTimeout(url, options, timeoutMs) {

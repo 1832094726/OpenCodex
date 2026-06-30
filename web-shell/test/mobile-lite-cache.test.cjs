@@ -16,8 +16,10 @@ test("mobile lite renders sessionStorage snapshots before network refresh", () =
   for (const expected of [
     "MOBILE_CACHE_PREFIX",
     "MOBILE_CACHE_TTL_MS",
-    "sessionStorage.getItem",
-    "sessionStorage.setItem",
+    "MOBILE_PERSISTENT_CACHE_TTL_MS",
+    "readMobileCacheFrom(sessionStorage",
+    "writeMobileCacheTo(sessionStorage",
+    "localStorage",
     "renderBootstrapPayload(cached",
     "renderThreadPayload(threadId, cached",
     "已加载本地快照，正在刷新",
@@ -30,9 +32,19 @@ test("mobile lite renders sessionStorage snapshots before network refresh", () =
 test("mobile lite cache stays scoped to trimmed mobile payloads", () => {
   const source = readMobileSource();
 
-  assert.match(source, /只缓存 mobile-lite API 已裁剪 DTO/);
+  assert.match(source, /两层缓存都只保存裁剪后的 mobile-lite DTO/);
   assert.match(source, /payload\.ok !== true/);
   assert.doesNotMatch(source, /plugin\/list|mcpServerStatus\/list|desktop-state/);
+});
+
+test("mobile lite keeps a short persistent cache for reloads under weak networks", () => {
+  const source = readMobileSource();
+
+  assert.match(source, /MOBILE_PERSISTENT_CACHE_TTL_MS = 5 \* 60_000/);
+  assert.match(source, /readMobileCacheFrom\(sessionStorage, kind, id, MOBILE_CACHE_TTL_MS\)/);
+  assert.match(source, /readMobileCacheFrom\(localStorage, kind, id, MOBILE_PERSISTENT_CACHE_TTL_MS\)/);
+  assert.match(source, /writeMobileCacheTo\(sessionStorage, kind, id, persistent\)/);
+  assert.match(source, /writeMobileCacheTo\(localStorage, kind, id, payload\)/);
 });
 
 test("mobile lite connects realtime events from the detail snapshot offset", () => {
