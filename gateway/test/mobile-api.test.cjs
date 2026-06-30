@@ -527,6 +527,71 @@ test("mobile bootstrap handler returns 304 when visible state etag matches", asy
   assert.equal(second.body, "");
 });
 
+test("mobile thread handler limits cold deep-link lookup to recent candidates", async () => {
+  const root = tempDir();
+  const olderDir = path.join(root, "sessions", "2026", "06", "29");
+  const recentDir = path.join(root, "sessions", "2026", "06", "30");
+  fs.mkdirSync(olderDir, { recursive: true });
+  fs.mkdirSync(recentDir, { recursive: true });
+  const recentFile = path.join(recentDir, "rollout-2026-06-30T08-00-00-thread-handler-recent.jsonl");
+  fs.writeFileSync(
+    recentFile,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:00.000Z",
+        type: "session_meta",
+        payload: { cwd: "/repo/recent-handler", session_id: "thread-handler-recent" },
+      }),
+      JSON.stringify({ type: "event_msg", payload: { message: "handler 最近会话", type: "user_message" } }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  const olderFile = path.join(olderDir, "rollout-2026-06-29T08-00-00-thread-handler-old.jsonl");
+  fs.writeFileSync(
+    olderFile,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-29T08:00:00.000Z",
+        type: "session_meta",
+        payload: { cwd: "/repo/old-handler", session_id: "thread-handler-old" },
+      }),
+      JSON.stringify({ type: "event_msg", payload: { message: "handler 不扫老会话", type: "user_message" } }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  const api = createMobileApi({
+    codexHome: root,
+    fastSyncCache: { readSnapshot: () => null },
+    mobileRecentFileLimit: 1,
+    invokeTurnStart: async () => ({ ok: true }),
+  });
+
+  const recent = await collectResponse(
+    (req, res) => api.handleThread(req, res, new URL("http://127.0.0.1/api/mobile/thread/thread-handler-recent"), "thread-handler-recent"),
+    { headers: {}, method: "GET" }
+  );
+  assert.equal(recent.statusCode, 200);
+  assert.equal(JSON.parse(recent.body).thread.id, "thread-handler-recent");
+
+  const originalOpenSync = fs.openSync;
+  fs.openSync = function patchedOpenSync(target, ...args) {
+    if (path.resolve(String(target)) === olderFile) throw new Error("mobile handler must not scan old deep-link candidates");
+    return originalOpenSync.call(this, target, ...args);
+  };
+  try {
+    const old = await collectResponse(
+      (req, res) => api.handleThread(req, res, new URL("http://127.0.0.1/api/mobile/thread/thread-handler-old"), "thread-handler-old"),
+      { headers: {}, method: "GET" }
+    );
+
+    assert.equal(old.statusCode, 404);
+  } finally {
+    fs.openSync = originalOpenSync;
+  }
+});
+
 test("listLocalSessionThreadDetail returns only visible user and assistant messages", () => {
   const root = tempDir();
   const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
@@ -685,6 +750,60 @@ test("listLocalSessionThreadDetail keeps a full-scan fallback for older deep lin
   assert.equal(detail.ok, true);
   assert.equal(detail.thread.id, "thread-old-deeplink");
   assert.equal(detail.metrics.lookupSource, "scan");
+});
+
+test("listLocalSessionThreadDetail can skip full scans for mobile traffic", () => {
+  const root = tempDir();
+  const olderDir = path.join(root, "sessions", "2026", "06", "29");
+  const recentDir = path.join(root, "sessions", "2026", "06", "30");
+  fs.mkdirSync(olderDir, { recursive: true });
+  fs.mkdirSync(recentDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(recentDir, "rollout-2026-06-30T08-00-00-thread-fast-recent.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:00.000Z",
+        type: "session_meta",
+        payload: { cwd: "/repo/recent", session_id: "thread-fast-recent" },
+      }),
+      JSON.stringify({ type: "event_msg", payload: { message: "最近候选", type: "user_message" } }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  const olderFile = path.join(olderDir, "rollout-2026-06-29T08-00-00-thread-skip-full-scan.jsonl");
+  fs.writeFileSync(
+    olderFile,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-29T08:00:00.000Z",
+        type: "session_meta",
+        payload: { cwd: "/repo/old", session_id: "thread-skip-full-scan" },
+      }),
+      JSON.stringify({ type: "event_msg", payload: { message: "手机弱网不做无界扫描", type: "user_message" } }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const originalOpenSync = fs.openSync;
+  fs.openSync = function patchedOpenSync(target, ...args) {
+    if (path.resolve(String(target)) === olderFile) throw new Error("mobile lookup must not full-scan old session files");
+    return originalOpenSync.call(this, target, ...args);
+  };
+  try {
+    const detail = listLocalSessionThreadDetail({
+      allowFullScan: false,
+      cacheTtlMs: 0,
+      codexHome: root,
+      recentFileLimit: 1,
+      threadId: "thread-skip-full-scan",
+    });
+
+    assert.equal(detail.ok, false);
+  } finally {
+    fs.openSync = originalOpenSync;
+  }
 });
 
 test("local mobile history reads avoid loading whole large session files", () => {

@@ -22,6 +22,7 @@ const MOBILE_THREAD_EVENT_CHUNK_BYTES = 64 * 1024;
 const MOBILE_THREAD_EVENT_PENDING_MAX_BYTES = 256 * 1024;
 const MOBILE_THREAD_EVENT_RETRY_MS = 5_000;
 const MOBILE_THREAD_FIND_RECENT_FILE_LIMIT = 600;
+const MOBILE_THREAD_HTTP_RECENT_FILE_LIMIT = 80;
 const MOBILE_THREAD_DETAIL_CACHE_TTL_MS = 2_000;
 const MOBILE_SESSION_META_HEAD_BYTES = 64 * 1024;
 const MOBILE_THREAD_ID_MAX_CHARS = 160;
@@ -631,6 +632,10 @@ function findLocalSessionFile(options = {}) {
       }
     }
   }
+  if (options.allowFullScan === false) {
+    // 手机 HTTP 入口不做无界历史扫描；列表页定位过的会话会命中缓存，冷门老深链则快速失败让页面保持可操作。
+    return null;
+  }
   for (const root of roots) {
     for (const filePath of walkJsonlFiles(root.dir)) {
       const item = matchLocalSessionFile(threadId, root, filePath);
@@ -905,8 +910,13 @@ function createMobileThreadPayload(options = {}) {
   return Promise.resolve(payload);
 }
 
-function createMobileApi({ fastSyncCache, invokeTurnStart }) {
+function createMobileApi({ codexHome, fastSyncCache, invokeTurnStart, mobileRecentFileLimit } = {}) {
   const turnSender = createMobileTurnSender({ invokeTurnStart });
+  const mobileLookupOptions = {
+    allowFullScan: false,
+    ...(codexHome ? { codexHome } : {}),
+    recentFileLimit: Math.max(1, Number(mobileRecentFileLimit) || MOBILE_THREAD_HTTP_RECENT_FILE_LIMIT),
+  };
 
   function readThreadListSnapshot() {
     const key = cacheKeyForSnapshot(MOBILE_THREAD_LIST_METHOD, MOBILE_THREAD_LIST_ARGS);
@@ -917,7 +927,7 @@ function createMobileApi({ fastSyncCache, invokeTurnStart }) {
     const limit = Number(url.searchParams.get("limit") || 50);
     const payload = await createMobileBootstrapPayload({
       limit,
-      listLocalThreads: () => listLocalSessionThreads({ limit }),
+      listLocalThreads: () => listLocalSessionThreads({ ...(codexHome ? { codexHome } : {}), limit }),
       readThreadListSnapshot,
     });
     return sendMobilePayload(req, res, 200, payload);
@@ -927,7 +937,7 @@ function createMobileApi({ fastSyncCache, invokeTurnStart }) {
     const limit = Number(url.searchParams.get("limit") || 120);
     const tailBytes = mobileThreadDetailTailBytesForLimit(limit);
     const payload = await createMobileThreadPayload({
-      readLocalThreadDetail: () => listLocalSessionThreadDetail({ limit, tailBytes, threadId }),
+      readLocalThreadDetail: () => listLocalSessionThreadDetail({ ...mobileLookupOptions, limit, tailBytes, threadId }),
       threadId,
     });
     if (!payload.ok) return sendMobilePayload(req, res, 404, payload);
@@ -935,7 +945,7 @@ function createMobileApi({ fastSyncCache, invokeTurnStart }) {
   }
 
   function handleThreadEvents(req, res, url, threadId) {
-    const match = findLocalSessionFile({ threadId });
+    const match = findLocalSessionFile({ ...mobileLookupOptions, threadId });
     if (!match) {
       res.writeHead(404, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store" });
       sseWrite(res, { data: { error: "Thread not found" }, event: "error" });
