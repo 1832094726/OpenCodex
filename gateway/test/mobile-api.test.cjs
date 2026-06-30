@@ -276,7 +276,7 @@ test("listLocalSessionThreads reuses a short cache for repeated mobile opens", (
   );
   fs.utimesSync(firstFile, new Date("2026-06-30T08:00:00.000Z"), new Date("2026-06-30T08:00:00.000Z"));
 
-  const first = listLocalSessionThreads({ cacheTtlMs: 1_000, codexHome: root, limit: 5, now: () => 10_000 });
+  const first = listLocalSessionThreads({ cacheTtlMs: 1_000, codexHome: root, limit: 5, now: () => 10_000, staleCacheTtlMs: 0 });
   const secondFile = path.join(sessionsDir, "rollout-2026-06-30T08-01-00-thread-cache-2.jsonl");
   fs.writeFileSync(
     secondFile,
@@ -300,12 +300,91 @@ test("listLocalSessionThreads reuses a short cache for repeated mobile opens", (
   );
   fs.utimesSync(secondFile, new Date("2026-06-30T08:01:00.000Z"), new Date("2026-06-30T08:01:00.000Z"));
 
-  const cached = listLocalSessionThreads({ cacheTtlMs: 1_000, codexHome: root, limit: 5, now: () => 10_500 });
-  const refreshed = listLocalSessionThreads({ cacheTtlMs: 1_000, codexHome: root, limit: 5, now: () => 11_500 });
+  const cached = listLocalSessionThreads({ cacheTtlMs: 1_000, codexHome: root, limit: 5, now: () => 10_500, staleCacheTtlMs: 0 });
+  const refreshed = listLocalSessionThreads({ cacheTtlMs: 1_000, codexHome: root, limit: 5, now: () => 11_500, staleCacheTtlMs: 0 });
 
   assert.deepEqual(first.map((thread) => thread.id), ["thread-cache-1"]);
   assert.deepEqual(cached.map((thread) => thread.id), ["thread-cache-1"]);
   assert.deepEqual(refreshed.map((thread) => thread.id), ["thread-cache-2", "thread-cache-1"]);
+});
+
+test("listLocalSessionThreads reuses stale lightweight state when recent files are unchanged", () => {
+  const root = tempDir();
+  const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const file = path.join(sessionsDir, "rollout-2026-06-30T08-02-00-thread-stable-cache.jsonl");
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T08:02:00.000Z",
+        type: "session_meta",
+        payload: {
+          cwd: "/repo/stable-cache",
+          session_id: "thread-stable-cache",
+        },
+      }),
+      JSON.stringify({
+        type: "user_message",
+        payload: {
+          message: "稳定列表状态可以合并复用",
+        },
+      }),
+    ].join("\n"),
+    "utf8"
+  );
+  fs.utimesSync(file, new Date("2026-06-30T08:02:00.000Z"), new Date("2026-06-30T08:02:00.000Z"));
+
+  const first = listLocalSessionThreads({
+    cacheTtlMs: 1_000,
+    codexHome: root,
+    limit: 5,
+    now: () => 10_000,
+    staleCacheTtlMs: 30_000,
+  });
+  const originalOpenSync = fs.openSync;
+  fs.openSync = function patchedOpenSync(target, ...args) {
+    if (path.resolve(String(target)) === file) throw new Error("unchanged list state should not reopen jsonl");
+    return originalOpenSync.call(this, target, ...args);
+  };
+  try {
+    const stale = listLocalSessionThreads({
+      cacheTtlMs: 1_000,
+      codexHome: root,
+      limit: 5,
+      now: () => 12_000,
+      staleCacheTtlMs: 30_000,
+    });
+
+    assert.deepEqual(stale, first);
+  } finally {
+    fs.openSync = originalOpenSync;
+  }
+
+  fs.appendFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T08:02:01.000Z",
+        type: "event_msg",
+        payload: {
+          message: "文件变化后列表可重新解析",
+          type: "user_message",
+        },
+      }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  const refreshed = listLocalSessionThreads({
+    cacheTtlMs: 1_000,
+    codexHome: root,
+    limit: 5,
+    now: () => 12_500,
+    staleCacheTtlMs: 30_000,
+  });
+
+  assert.deepEqual(refreshed.map((thread) => thread.id), ["thread-stable-cache"]);
 });
 
 test("listLocalSessionThreads returns partial recent results when scan budget is exhausted", () => {

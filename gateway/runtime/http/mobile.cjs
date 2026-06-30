@@ -16,6 +16,7 @@ const MOBILE_THREAD_DETAIL_TAIL_BYTES_CELLULAR = 256 * 1024;
 const MOBILE_THREAD_DETAIL_TAIL_BYTES_CONSTRAINED = 128 * 1024;
 const MOBILE_MESSAGE_TEXT_MAX_CHARS = 12_000;
 const MOBILE_THREAD_LIST_CACHE_TTL_MS = 5_000;
+const MOBILE_THREAD_LIST_STALE_CACHE_TTL_MS = 30_000;
 const MOBILE_THREAD_LIST_SCAN_MAX_MS = 250;
 const MOBILE_THREAD_EVENT_CHUNK_BYTES = 64 * 1024;
 const MOBILE_THREAD_EVENT_PENDING_MAX_BYTES = 256 * 1024;
@@ -216,6 +217,24 @@ function cloneMobileThreadList(threads) {
   return Array.isArray(threads) ? threads.map((thread) => ({ ...thread })) : [];
 }
 
+function cloneMobileThreadFileStats(files) {
+  return Array.isArray(files) ? files.map((file) => ({ ...file })) : [];
+}
+
+function localThreadFilesUnchanged(files) {
+  if (!Array.isArray(files) || files.length === 0) return false;
+  for (const file of files) {
+    if (!file || !file.filePath) return false;
+    try {
+      const stat = fs.statSync(file.filePath);
+      if (stat.mtimeMs !== file.mtimeMs || stat.size !== file.size) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 function localThreadListCacheKey(options = {}) {
   return [path.resolve(options.codexHome || CODEX_HOME), Math.max(1, Math.min(Number(options.limit) || 50, 200))].join("|");
 }
@@ -223,22 +242,31 @@ function localThreadListCacheKey(options = {}) {
 function cachedLocalThreadList(options = {}) {
   const ttlMs = Math.max(0, Number(options.cacheTtlMs ?? MOBILE_THREAD_LIST_CACHE_TTL_MS));
   if (ttlMs === 0) return null;
+  const staleTtlMs = Math.max(0, Number(options.staleCacheTtlMs ?? MOBILE_THREAD_LIST_STALE_CACHE_TTL_MS));
   const now = typeof options.now === "function" ? options.now() : Date.now();
   const key = localThreadListCacheKey(options);
   const cached = localThreadListCache.get(key);
-  if (!cached || cached.expiresAtMs <= now) {
-    localThreadListCache.delete(key);
-    return null;
+  if (!cached) return null;
+  if (cached.expiresAtMs > now) return cloneMobileThreadList(cached.threads);
+  if (staleTtlMs > 0 && cached.staleExpiresAtMs > now && localThreadFilesUnchanged(cached.files)) {
+    return cloneMobileThreadList(cached.threads);
   }
-  return cloneMobileThreadList(cached.threads);
+  if (cached.staleExpiresAtMs <= now || !localThreadFilesUnchanged(cached.files)) {
+    localThreadListCache.delete(key);
+  }
+  return null;
 }
 
-function rememberLocalThreadList(options = {}, threads = []) {
+function rememberLocalThreadList(options = {}, threads = [], files = []) {
   const ttlMs = Math.max(0, Number(options.cacheTtlMs ?? MOBILE_THREAD_LIST_CACHE_TTL_MS));
   if (ttlMs === 0) return;
+  const staleTtlMs = Math.max(0, Number(options.staleCacheTtlMs ?? MOBILE_THREAD_LIST_STALE_CACHE_TTL_MS));
   const now = typeof options.now === "function" ? options.now() : Date.now();
+  // 手机首页的会话列表不是实时关键路径；短 TTL 后只校验已知文件 stat，稳定时继续复用裁剪后的轻量 DTO。
   localThreadListCache.set(localThreadListCacheKey(options), {
     expiresAtMs: now + ttlMs,
+    files: cloneMobileThreadFileStats(files),
+    staleExpiresAtMs: now + ttlMs + staleTtlMs,
     threads: cloneMobileThreadList(threads),
   });
 }
@@ -561,23 +589,26 @@ function listLocalSessionThreads(options = {}) {
   for (const item of files) {
     if (!hasScanBudget() && filesWithMtime.length >= limit) break;
     try {
-      filesWithMtime.push({ ...item, mtimeMs: fs.statSync(item.filePath).mtimeMs });
+      const stat = fs.statSync(item.filePath);
+      filesWithMtime.push({ ...item, mtimeMs: stat.mtimeMs, size: stat.size });
     } catch {}
   }
   filesWithMtime.sort((left, right) => right.mtimeMs - left.mtimeMs);
   const threads = [];
+  const cachedFileStats = [];
   for (const item of filesWithMtime.slice(0, limit * 3)) {
     if (!hasScanBudget() && threads.length > 0) break;
     const thread = sessionThreadFromFile(item.filePath, item.archived);
     if (thread) {
       // 列表页已经定位过文件，缓存映射后详情页无需再次全量扫描历史目录。
       rememberLocalSessionFile(thread.id, item);
+      cachedFileStats.push({ filePath: item.filePath, mtimeMs: item.mtimeMs, size: item.size });
       threads.push(thread);
     }
     if (threads.length >= limit) break;
   }
   // 手机弱网首屏宁可先返回已拿到的最近会话，也不要为了补全全部候选阻塞页面可交互。
-  rememberLocalThreadList({ ...options, limit }, threads);
+  rememberLocalThreadList({ ...options, limit }, threads, cachedFileStats);
   return threads;
 }
 
