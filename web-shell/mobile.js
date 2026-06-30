@@ -11,6 +11,8 @@
   const composeEl = document.getElementById("mobile-compose");
   const composeTextEl = document.getElementById("mobile-compose-text");
   const composeSendEl = document.getElementById("mobile-compose-send");
+  const MOBILE_CACHE_PREFIX = "opencodex.mobile-lite.";
+  const MOBILE_CACHE_TTL_MS = 60_000;
   let threadEvents = null;
   let activeThreadId = "";
 
@@ -40,6 +42,40 @@
     if (!Number.isFinite(bytes) || bytes <= 0) return "-";
     if (bytes < 1024) return `${bytes} B`;
     return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  }
+
+  function mobileCacheKey(kind, id) {
+    return `${MOBILE_CACHE_PREFIX}${kind}:${id || "default"}`;
+  }
+
+  function readMobileCache(kind, id) {
+    try {
+      const raw = sessionStorage.getItem(mobileCacheKey(kind, id));
+      if (!raw) return null;
+      const cached = JSON.parse(raw);
+      if (!cached || cached.version !== 1 || !cached.payload || Date.now() - Number(cached.savedAtMs || 0) > MOBILE_CACHE_TTL_MS) {
+        sessionStorage.removeItem(mobileCacheKey(kind, id));
+        return null;
+      }
+      return cached.payload;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeMobileCache(kind, id, payload) {
+    if (!payload || payload.ok !== true) return;
+    try {
+      // 只缓存 mobile-lite API 已裁剪 DTO，不缓存完整官方 renderer 状态。
+      sessionStorage.setItem(
+        mobileCacheKey(kind, id),
+        JSON.stringify({
+          payload,
+          savedAtMs: Date.now(),
+          version: 1,
+        })
+      );
+    } catch {}
   }
 
   function renderThreads(threads) {
@@ -194,21 +230,40 @@
   }
 
   async function loadBootstrap() {
-    // 手机入口只请求合并后的轻量状态，不加载官方 bridge，避免弱网下被插件/MCP/桌面状态拖慢。
-    const response = await fetch("/api/mobile/bootstrap", {
-      cache: "no-store",
-      credentials: "same-origin",
-      headers: { accept: "application/json" },
-    });
-    if (response.status === 401) {
-      location.href = "/";
-      return;
+    const cached = readMobileCache("bootstrap", "list");
+    if (cached) {
+      renderBootstrapPayload(cached, "已加载本地快照，正在刷新");
     }
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const payload = await response.json();
+    // 手机入口只请求合并后的轻量状态，不加载官方 bridge，避免弱网下被插件/MCP/桌面状态拖慢。
+    try {
+      const response = await fetch("/api/mobile/bootstrap", {
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+      });
+      if (response.status === 401) {
+        location.href = "/";
+        return;
+      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      writeMobileCache("bootstrap", "list", payload);
+      renderBootstrapPayload(payload);
+    } catch (error) {
+      if (cached) {
+        setText(statusEl, `刷新失败，继续使用本地快照：${error && error.message ? error.message : String(error)}`);
+        if (statusEl) statusEl.classList.add("error");
+        return;
+      }
+      throw error;
+    }
+  }
+
+  function renderBootstrapPayload(payload, statusText) {
     const threads = Array.isArray(payload.threads) ? payload.threads : [];
     // 渲染层只消费裁剪后的 DTO；会话详情和实时增量后续再按当前会话单独订阅。
-    setText(statusEl, payload.source === "empty" ? "未命中快照，可切换完整模式刷新" : "已加载轻量会话列表");
+    if (statusEl) statusEl.classList.remove("error");
+    setText(statusEl, statusText || (payload.source === "empty" ? "未命中快照，可切换完整模式刷新" : "已加载轻量会话列表"));
     setText(sourceEl, payload.source || "-");
     setText(countEl, threads.length);
     setText(bytesEl, formatBytes(payload.metrics && payload.metrics.estimatedPayloadBytes));
@@ -217,30 +272,50 @@
 
   async function loadThread(threadId) {
     activeThreadId = threadId;
-    // 详情页只读取当前会话的轻量消息，实时增量会在这个边界上继续扩展。
-    const response = await fetch(`/api/mobile/thread/${encodeURIComponent(threadId)}`, {
-      cache: "no-store",
-      credentials: "same-origin",
-      headers: { accept: "application/json" },
-    });
-    if (response.status === 401) {
-      location.href = "/";
-      return;
+    const cached = readMobileCache("thread", threadId);
+    if (cached) {
+      renderThreadPayload(threadId, cached, "已加载本地快照，正在刷新");
+      connectThreadEvents(threadId);
     }
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const payload = await response.json();
+    // 详情页只读取当前会话的轻量消息，实时增量会在这个边界上继续扩展。
+    try {
+      const response = await fetch(`/api/mobile/thread/${encodeURIComponent(threadId)}`, {
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+      });
+      if (response.status === 401) {
+        location.href = "/";
+        return;
+      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      writeMobileCache("thread", threadId, payload);
+      renderThreadPayload(threadId, payload);
+      connectThreadEvents(threadId);
+    } catch (error) {
+      if (cached) {
+        setText(statusEl, `刷新失败，继续使用本地快照：${error && error.message ? error.message : String(error)}`);
+        if (statusEl) statusEl.classList.add("error");
+        return;
+      }
+      throw error;
+    }
+  }
+
+  function renderThreadPayload(threadId, payload, statusText) {
     const messages = Array.isArray(payload.messages) ? payload.messages : [];
     const thread = payload.thread || {};
     document.title = thread.title ? `${thread.title} - OpenCodex Mobile` : "OpenCodex Mobile";
     setText(titleEl, thread.title || "OpenCodex");
     setText(sectionTitleEl, "当前会话");
-    setText(statusEl, "已加载当前会话轻量消息");
+    if (statusEl) statusEl.classList.remove("error");
+    setText(statusEl, statusText || "已加载当前会话轻量消息");
     setText(sourceEl, payload.source || "-");
     setText(countEl, messages.length);
     setText(bytesEl, formatBytes(payload.metrics && payload.metrics.estimatedPayloadBytes));
     if (backEl) backEl.hidden = false;
     renderMessages(messages);
-    connectThreadEvents(threadId);
   }
 
   function currentThreadId() {
