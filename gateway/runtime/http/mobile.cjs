@@ -13,6 +13,7 @@ const MOBILE_THREAD_DETAIL_HEAD_BYTES = 64 * 1024;
 const MOBILE_THREAD_DETAIL_TAIL_BYTES = 512 * 1024;
 const MOBILE_MESSAGE_TEXT_MAX_CHARS = 12_000;
 const MOBILE_THREAD_LIST_CACHE_TTL_MS = 5_000;
+const MOBILE_THREAD_FIND_RECENT_FILE_LIMIT = 600;
 const localSessionFileCache = new Map();
 const localThreadListCache = new Map();
 
@@ -166,6 +167,26 @@ function rememberLocalThreadList(options = {}, threads = []) {
     expiresAtMs: now + ttlMs,
     threads: cloneMobileThreadList(threads),
   });
+}
+
+function localSessionRoots(codexHome) {
+  return [
+    { archived: false, dir: path.join(codexHome, "sessions") },
+    { archived: true, dir: path.join(codexHome, "archived_sessions") },
+  ];
+}
+
+function matchLocalSessionFile(threadId, root, filePath) {
+  if (path.basename(filePath, ".jsonl").endsWith(threadId)) {
+    return { archived: root.archived, filePath };
+  }
+  try {
+    const firstLine = fs.readFileSync(filePath, "utf8").split(/\r?\n/, 1)[0] || "";
+    const record = JSON.parse(firstLine);
+    const payload = record && record.payload && typeof record.payload === "object" ? record.payload : {};
+    if (firstString(payload.session_id, payload.id) === threadId) return { archived: root.archived, filePath };
+  } catch {}
+  return null;
 }
 
 function titleFromRecord(record) {
@@ -389,10 +410,7 @@ function listLocalSessionThreads(options = {}) {
   if (cached) return cached;
   const codexHome = options.codexHome || CODEX_HOME;
   const limit = Math.max(1, Math.min(Number(options.limit) || 50, 200));
-  const roots = [
-    { archived: false, dir: path.join(codexHome, "sessions") },
-    { archived: true, dir: path.join(codexHome, "archived_sessions") },
-  ];
+  const roots = localSessionRoots(codexHome);
   const files = [];
   for (const root of roots) {
     // 手机首屏只需要最近候选；按日期目录/文件名倒序提前停止，避免每次弱网打开都遍历全部历史。
@@ -429,28 +447,28 @@ function findLocalSessionFile(options = {}) {
   const threadId = firstString(options.threadId);
   if (!threadId) return null;
   const cached = cachedLocalSessionFile(threadId);
-  if (cached) return cached;
-  const roots = [
-    { archived: false, dir: path.join(codexHome, "sessions") },
-    { archived: true, dir: path.join(codexHome, "archived_sessions") },
-  ];
+  if (cached) return { ...cached, lookupSource: "cache" };
+  const roots = localSessionRoots(codexHome);
+  const recentFileLimit = Math.max(1, Number(options.recentFileLimit) || MOBILE_THREAD_FIND_RECENT_FILE_LIMIT);
+  for (const root of roots) {
+    // 冷启动直达会话时，先按日期目录倒序查最近候选，避免为了一个深链扫描多年历史。
+    for (const filePath of walkJsonlFiles(root.dir, [], { maxFiles: recentFileLimit, newestFirst: true })) {
+      const item = matchLocalSessionFile(threadId, root, filePath);
+      if (item) {
+        const result = { ...item, lookupSource: "recent" };
+        rememberLocalSessionFile(threadId, result);
+        return result;
+      }
+    }
+  }
   for (const root of roots) {
     for (const filePath of walkJsonlFiles(root.dir)) {
-      if (path.basename(filePath, ".jsonl").endsWith(threadId)) {
-        const item = { archived: root.archived, filePath };
-        rememberLocalSessionFile(threadId, item);
-        return item;
+      const item = matchLocalSessionFile(threadId, root, filePath);
+      if (item) {
+        const result = { ...item, lookupSource: "scan" };
+        rememberLocalSessionFile(threadId, result);
+        return result;
       }
-      try {
-        const firstLine = fs.readFileSync(filePath, "utf8").split(/\r?\n/, 1)[0] || "";
-        const record = JSON.parse(firstLine);
-        const payload = record && record.payload && typeof record.payload === "object" ? record.payload : {};
-        if (firstString(payload.session_id, payload.id) === threadId) {
-          const item = { archived: root.archived, filePath };
-          rememberLocalSessionFile(threadId, item);
-          return item;
-        }
-      } catch {}
     }
   }
   return null;
@@ -460,6 +478,7 @@ function listLocalSessionThreadDetail(options = {}) {
   const match = findLocalSessionFile(options);
   if (!match) return { ok: false };
   const parsed = parseSessionFile(match.filePath, match.archived, options);
+  if (parsed && parsed.metrics && match.lookupSource) parsed.metrics.lookupSource = match.lookupSource;
   return parsed || { ok: false };
 }
 

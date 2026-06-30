@@ -361,6 +361,96 @@ test("listLocalSessionThreadDetail returns only visible user and assistant messa
   ]);
 });
 
+test("listLocalSessionThreadDetail checks recent files before full history scans", () => {
+  const root = tempDir();
+  const olderDir = path.join(root, "sessions", "2026", "06", "29");
+  const recentDir = path.join(root, "sessions", "2026", "06", "30");
+  fs.mkdirSync(olderDir, { recursive: true });
+  fs.mkdirSync(recentDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(olderDir, "rollout-2026-06-29T08-00-00-thread-older.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: "2026-06-29T08:00:00.000Z",
+        type: "session_meta",
+        payload: { cwd: "/repo/older", session_id: "thread-older" },
+      }),
+      JSON.stringify({ type: "event_msg", payload: { message: "旧会话", type: "user_message" } }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(recentDir, "rollout-2026-06-30T08-00-00-thread-recent.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:00.000Z",
+        type: "session_meta",
+        payload: { cwd: "/repo/recent", session_id: "thread-recent" },
+      }),
+      JSON.stringify({ type: "event_msg", payload: { message: "最近会话", type: "user_message" } }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const detail = listLocalSessionThreadDetail({
+    cacheTtlMs: 0,
+    codexHome: root,
+    recentFileLimit: 1,
+    threadId: "thread-recent",
+  });
+
+  assert.equal(detail.ok, true);
+  assert.equal(detail.thread.id, "thread-recent");
+  assert.equal(detail.metrics.lookupSource, "recent");
+});
+
+test("listLocalSessionThreadDetail keeps a full-scan fallback for older deep links", () => {
+  const root = tempDir();
+  const olderDir = path.join(root, "sessions", "2026", "06", "29");
+  const recentDir = path.join(root, "sessions", "2026", "06", "30");
+  fs.mkdirSync(olderDir, { recursive: true });
+  fs.mkdirSync(recentDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(recentDir, "rollout-2026-06-30T08-00-00-thread-recent-fallback.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:00.000Z",
+        type: "session_meta",
+        payload: { cwd: "/repo/recent", session_id: "thread-recent-fallback" },
+      }),
+      JSON.stringify({ type: "event_msg", payload: { message: "最近候选", type: "user_message" } }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(olderDir, "rollout-2026-06-29T08-00-00-thread-old-deeplink.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: "2026-06-29T08:00:00.000Z",
+        type: "session_meta",
+        payload: { cwd: "/repo/old", session_id: "thread-old-deeplink" },
+      }),
+      JSON.stringify({ type: "event_msg", payload: { message: "老会话深链", type: "user_message" } }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const detail = listLocalSessionThreadDetail({
+    cacheTtlMs: 0,
+    codexHome: root,
+    recentFileLimit: 1,
+    threadId: "thread-old-deeplink",
+  });
+
+  assert.equal(detail.ok, true);
+  assert.equal(detail.thread.id, "thread-old-deeplink");
+  assert.equal(detail.metrics.lookupSource, "scan");
+});
+
 test("listLocalSessionThreadDetail reads recent messages from the tail of large histories", () => {
   const root = tempDir();
   const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
