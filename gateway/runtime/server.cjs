@@ -49,6 +49,7 @@ const {
 } = require("./ipc/official-runtime.cjs");
 const { createPickedFilesService } = require("./ipc/picked-files.cjs");
 const { createStaticAssetService } = require("./http/static-assets.cjs");
+const { createMobileApi } = require("./http/mobile.cjs");
 const { createWsHub } = require("./ipc/ws-hub.cjs");
 const { diagnosticError, diagnosticLog, diagnosticWarn, sanitizeDiagnosticValue, shortId } = require("./core/diagnostics.cjs");
 const { recordFlowEvent, snapshotFlowState } = require("./core/flow-monitor.cjs");
@@ -266,7 +267,7 @@ async function listen(server) {
   });
 }
 
-function createRequestHandler({ localFiles, pickedFiles, staticAssets }) {
+function createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets }) {
   /**
    * 路由顺序很关键：
    * 1. 认证和 launcher 探活先处理。
@@ -310,6 +311,11 @@ function createRequestHandler({ localFiles, pickedFiles, staticAssets }) {
       if (file && exists(file)) return staticAssets.serveFile(req, res, file, 200, pathname);
     }
 
+    if (pathname === "/m" && req.method === "GET") {
+      // 手机轻量入口必须早于通用 SPA fallback，否则会加载完整官方 renderer 和大量桌面状态。
+      return staticAssets.serveMobileShell(res);
+    }
+
     if (staticAssets.isAppShellRoute(req, pathname)) {
       // index shell 允许公开返回；后续 renderer 资源、API 和 WS 再走 token 校验。
       // 这么做可以让未登录用户刷新任意前端路由时仍回到登录体验，而不是直接 401 文本页。
@@ -341,6 +347,11 @@ function createRequestHandler({ localFiles, pickedFiles, staticAssets }) {
 
     if (pathname === "/api/health") {
       return sendJson(res, 200, buildGatewayStatus());
+    }
+
+    if (pathname === "/api/mobile/bootstrap" && req.method === "GET") {
+      // 手机首屏只读裁剪后的快照；完整插件、MCP 和桌面状态留给完整模式按需加载。
+      return mobileApi.handleBootstrap(req, res, url);
     }
 
     if (pathname === "/api/diagnostics/flow" && req.method === "GET") {
@@ -524,7 +535,8 @@ async function createGateway() {
   const localFiles = createLocalFileService();
   const pickedFiles = createPickedFilesService();
   const staticAssets = createStaticAssetService({ getI18nSnapshot, getOfficialBundle });
-  const requestHandler = createRequestHandler({ localFiles, pickedFiles, staticAssets });
+  const mobileApi = createMobileApi({ fastSyncCache });
+  const requestHandler = createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets });
   const server = http.createServer((req, res) => {
     requestHandler(req, res).catch((error) => {
       diagnosticError("gateway", "request_failed", {

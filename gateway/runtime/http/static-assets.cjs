@@ -27,6 +27,8 @@ const OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH = "/codex-window-controls-overl
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH = "/codex-window-controls-overlay.js";
 const CODEX_BRIDGE_POLYFILL_PATH = "/codex-bridge-polyfill.js";
 const CODEX_TOOLTIP_DISMISS_GUARD_PATH = "/codex-tooltip-dismiss-guard.js";
+const MOBILE_CSS_PATH = "/mobile.css";
+const MOBILE_JS_PATH = "/mobile.js";
 const FAVICON_PATH = "/favicon.ico";
 const PWA_MANIFEST_PATH = "/manifest.webmanifest";
 const WEB_SHELL_ASSETS_DIR = path.join(WEB_SHELL_DIR, "assets");
@@ -41,6 +43,8 @@ const WEB_SHELL_STATIC_FILES = new Map([
   [OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.js")],
   [CODEX_BRIDGE_POLYFILL_PATH, path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js")],
   [CODEX_TOOLTIP_DISMISS_GUARD_PATH, path.join(WEB_SHELL_DIR, "codex-tooltip-dismiss-guard.js")],
+  [MOBILE_CSS_PATH, path.join(WEB_SHELL_DIR, "mobile.css")],
+  [MOBILE_JS_PATH, path.join(WEB_SHELL_DIR, "mobile.js")],
   ["/sw-cache.js", path.join(WEB_SHELL_DIR, "sw-cache.js")],
 ]);
 
@@ -301,6 +305,13 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     return html;
   }
 
+  function createMobileShellResponse() {
+    const shell = path.join(WEB_SHELL_DIR, "mobile.html");
+    const i18n = currentI18n();
+    // 手机轻量入口不注入官方 renderer、插件 loader 或 bridge，避免弱网下启动完整桌面状态同步。
+    return patchHtmlLang(readText(shell), i18n.locale);
+  }
+
   function isPublicStaticPath(reqPath) {
     // 登录前必须可访问的资源限定在入口依赖和官方静态 asset，不包含任何 API。
     if (WEB_SHELL_STATIC_FILES.has(reqPath) || reqPath.startsWith(WEB_SHELL_ASSETS_PREFIX)) return true;
@@ -448,6 +459,15 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     );
   }
 
+  function serveMobileShell(res) {
+    send(
+      res,
+      200,
+      { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+      createMobileShellResponse()
+    );
+  }
+
   function servePluginLoader(res) {
     send(
       res,
@@ -515,6 +535,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     isAppShellRoute,
     isPublicStaticPath,
     serveFile,
+    serveMobileShell,
     servePluginLoader,
     serveWebShellIndex,
     staticFile,

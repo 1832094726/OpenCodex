@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN" data-opencodex-mobile-lite>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#000000" />
+    <title>OpenCodex Mobile</title>
+    <link rel="icon" type="image/png" href="/assets/icon.png" />
+    <link rel="stylesheet" href="/mobile.css" />
+  </head>
+  <body>
+    <main class="mobile-shell">
+      <header class="topbar">
+        <div>
+          <h1>OpenCodex</h1>
+          <p id="mobile-status">正在读取会话快照</p>
+        </div>
+        <a class="full-mode" href="/">完整模式</a>
+      </header>
+      <section class="summary" aria-label="移动端状态">
+        <div>
+          <span class="label">模式</span>
+          <strong>mobile-lite</strong>
+        </div>
+        <div>
+          <span class="label">数据源</span>
+          <strong id="mobile-source">-</strong>
+        </div>
+        <div>
+          <span class="label">会话数</span>
+          <strong id="mobile-count">0</strong>
+        </div>
+      </section>
+      <section>
+        <h2>最近会话</h2>
+        <div id="mobile-thread-list" class="thread-list" aria-live="polite"></div>
+      </section>
+    </main>
+    <script src="/mobile.js"></script>
+  </body>
+</html>
