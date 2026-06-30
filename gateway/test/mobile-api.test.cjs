@@ -67,6 +67,7 @@ function jsonPostReq(body) {
 
 function createStreamHarness() {
   const events = {};
+  const resEvents = {};
   const writes = [];
   const req = {
     on(event, handler) {
@@ -83,6 +84,9 @@ function createStreamHarness() {
       this.statusCode = statusCode;
       this.headers = headers;
     },
+    on(event, handler) {
+      resEvents[event] = handler;
+    },
   };
   return {
     close() {
@@ -90,6 +94,12 @@ function createStreamHarness() {
     },
     req,
     res,
+    resClose() {
+      if (resEvents.close) resEvents.close();
+    },
+    resError() {
+      if (resEvents.error) resEvents.error(new Error("socket closed"));
+    },
     writes,
   };
 }
@@ -958,6 +968,36 @@ test("createMobileThreadEventStream reads large appends in bounded chunks", asyn
   assert.doesNotMatch(output, /x{200}/);
 
   harness.close();
+  assert.equal(stream.closed(), true);
+});
+
+test("createMobileThreadEventStream releases timers when the response closes", () => {
+  const root = tempDir();
+  const file = path.join(root, "thread-response-close.jsonl");
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:00.000Z",
+        type: "event_msg",
+        payload: { message: "初始快照", type: "user_message" },
+      }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  const harness = createStreamHarness();
+  const stream = createMobileThreadEventStream({
+    filePath: file,
+    pollMs: 10,
+    req: harness.req,
+    res: harness.res,
+    sinceOffset: null,
+    threadId: "thread-response-close",
+  });
+
+  assert.equal(stream.closed(), false);
+  harness.resClose();
   assert.equal(stream.closed(), true);
 });
 

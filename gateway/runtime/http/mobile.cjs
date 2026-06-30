@@ -630,6 +630,17 @@ function createMobileThreadEventStream(options = {}) {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
   }
 
+  function writeSseEvent(payload) {
+    if (closed) return false;
+    try {
+      sseWrite(res, payload);
+      return true;
+    } catch {
+      close();
+      return false;
+    }
+  }
+
   function readNewBytes() {
     if (closed) return;
     let stat = null;
@@ -669,7 +680,7 @@ function createMobileThreadEventStream(options = {}) {
         continue;
       }
       const message = mobileMessageFromRecord(record);
-      if (message) sseWrite(res, { data: message, event: "message", id: offset });
+      if (message && !writeSseEvent({ data: message, event: "message", id: offset })) return;
     }
   }
 
@@ -692,14 +703,19 @@ function createMobileThreadEventStream(options = {}) {
     "x-accel-buffering": "no",
   });
   // ready 只同步文件游标，避免手机端一连上 SSE 就重复接收全量历史。
-  sseWrite(res, { data: { offset, threadId: options.threadId || "" }, event: "ready", id: offset });
+  writeSseEvent({ data: { offset, threadId: options.threadId || "" }, event: "ready", id: offset });
   pollTimer = setInterval(readNewBytes, pollMs);
   heartbeatTimer = setInterval(() => {
-    if (!closed) sseWrite(res, { data: { at: Date.now() }, event: "ping", id: offset });
+    if (!closed) writeSseEvent({ data: { at: Date.now() }, event: "ping", id: offset });
   }, heartbeatMs);
   if (pollTimer && typeof pollTimer.unref === "function") pollTimer.unref();
   if (heartbeatTimer && typeof heartbeatTimer.unref === "function") heartbeatTimer.unref();
   if (req && typeof req.on === "function") req.on("close", close);
+  if (res && typeof res.on === "function") {
+    // 手机切网、锁屏或代理断开时，响应侧可能先收到关闭事件；立即释放轮询计时器。
+    res.on("close", close);
+    res.on("error", close);
+  }
   return { closed: () => closed };
 }
 

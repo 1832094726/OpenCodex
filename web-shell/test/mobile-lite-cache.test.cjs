@@ -67,6 +67,19 @@ test("mobile lite connects realtime events from the detail snapshot offset", () 
   assert.match(source, /connectThreadEvents\(threadId, payload\.metrics && payload\.metrics\.nextEventOffset\)/);
 });
 
+test("mobile lite pauses realtime events while the page is hidden", () => {
+  const source = readMobileSource();
+
+  assert.match(source, /activeThreadEventOffset/);
+  assert.match(source, /event\.lastEventId/);
+  assert.match(source, /function closeThreadEvents\(statusText\)/);
+  assert.match(source, /document\.visibilityState === "hidden"/);
+  assert.match(source, /已暂停后台增量连接/);
+  assert.match(source, /connectThreadEvents\(activeThreadId, activeThreadEventOffset\)/);
+  assert.match(source, /document\.addEventListener\("visibilitychange", handleVisibilityChange\)/);
+  assert.match(source, /window\.addEventListener\("pagehide", \(\) => closeThreadEvents\(\)\)/);
+});
+
 test("mobile lite fetches use timeouts so weak networks do not hang forever", () => {
   const source = readMobileSource();
 

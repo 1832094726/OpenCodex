@@ -25,6 +25,7 @@
   const MOBILE_THREAD_LIMIT_CELLULAR = 80;
   let threadEvents = null;
   let activeThreadId = "";
+  let activeThreadEventOffset = null;
 
   function setText(node, value) {
     if (node) node.textContent = String(value == null ? "" : value);
@@ -265,18 +266,33 @@
     if (role) role.textContent = "你";
   }
 
+  function rememberThreadEventOffset(event) {
+    const offset = Number(event && event.lastEventId);
+    if (Number.isFinite(offset) && offset >= 0) activeThreadEventOffset = Math.floor(offset);
+  }
+
+  function closeThreadEvents(statusText) {
+    if (!threadEvents) return;
+    threadEvents.close();
+    threadEvents = null;
+    if (statusText) setText(statusEl, statusText);
+  }
+
   function connectThreadEvents(threadId, sinceOffset) {
     if (!("EventSource" in window)) return;
-    if (threadEvents) threadEvents.close();
-    const offset = Number(sinceOffset);
+    closeThreadEvents();
+    const offset = Number(sinceOffset == null ? activeThreadEventOffset : sinceOffset);
     const query = Number.isFinite(offset) && offset >= 0 ? `?sinceOffset=${encodeURIComponent(String(Math.floor(offset)))}` : "";
+    if (Number.isFinite(offset) && offset >= 0) activeThreadEventOffset = Math.floor(offset);
     // 增量通道只订阅当前会话，避免手机端恢复完整官方 WS/app-host 状态流。
     threadEvents = new EventSource(`/api/mobile/thread/${encodeURIComponent(threadId)}/events${query}`);
-    threadEvents.addEventListener("ready", () => {
+    threadEvents.addEventListener("ready", (event) => {
+      rememberThreadEventOffset(event);
       setText(statusEl, "已连接当前会话增量");
     });
     threadEvents.addEventListener("message", (event) => {
       try {
+        rememberThreadEventOffset(event);
         const message = JSON.parse(event.data || "{}");
         if (!message || !message.text) return;
         const empty = messageListEl.querySelector(".empty");
@@ -289,6 +305,16 @@
     threadEvents.addEventListener("error", () => {
       setText(statusEl, "增量连接已断开，浏览器会自动重连");
     });
+  }
+
+  function handleVisibilityChange() {
+    if (!activeThreadId) return;
+    if (document.visibilityState === "hidden") {
+      // 手机后台不保留长连接；回到前台再用最后 event id 续上当前会话增量。
+      closeThreadEvents("已暂停后台增量连接");
+      return;
+    }
+    if (!threadEvents) connectThreadEvents(activeThreadId, activeThreadEventOffset);
   }
 
   function resizeComposeText() {
@@ -425,6 +451,8 @@
   const threadId = currentThreadId();
   if (composeEl) composeEl.addEventListener("submit", submitMessage);
   if (composeTextEl) composeTextEl.addEventListener("input", resizeComposeText);
+  document.addEventListener("visibilitychange", handleVisibilityChange);
+  window.addEventListener("pagehide", () => closeThreadEvents());
   if (threadId) {
     loadThread(threadId).catch((error) => {
       setText(statusEl, `读取失败：${error && error.message ? error.message : String(error)}`);
