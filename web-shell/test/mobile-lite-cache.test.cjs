@@ -102,6 +102,17 @@ test("mobile lite skips rerendering unchanged visible snapshots", () => {
   assert.match(source, /当前会话轻量消息无变化/);
 });
 
+test("mobile lite sends cached etags and reuses snapshots on 304", () => {
+  const source = readMobileSource();
+
+  assert.match(source, /response\.status === 304/);
+  assert.match(source, /_notModified: true/);
+  assert.match(source, /payload\._etag = etag/);
+  assert.match(source, /"if-none-match": cached\._etag/);
+  assert.match(source, /payload\._notModified && cached/);
+  assert.match(source, /connectThreadEvents\(threadId, cached\.metrics && cached\.metrics\.nextEventOffset\)/);
+});
+
 test("mobile lite pauses realtime events while the page is hidden", () => {
   const source = readMobileSource();
 

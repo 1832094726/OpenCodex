@@ -409,6 +409,45 @@ test("mobile bootstrap handler gzips sizeable lightweight JSON payloads", async 
   assert.ok(response.bodyBuffer.length < body.metrics.estimatedPayloadBytes);
 });
 
+test("mobile bootstrap handler returns 304 when visible state etag matches", async () => {
+  const api = createMobileApi({
+    fastSyncCache: {
+      readSnapshot: () => ({
+        capturedAtMs: 1_000,
+        source: "test-snapshot",
+        value: {
+          threads: [
+            {
+              id: "thread-etag-1",
+              projectPath: "/repo/mobile",
+              title: "相同快照不重复下发",
+              updatedAt: "2026-06-30T08:00:00.000Z",
+            },
+          ],
+        },
+      }),
+    },
+    invokeTurnStart: async () => ({ ok: true }),
+  });
+  const url = new URL("http://127.0.0.1/api/mobile/bootstrap?limit=10");
+  const first = await collectResponse((req, res) => api.handleBootstrap(req, res, url), {
+    headers: { accept: "application/json" },
+    method: "GET",
+    socket: { remoteAddress: "127.0.0.1" },
+  });
+  const second = await collectResponse((req, res) => api.handleBootstrap(req, res, url), {
+    headers: { accept: "application/json", "if-none-match": first.headers.etag },
+    method: "GET",
+    socket: { remoteAddress: "127.0.0.1" },
+  });
+
+  assert.equal(first.statusCode, 200);
+  assert.ok(first.headers.etag);
+  assert.equal(second.statusCode, 304);
+  assert.equal(second.headers.etag, first.headers.etag);
+  assert.equal(second.body, "");
+});
+
 test("listLocalSessionThreadDetail returns only visible user and assistant messages", () => {
   const root = tempDir();
   const sessionsDir = path.join(root, "sessions", "2026", "06", "30");

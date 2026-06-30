@@ -210,8 +210,14 @@
         location.href = "/";
         return null;
       }
+      if (response.status === 304) {
+        return { _notModified: true, _etag: response.headers.get("etag") || "" };
+      }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return response.json();
+      const payload = await response.json();
+      const etag = response.headers.get("etag");
+      if (etag && payload && typeof payload === "object") payload._etag = etag;
+      return payload;
     } catch (error) {
       if (error && error.name === "AbortError") throw new Error(`请求超时（${Math.round(timeout / 1000)} 秒）`);
       throw error;
@@ -426,9 +432,13 @@
       const payload = await fetchJsonWithTimeout(mobileBootstrapUrl(), {
         cache: "no-store",
         credentials: "same-origin",
-        headers: { accept: "application/json" },
+        headers: { accept: "application/json", ...(cached && cached._etag ? { "if-none-match": cached._etag } : {}) },
       }, MOBILE_READ_TIMEOUT_MS);
       if (!payload) return;
+      if (payload._notModified && cached) {
+        setText(statusEl, "轻量会话列表无变化");
+        return;
+      }
       writeMobileCache("bootstrap", "list", payload);
       renderBootstrapPayload(payload);
     } catch (error) {
@@ -475,9 +485,14 @@
       const payload = await fetchJsonWithTimeout(mobileThreadUrl(threadId), {
         cache: "no-store",
         credentials: "same-origin",
-        headers: { accept: "application/json" },
+        headers: { accept: "application/json", ...(cached && cached._etag ? { "if-none-match": cached._etag } : {}) },
       }, MOBILE_READ_TIMEOUT_MS);
       if (!payload) return;
+      if (payload._notModified && cached) {
+        setText(statusEl, "当前会话轻量消息无变化");
+        connectThreadEvents(threadId, cached.metrics && cached.metrics.nextEventOffset);
+        return;
+      }
       writeMobileCache("thread", threadId, payload);
       renderThreadPayload(threadId, payload);
       connectThreadEvents(threadId, payload.metrics && payload.metrics.nextEventOffset);

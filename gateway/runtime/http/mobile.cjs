@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { cacheKeyForSnapshot } = require("../core/fast-sync-cache.cjs");
@@ -26,6 +27,45 @@ const MOBILE_THREAD_PATH_MAX_CHARS = 320;
 const MOBILE_THREAD_TIME_MAX_CHARS = 80;
 const localSessionFileCache = new Map();
 const localThreadListCache = new Map();
+
+function mobilePayloadEtag(payload) {
+  try {
+    // ETag 只覆盖手机可见 DTO；snapshotAgeMs/metrics 变化不迫使弱网重复下载同一屏内容。
+    const thread = payload && payload.thread && typeof payload.thread === "object" ? payload.thread : {};
+    const stable = JSON.stringify({
+      messages: payload && Array.isArray(payload.messages) ? payload.messages : [],
+      mode: payload && payload.mode,
+      source: payload && payload.source,
+      thread: {
+        archived: Boolean(thread.archived),
+        id: thread.id || "",
+        projectPath: thread.projectPath || "",
+        title: thread.title || "",
+        updatedAt: thread.updatedAt || "",
+      },
+      threads: payload && Array.isArray(payload.threads) ? payload.threads : [],
+    });
+    return `"mobile-${crypto.createHash("sha1").update(stable).digest("base64url")}"`;
+  } catch {
+    return "";
+  }
+}
+
+function mobileRequestEtag(req) {
+  const value = req && req.headers && (req.headers["if-none-match"] || req.headers["If-None-Match"]);
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function sendMobilePayload(req, res, status, payload, extraHeaders = {}) {
+  const etag = payload && payload.ok === true ? mobilePayloadEtag(payload) : "";
+  const headers = { "cache-control": "no-store", ...extraHeaders, ...(etag ? { etag } : {}) };
+  if (status === 200 && etag && mobileRequestEtag(req) === etag) {
+    res.writeHead(304, headers);
+    res.end();
+    return;
+  }
+  return sendJsonCompressed(req, res, status, payload, headers);
+}
 
 function firstString(...values) {
   for (const value of values) {
@@ -790,7 +830,7 @@ function createMobileApi({ fastSyncCache, invokeTurnStart }) {
       listLocalThreads: () => listLocalSessionThreads({ limit }),
       readThreadListSnapshot,
     });
-    return sendJsonCompressed(req, res, 200, payload, { "cache-control": "no-store" });
+    return sendMobilePayload(req, res, 200, payload);
   }
 
   async function handleThread(req, res, url, threadId) {
@@ -800,8 +840,8 @@ function createMobileApi({ fastSyncCache, invokeTurnStart }) {
       readLocalThreadDetail: () => listLocalSessionThreadDetail({ limit, tailBytes, threadId }),
       threadId,
     });
-    if (!payload.ok) return sendJsonCompressed(req, res, 404, payload, { "cache-control": "no-store" });
-    return sendJsonCompressed(req, res, 200, payload, { "cache-control": "no-store" });
+    if (!payload.ok) return sendMobilePayload(req, res, 404, payload);
+    return sendMobilePayload(req, res, 200, payload);
   }
 
   function handleThreadEvents(req, res, url, threadId) {
