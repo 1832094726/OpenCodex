@@ -35,6 +35,13 @@ function sendJson(res, status, value, extraHeaders = {}) {
   );
 }
 
+function sendJsonCompressed(req, res, status, value, extraHeaders = {}) {
+  // 手机弱网下 JSON DTO 可能反复刷新；这里复用静态资源 gzip 策略，只在客户端明确支持且体积值得压缩时启用。
+  const body = Buffer.from(JSON.stringify(value, null, 2));
+  const compressed = gzipIfUseful(req, { "content-type": "application/json; charset=utf-8", ...extraHeaders }, body);
+  send(res, status, compressed.headers, compressed.body);
+}
+
 function gzipIfUseful(req, headers, body) {
   // 小响应压缩收益低，且会增加调试成本，只对较大的文本/wasm 类资源启用 gzip。
   if (process.env.CODEX_WEB_DISABLE_GZIP === "1" || !Buffer.isBuffer(body) || body.length < 1024) return { headers, body };
@@ -86,4 +93,5 @@ module.exports = {
   readBody,
   send,
   sendJson,
+  sendJsonCompressed,
 };

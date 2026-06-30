@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const zlib = require("node:zlib");
 
 const {
   createMobileApi,
@@ -31,6 +32,7 @@ function collectResponse(handler, req) {
       end(chunk) {
         if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
         resolve({
+          bodyBuffer: Buffer.concat(chunks),
           body: Buffer.concat(chunks).toString("utf8"),
           headers: this.headers,
           statusCode: this.statusCode,
@@ -289,6 +291,43 @@ test("createMobileBootstrapPayload falls back to local history when thread snaps
 
   assert.equal(payload.source, "local-history");
   assert.equal(payload.threads.length, 1);
+});
+
+test("mobile bootstrap handler gzips sizeable lightweight JSON payloads", async () => {
+  const api = createMobileApi({
+    fastSyncCache: {
+      readSnapshot: () => ({
+        capturedAtMs: 1_000,
+        source: "test-snapshot",
+        value: {
+          threads: Array.from({ length: 80 }, (_, index) => ({
+            id: `thread-gzip-${index}`,
+            projectPath: `/repo/mobile-${index}`,
+            title: `手机弱网压缩会话 ${index}`,
+            updatedAt: `2026-06-30T08:${String(index % 60).padStart(2, "0")}:00.000Z`,
+          })),
+        },
+      }),
+    },
+    invokeTurnStart: async () => ({ ok: true }),
+  });
+
+  const response = await collectResponse(
+    (req, res) => api.handleBootstrap(req, res, new URL("http://127.0.0.1/api/mobile/bootstrap?limit=80")),
+    {
+      headers: { accept: "application/json", "accept-encoding": "gzip" },
+      method: "GET",
+      socket: { remoteAddress: "127.0.0.1" },
+    }
+  );
+  const body = JSON.parse(zlib.gunzipSync(response.bodyBuffer).toString("utf8"));
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["content-encoding"], "gzip");
+  assert.equal(response.headers.vary, "Accept-Encoding");
+  assert.equal(body.ok, true);
+  assert.equal(body.threads.length, 80);
+  assert.ok(response.bodyBuffer.length < body.metrics.estimatedPayloadBytes);
 });
 
 test("listLocalSessionThreadDetail returns only visible user and assistant messages", () => {

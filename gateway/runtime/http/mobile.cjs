@@ -2,7 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { cacheKeyForSnapshot } = require("../core/fast-sync-cache.cjs");
 const { CODEX_HOME } = require("../core/config.cjs");
-const { readBody, sendJson } = require("./http-utils.cjs");
+const { readBody, sendJsonCompressed } = require("./http-utils.cjs");
 
 const MOBILE_DEFERRED_STATE = ["app/list", "mcpServerStatus/list", "plugin/list", "desktop-state"];
 const MOBILE_THREAD_LIST_METHOD = "thread/list";
@@ -716,24 +716,24 @@ function createMobileApi({ fastSyncCache, invokeTurnStart }) {
     return fastSyncCache.readSnapshot({ key });
   }
 
-  async function handleBootstrap(_req, res, url) {
+  async function handleBootstrap(req, res, url) {
     const limit = Number(url.searchParams.get("limit") || 50);
     const payload = await createMobileBootstrapPayload({
       limit,
       listLocalThreads: () => listLocalSessionThreads({ limit }),
       readThreadListSnapshot,
     });
-    return sendJson(res, 200, payload, { "cache-control": "no-store" });
+    return sendJsonCompressed(req, res, 200, payload, { "cache-control": "no-store" });
   }
 
-  async function handleThread(_req, res, url, threadId) {
+  async function handleThread(req, res, url, threadId) {
     const limit = Number(url.searchParams.get("limit") || 120);
     const payload = await createMobileThreadPayload({
       readLocalThreadDetail: () => listLocalSessionThreadDetail({ limit, threadId }),
       threadId,
     });
-    if (!payload.ok) return sendJson(res, 404, payload, { "cache-control": "no-store" });
-    return sendJson(res, 200, payload, { "cache-control": "no-store" });
+    if (!payload.ok) return sendJsonCompressed(req, res, 404, payload, { "cache-control": "no-store" });
+    return sendJsonCompressed(req, res, 200, payload, { "cache-control": "no-store" });
   }
 
   function handleThreadEvents(req, res, url, threadId) {
@@ -760,15 +760,15 @@ function createMobileApi({ fastSyncCache, invokeTurnStart }) {
       parsedBody = parseJsonBody(await readBody(req, { maxBytes: 128 * 1024 }));
     } catch (error) {
       const status = error && typeof error.statusCode === "number" ? error.statusCode : 500;
-      return sendJson(res, status, { ok: false, error: error instanceof Error ? error.message : String(error) }, { "cache-control": "no-store" });
+      return sendJsonCompressed(req, res, status, { ok: false, error: error instanceof Error ? error.message : String(error) }, { "cache-control": "no-store" });
     }
-    if (!parsedBody.ok) return sendJson(res, 400, { ok: false, error: parsedBody.error }, { "cache-control": "no-store" });
+    if (!parsedBody.ok) return sendJsonCompressed(req, res, 400, { ok: false, error: parsedBody.error }, { "cache-control": "no-store" });
     const body = parsedBody.value && typeof parsedBody.value === "object" ? parsedBody.value : {};
     const text = normalizeMobileTurnText(body.text || body.message || body.prompt);
     if (!firstString(threadId)) {
-      return sendJson(res, 400, { ok: false, error: "Missing threadId" }, { "cache-control": "no-store" });
+      return sendJsonCompressed(req, res, 400, { ok: false, error: "Missing threadId" }, { "cache-control": "no-store" });
     }
-    if (!text) return sendJson(res, 400, { ok: false, error: "Missing message text" }, { "cache-control": "no-store" });
+    if (!text) return sendJsonCompressed(req, res, 400, { ok: false, error: "Missing message text" }, { "cache-control": "no-store" });
 
     try {
       const payload = await turnSender.sendTurn({
@@ -776,9 +776,10 @@ function createMobileApi({ fastSyncCache, invokeTurnStart }) {
         text,
         threadId,
       });
-      return sendJson(res, 202, payload, { "cache-control": "no-store" });
+      return sendJsonCompressed(req, res, 202, payload, { "cache-control": "no-store" });
     } catch (error) {
-      return sendJson(
+      return sendJsonCompressed(
+        req,
         res,
         502,
         { ok: false, error: error instanceof Error ? error.message : String(error) },

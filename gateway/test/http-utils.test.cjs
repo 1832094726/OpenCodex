@@ -1,7 +1,8 @@
 const assert = require("node:assert/strict");
 const { Readable } = require("node:stream");
 const test = require("node:test");
-const { isRequestBodyTooLargeError, readBody } = require("../runtime/http/http-utils.cjs");
+const zlib = require("node:zlib");
+const { isRequestBodyTooLargeError, readBody, sendJsonCompressed } = require("../runtime/http/http-utils.cjs");
 
 function requestFromChunks(chunks) {
   return Readable.from(chunks);
@@ -23,4 +24,31 @@ test("readBody rejects with a recognizable error when maxBytes is exceeded", asy
     assert.equal(error.maxBytes, 8 * 1_024);
     return true;
   });
+});
+
+test("sendJsonCompressed gzips sizeable JSON when the client accepts it", () => {
+  const chunks = [];
+  const res = {
+    headers: {},
+    writeHead(statusCode, headers) {
+      this.statusCode = statusCode;
+      this.headers = headers;
+    },
+    end(chunk) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    },
+  };
+
+  sendJsonCompressed(
+    { headers: { "accept-encoding": "gzip, deflate" } },
+    res,
+    200,
+    { ok: true, text: "手机弱网 JSON 压缩".repeat(200) },
+    { "cache-control": "no-store" }
+  );
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers["content-encoding"], "gzip");
+  assert.equal(res.headers.vary, "Accept-Encoding");
+  assert.equal(JSON.parse(zlib.gunzipSync(Buffer.concat(chunks)).toString("utf8")).ok, true);
 });
