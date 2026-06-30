@@ -63,6 +63,18 @@ test("fast sync snapshot reads have short miss timeouts", () => {
   assert.match(source, /gateway-read-timeout/);
 });
 
+test("mobile traffic mode keeps official shell while localizing noncritical app state", () => {
+  const source = readPolyfillSource();
+  const localBlock = sourceBetween(source, "const MOBILE_TRAFFIC_LOCAL_METHODS", "function appServerMethod");
+
+  assert.match(source, /MOBILE_TRAFFIC_MODE/);
+  assert.match(source, /cfg\.mobileTrafficMode/);
+  assert.match(localBlock, /"app\/list"/);
+  assert.match(localBlock, /"mcpServerStatus\/list"/);
+  assert.match(source, /function mobileTrafficLocalAppServerValue/);
+  assert.match(source, /mobile-traffic-local-state/);
+});
+
 test("turn starts create pending sends and flow diagnostics", () => {
   const source = readPolyfillSource();
   // turn/start 是写操作，不能进快照缓存，但需要本地 pending 与链路诊断帮助排查弱网转圈。

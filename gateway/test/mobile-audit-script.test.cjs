@@ -15,6 +15,8 @@ test("mobile audit script documents the phone traffic budget checks", () => {
   assert.match(pkg.scripts.test, /mobile-audit-script\.test\.cjs/);
   assert.match(source, /OPENCODEX_MOBILE_AUDIT_BASE_URL/);
   assert.match(source, /OPENCODEX_MOBILE_AUDIT_THREAD_ID/);
+  assert.match(source, /MOBILE_AUDIT_USER_AGENT/);
+  assert.match(source, /mobileTrafficMode/);
   assert.match(source, /\/api\/mobile\/bootstrap\?limit=/);
   assert.match(source, /\/api\/mobile\/thread\/\$\{encodeURIComponent\(threadId\)\}\?limit=/);
   assert.match(source, /if-none-match/);
@@ -22,5 +24,5 @@ test("mobile audit script documents the phone traffic budget checks", () => {
   assert.match(source, /durationMs/);
   assert.match(source, /bodyBytes/);
   assert.match(source, /estimatedPayloadBytes/);
-  assert.match(source, /Mobile lite audit/);
+  assert.match(source, /Mobile official-shell audit/);
 });

@@ -72,7 +72,7 @@ function isMobileHtmlRequest(req, pathname, url) {
   const accept = String(req.headers.accept || "");
   if (accept && !accept.includes("text/html") && !accept.includes("*/*")) return false;
   const userAgent = String(req.headers["user-agent"] || "");
-  // 手机裸域名访问默认进入轻量页，避免完整官方 renderer 在弱网下拉取插件、shared-object 和 app-server 状态。
+  // 手机裸域名访问默认进入官方外观的瘦身模式，避免完整状态流压垮弱网首屏。
   return /Android|iPhone|iPad|iPod|Mobile|Windows Phone|Mobi/i.test(userAgent);
 }
 
@@ -322,19 +322,10 @@ function createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets
       if (file && exists(file)) return staticAssets.serveFile(req, res, file, 200, pathname);
     }
 
-    if ((pathname === "/m" || pathname.startsWith("/m/thread/")) && req.method === "GET") {
-      // 手机轻量入口必须早于通用 SPA fallback，否则会加载完整官方 renderer 和大量桌面状态。
-      return staticAssets.serveMobileShell(req, res);
-    }
-
-    if (isMobileHtmlRequest(req, pathname, url)) {
-      return staticAssets.serveMobileShell(req, res);
-    }
-
     if (staticAssets.isAppShellRoute(req, pathname)) {
       // index shell 允许公开返回；后续 renderer 资源、API 和 WS 再走 token 校验。
       // 这么做可以让未登录用户刷新任意前端路由时仍回到登录体验，而不是直接 401 文本页。
-      return staticAssets.serveWebShellIndex(res);
+      return staticAssets.serveWebShellIndex(res, { mobileTrafficMode: isMobileHtmlRequest(req, pathname, url) });
     }
 
     // 从这里开始进入受保护区：官方 renderer、IPC API、本地文件和诊断接口都不能匿名访问。
@@ -468,7 +459,7 @@ function createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets
 
     if (staticAssets.isAppShellRoute(req, pathname)) {
       // 受保护区内再兜底一次 SPA shell，覆盖登录后深链刷新场景。
-      return staticAssets.serveWebShellIndex(res);
+      return staticAssets.serveWebShellIndex(res, { mobileTrafficMode: isMobileHtmlRequest(req, pathname, url) });
     }
 
     return send(res, 404, { "content-type": "text/plain; charset=utf-8" }, "Not Found");

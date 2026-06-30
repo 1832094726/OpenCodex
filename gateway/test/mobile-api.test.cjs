@@ -1454,36 +1454,7 @@ test("mobile turn handler rejects empty message text", async () => {
   assert.equal(JSON.parse(response.body).error, "Missing message text");
 });
 
-test("request handler serves the mobile-lite shell at /m before the full app shell fallback", async () => {
-  const { createRequestHandler } = require("../runtime/server.cjs");
-  const staticAssets = createStaticAssetService({
-    getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
-    getOfficialBundle: () => null,
-  });
-  const handler = createRequestHandler({
-    localFiles: {},
-    mobileApi: { handleBootstrap: () => assert.fail("mobile bootstrap should not handle shell HTML") },
-    pickedFiles: {},
-    staticAssets,
-  });
-
-  const response = await collectResponse(handler, {
-    headers: { accept: "text/html", host: "127.0.0.1:8080" },
-    method: "GET",
-    socket: { remoteAddress: "127.0.0.1" },
-    url: "/m",
-  });
-
-  assert.equal(response.statusCode, 200);
-  assert.match(response.headers["content-type"], /text\/html/);
-  assert.match(response.body, /data-opencodex-mobile-lite/);
-  assert.match(response.body, /<style data-mobile-inline>/);
-  assert.match(response.body, /<script data-mobile-inline>/);
-  assert.doesNotMatch(response.body, /href="\/mobile\.css"/);
-  assert.doesNotMatch(response.body, /src="\/mobile\.js"/);
-});
-
-test("request handler serves mobile-lite shell for mobile browsers on the root URL", async () => {
+test("request handler keeps the official shell for mobile browsers and enables traffic slimming", async () => {
   const { createRequestHandler } = require("../runtime/server.cjs");
   const staticAssets = createStaticAssetService({
     getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
@@ -1508,12 +1479,38 @@ test("request handler serves mobile-lite shell for mobile browsers on the root U
   });
 
   assert.equal(response.statusCode, 200);
-  assert.match(response.body, /data-opencodex-mobile-lite/);
-  assert.match(response.body, /href="\/\?full=1"/);
-  assert.doesNotMatch(response.body, /opencodex-plugin-loader/);
+  assert.doesNotMatch(response.body, /data-opencodex-mobile-lite/);
+  assert.match(response.body, /mobileTrafficMode":true/);
+  assert.match(response.body, /opencodex-plugin-system/);
+  assert.match(response.body, /config\.mobileTrafficMode\) return/);
 });
 
-test("request handler keeps the full shell available for desktop and explicit mobile full mode", async () => {
+test("request handler no longer serves a standalone mobile-lite shell at /m", async () => {
+  const { createRequestHandler } = require("../runtime/server.cjs");
+  const staticAssets = createStaticAssetService({
+    getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+    getOfficialBundle: () => null,
+  });
+  const handler = createRequestHandler({
+    localFiles: {},
+    mobileApi: { handleBootstrap: () => assert.fail("mobile bootstrap should not handle shell HTML") },
+    pickedFiles: {},
+    staticAssets,
+  });
+
+  const response = await collectResponse(handler, {
+    headers: { accept: "text/html", host: "127.0.0.1:8080" },
+    method: "GET",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/m",
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.doesNotMatch(response.body, /data-opencodex-mobile-lite/);
+  assert.match(response.body, /opencodex-plugin-loader/);
+});
+
+test("request handler keeps desktop and explicit mobile full mode on the full extension profile", async () => {
   const { createRequestHandler } = require("../runtime/server.cjs");
   const staticAssets = createStaticAssetService({
     getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
@@ -1546,63 +1543,8 @@ test("request handler keeps the full shell available for desktop and explicit mo
   assert.equal(explicitFull.statusCode, 200);
   assert.doesNotMatch(desktop.body, /data-opencodex-mobile-lite/);
   assert.doesNotMatch(explicitFull.body, /data-opencodex-mobile-lite/);
+  assert.doesNotMatch(desktop.body, /mobileTrafficMode":true/);
+  assert.doesNotMatch(explicitFull.body, /mobileTrafficMode":true/);
   assert.match(desktop.body, /opencodex-plugin-loader/);
   assert.match(explicitFull.body, /opencodex-plugin-loader/);
-});
-
-test("request handler returns 304 for unchanged mobile-lite shell", async () => {
-  const { createRequestHandler } = require("../runtime/server.cjs");
-  const staticAssets = createStaticAssetService({
-    getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
-    getOfficialBundle: () => null,
-  });
-  const handler = createRequestHandler({
-    localFiles: {},
-    mobileApi: { handleBootstrap: () => assert.fail("mobile bootstrap should not handle shell HTML") },
-    pickedFiles: {},
-    staticAssets,
-  });
-  const first = await collectResponse(handler, {
-    headers: { accept: "text/html", host: "127.0.0.1:8080" },
-    method: "GET",
-    socket: { remoteAddress: "127.0.0.1" },
-    url: "/m",
-  });
-  const second = await collectResponse(handler, {
-    headers: { accept: "text/html", host: "127.0.0.1:8080", "if-none-match": first.headers.etag },
-    method: "GET",
-    socket: { remoteAddress: "127.0.0.1" },
-    url: "/m",
-  });
-
-  assert.equal(first.statusCode, 200);
-  assert.ok(first.headers.etag);
-  assert.equal(first.headers["cache-control"], "no-cache");
-  assert.equal(second.statusCode, 304);
-  assert.equal(second.headers.etag, first.headers.etag);
-  assert.equal(second.body, "");
-});
-
-test("request handler serves the mobile-lite shell for thread deep links", async () => {
-  const { createRequestHandler } = require("../runtime/server.cjs");
-  const staticAssets = createStaticAssetService({
-    getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
-    getOfficialBundle: () => null,
-  });
-  const handler = createRequestHandler({
-    localFiles: {},
-    mobileApi: { handleBootstrap: () => assert.fail("mobile bootstrap should not handle shell HTML") },
-    pickedFiles: {},
-    staticAssets,
-  });
-
-  const response = await collectResponse(handler, {
-    headers: { accept: "text/html", host: "127.0.0.1:8080" },
-    method: "GET",
-    socket: { remoteAddress: "127.0.0.1" },
-    url: "/m/thread/thread-detail-1",
-  });
-
-  assert.equal(response.statusCode, 200);
-  assert.match(response.body, /data-opencodex-mobile-lite/);
 });

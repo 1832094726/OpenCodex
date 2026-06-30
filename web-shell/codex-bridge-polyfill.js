@@ -10,6 +10,7 @@
   // 语言只信任 gateway 启动配置；浏览器侧不自行读配置或按平台猜测。
   const OPENCODEX_LOCALE = cfg.locale || "zh-CN";
   const OPENCODEX_MESSAGES = cfg.messages && typeof cfg.messages === "object" ? cfg.messages : {};
+  const MOBILE_TRAFFIC_MODE = cfg.mobileTrafficMode === true || cfg.mobileTrafficMode === "1";
   function t(key, values) {
     const template = OPENCODEX_MESSAGES[key] || key;
     if (!values || typeof values !== "object") return template;
@@ -2664,6 +2665,10 @@
     "app/list",
     "mcpServerStatus/list",
   ]);
+  const MOBILE_TRAFFIC_LOCAL_METHODS = new Set([
+    "app/list",
+    "mcpServerStatus/list",
+  ]);
   const FAST_SYNC_SNAPSHOT_METHODS = new Set([
     "account/read",
     "config/read",
@@ -2701,6 +2706,12 @@
       return payload.params.method;
     }
     return "";
+  }
+
+  function mobileTrafficLocalAppServerValue(method) {
+    if (!MOBILE_TRAFFIC_MODE || !MOBILE_TRAFFIC_LOCAL_METHODS.has(method)) return null;
+    // 手机官方壳首屏保留会话与输入体验；插件/MCP 管理类状态在手机弱网下本地空响应，避免阻塞 app-server。
+    return [];
   }
 
   function diagnosticThreadIdFromValue(value, depth = 0, seen = new WeakSet()) {
@@ -3110,6 +3121,11 @@
     }
     const localLocaleInfoInvoke = invokeLocaleInfoLocal(payload, diagnosticSummary);
     if (localLocaleInfoInvoke) return localLocaleInfoInvoke;
+    const mobileLocalValue = mobileTrafficLocalAppServerValue(appServerMethod(payload));
+    if (mobileLocalValue !== null) {
+      clientDiagnostic("mobile-traffic-local-state", diagnosticSummary);
+      return Promise.resolve(mobileLocalValue);
+    }
     const cachedReadOnlyAppServerInvoke = invokeReadOnlyAppServerCached(channel, ipcArgs, payload, diagnosticSummary);
     if (cachedReadOnlyAppServerInvoke) return cachedReadOnlyAppServerInvoke;
     const fastSyncInvoke = await invokeFastSyncSnapshot(channel, ipcArgs, payload, diagnosticSummary);

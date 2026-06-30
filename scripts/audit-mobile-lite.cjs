@@ -9,6 +9,8 @@ const DEFAULT_BOOTSTRAP_LIMIT = 50;
 const DEFAULT_THREAD_LIMIT = 120;
 const DEFAULT_WARN_BODY_BYTES = 256 * 1024;
 const DEFAULT_WARN_DURATION_MS = 1_500;
+const MOBILE_AUDIT_USER_AGENT =
+  "Mozilla/5.0 (Linux; Android 15; Mobile) AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36";
 
 function numberFromEnv(name, fallback) {
   const value = Number(process.env[name]);
@@ -47,8 +49,9 @@ function requestOnce(url, headers = {}) {
       target,
       {
         headers: {
-          accept: "application/json,text/html;q=0.9,*/*;q=0.8",
+          accept: "text/html,application/json;q=0.9,*/*;q=0.8",
           "accept-encoding": "gzip,br,deflate",
+          "user-agent": MOBILE_AUDIT_USER_AGENT,
           ...headers,
         },
       },
@@ -122,10 +125,17 @@ function printSummary(summary, config) {
 
 async function auditMobileLite() {
   const config = auditConfig();
-  console.log(`Mobile lite audit base=${config.baseUrl}`);
+  console.log(`Mobile official-shell audit base=${config.baseUrl}`);
 
-  const shell = await requestOnce(resolveUrl(config.baseUrl, "/m"));
+  const shell = await requestOnce(resolveUrl(config.baseUrl, "/"));
   printSummary(summarizeResult("shell", shell), config);
+  const shellText = shell.body.toString("utf8");
+  if (!shellText.includes("mobileTrafficMode")) {
+    throw new Error("Expected mobile official shell to enable mobileTrafficMode");
+  }
+  if (shellText.includes("data-opencodex-mobile-lite")) {
+    throw new Error("Standalone mobile-lite shell should not be served from the phone root");
+  }
 
   const bootstrapPath = `/api/mobile/bootstrap?limit=${encodeURIComponent(String(config.bootstrapLimit))}`;
   const bootstrap = await requestOnce(resolveUrl(config.baseUrl, bootstrapPath));
@@ -168,6 +178,6 @@ async function auditMobileLite() {
 }
 
 auditMobileLite().catch((error) => {
-  console.error(`Mobile lite audit failed: ${error && error.message ? error.message : String(error)}`);
+  console.error(`Mobile official-shell audit failed: ${error && error.message ? error.message : String(error)}`);
   process.exitCode = 1;
 });

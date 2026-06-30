@@ -27,8 +27,6 @@ const OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH = "/codex-window-controls-overl
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH = "/codex-window-controls-overlay.js";
 const CODEX_BRIDGE_POLYFILL_PATH = "/codex-bridge-polyfill.js";
 const CODEX_TOOLTIP_DISMISS_GUARD_PATH = "/codex-tooltip-dismiss-guard.js";
-const MOBILE_CSS_PATH = "/mobile.css";
-const MOBILE_JS_PATH = "/mobile.js";
 const FAVICON_PATH = "/favicon.ico";
 const PWA_MANIFEST_PATH = "/manifest.webmanifest";
 const WEB_SHELL_ASSETS_DIR = path.join(WEB_SHELL_DIR, "assets");
@@ -43,8 +41,6 @@ const WEB_SHELL_STATIC_FILES = new Map([
   [OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.js")],
   [CODEX_BRIDGE_POLYFILL_PATH, path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js")],
   [CODEX_TOOLTIP_DISMISS_GUARD_PATH, path.join(WEB_SHELL_DIR, "codex-tooltip-dismiss-guard.js")],
-  [MOBILE_CSS_PATH, path.join(WEB_SHELL_DIR, "mobile.css")],
-  [MOBILE_JS_PATH, path.join(WEB_SHELL_DIR, "mobile.js")],
   ["/sw-cache.js", path.join(WEB_SHELL_DIR, "sw-cache.js")],
 ]);
 
@@ -235,13 +231,17 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     return html;
   }
 
-  function webShellBootstrapScript(i18n) {
+  function webShellBootstrapScript(i18n, options = {}) {
     const publicConfig = {
       locale: i18n.locale,
       localeSource: i18n.source || "",
       localeMode: i18n.mode || "",
       messages: i18n.messages,
     };
+    if (options.mobileTrafficMode === true) {
+      // 手机流量模式仍保留官方界面，只在前端运行时裁剪插件、预缓存和非关键状态。
+      publicConfig.mobileTrafficMode = true;
+    }
     return `<script>window.__CODEX_WEB_CONFIG__=Object.assign(window.__CODEX_WEB_CONFIG__||{},${JSON.stringify(publicConfig)});</script>`;
   }
 
@@ -283,7 +283,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
 })();\n`;
   }
 
-  function createWebShellIndexResponse() {
+  function createWebShellIndexResponse(options = {}) {
     const shell = path.join(WEB_SHELL_DIR, "index.html");
     const i18n = currentI18n();
     let html = patchWebShellAppVersion(patchHtmlLang(readText(shell), i18n.locale));
@@ -296,24 +296,12 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
         html = html.replace(/<\/head>/i, `${links}\n  </head>`);
       }
     }
-    const bootstrap = webShellBootstrapScript(i18n);
+    const bootstrap = webShellBootstrapScript(i18n, options);
     if (html.includes("<!-- opencodex-runtime-config -->")) {
       html = html.replace("<!-- opencodex-runtime-config -->", bootstrap);
     } else {
       html = html.replace(/<\/head>/i, `    ${bootstrap}\n  </head>`);
     }
-    return html;
-  }
-
-  function createMobileShellResponse() {
-    const shell = path.join(WEB_SHELL_DIR, "mobile.html");
-    const i18n = currentI18n();
-    let html = patchHtmlLang(readText(shell), i18n.locale);
-    const css = readText(path.join(WEB_SHELL_DIR, "mobile.css")).replace(/<\/style/gi, "<\\/style");
-    const js = readText(path.join(WEB_SHELL_DIR, "mobile.js")).replace(/<\/script/gi, "<\\/script");
-    // 手机轻量入口不注入官方 renderer、插件 loader 或 bridge；CSS/JS 直接内联，减少弱网首屏 RTT。
-    html = html.replace(/<link rel="stylesheet" href="\/mobile\.css" \/>/i, () => `<style data-mobile-inline>${css}</style>`);
-    html = html.replace(/<script src="\/mobile\.js"><\/script>/i, () => `<script data-mobile-inline>${js}</script>`);
     return html;
   }
 
@@ -454,30 +442,14 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     send(res, status, headers, response.body);
   }
 
-  function serveWebShellIndex(res) {
+  function serveWebShellIndex(res, options = {}) {
     // web-shell index 总是 no-store，便于调试和升级时立即拿到新的 bridge/polyfill 引用。
     send(
       res,
       200,
       { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
-      createWebShellIndexResponse()
+      createWebShellIndexResponse(options)
     );
-  }
-
-  function serveMobileShell(req, res) {
-    const response = gzipIfUseful(
-      req,
-      { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" },
-      Buffer.from(createMobileShellResponse(), "utf8")
-    );
-    const etag = etagForResponseBody(response.body);
-    const headers = { ...response.headers, etag };
-    if (String(req.headers["if-none-match"] || "") === etag) {
-      // 手机轻量壳内联了 CSS/JS；内容未变时用 304 避免弱网重复传整页。
-      send(res, 304, headers, "");
-      return;
-    }
-    send(res, 200, headers, response.body);
   }
 
   function servePluginLoader(res) {
@@ -547,7 +519,6 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     isAppShellRoute,
     isPublicStaticPath,
     serveFile,
-    serveMobileShell,
     servePluginLoader,
     serveWebShellIndex,
     staticFile,

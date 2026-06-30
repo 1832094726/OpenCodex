@@ -20,7 +20,11 @@
     <!-- opencodex-runtime-config -->
     <!-- Service Worker 早期注册，在登录前就开始预缓存静态资源 -->
     <script>
-      if ("serviceWorker" in navigator && location.protocol === "https:") {
+      if (
+        "serviceWorker" in navigator &&
+        location.protocol === "https:" &&
+        !(window.__CODEX_WEB_CONFIG__ && window.__CODEX_WEB_CONFIG__.mobileTrafficMode)
+      ) {
         navigator.serviceWorker.register("/sw-cache.js", { scope: "/" }).catch(function (e) {
           console.warn("[sw-cache] 早期注册失败", e);
         });
@@ -29,7 +33,14 @@
 
     <script src="/codex-window-controls-overlay.js"></script>
     <script src="/opencodex-plugin-system.js"></script>
-    <script src="/opencodex-plugin-loader.js"></script>
+    <script>
+      (function () {
+        var config = window.__CODEX_WEB_CONFIG__ || {};
+        if (config.mobileTrafficMode) return;
+        // 手机流量模式保留官方主界面，但跳过 OpenCodex 插件扩展，避免首屏加载额外脚本和后台状态。
+        document.write('<script src="/opencodex-plugin-loader.js"><\\/script>');
+      })();
+    </script>
     <style>
       :root {
         color-scheme: light;
