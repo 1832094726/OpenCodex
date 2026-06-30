@@ -313,7 +313,7 @@ function createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets
 
     if ((pathname === "/m" || pathname.startsWith("/m/thread/")) && req.method === "GET") {
       // 手机轻量入口必须早于通用 SPA fallback，否则会加载完整官方 renderer 和大量桌面状态。
-      return staticAssets.serveMobileShell(res);
+      return staticAssets.serveMobileShell(req, res);
     }
 
     if (staticAssets.isAppShellRoute(req, pathname)) {

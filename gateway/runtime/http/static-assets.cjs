@@ -308,8 +308,13 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   function createMobileShellResponse() {
     const shell = path.join(WEB_SHELL_DIR, "mobile.html");
     const i18n = currentI18n();
-    // 手机轻量入口不注入官方 renderer、插件 loader 或 bridge，避免弱网下启动完整桌面状态同步。
-    return patchHtmlLang(readText(shell), i18n.locale);
+    let html = patchHtmlLang(readText(shell), i18n.locale);
+    const css = readText(path.join(WEB_SHELL_DIR, "mobile.css")).replace(/<\/style/gi, "<\\/style");
+    const js = readText(path.join(WEB_SHELL_DIR, "mobile.js")).replace(/<\/script/gi, "<\\/script");
+    // 手机轻量入口不注入官方 renderer、插件 loader 或 bridge；CSS/JS 直接内联，减少弱网首屏 RTT。
+    html = html.replace(/<link rel="stylesheet" href="\/mobile\.css" \/>/i, () => `<style data-mobile-inline>${css}</style>`);
+    html = html.replace(/<script src="\/mobile\.js"><\/script>/i, () => `<script data-mobile-inline>${js}</script>`);
+    return html;
   }
 
   function isPublicStaticPath(reqPath) {
@@ -459,13 +464,13 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     );
   }
 
-  function serveMobileShell(res) {
-    send(
-      res,
-      200,
+  function serveMobileShell(req, res) {
+    const response = gzipIfUseful(
+      req,
       { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
-      createMobileShellResponse()
+      Buffer.from(createMobileShellResponse(), "utf8")
     );
+    send(res, 200, response.headers, response.body);
   }
 
   function servePluginLoader(res) {

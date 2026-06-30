@@ -627,6 +627,10 @@ test("request handler serves the mobile-lite shell at /m before the full app she
   assert.equal(response.statusCode, 200);
   assert.match(response.headers["content-type"], /text\/html/);
   assert.match(response.body, /data-opencodex-mobile-lite/);
+  assert.match(response.body, /<style data-mobile-inline>/);
+  assert.match(response.body, /<script data-mobile-inline>/);
+  assert.doesNotMatch(response.body, /href="\/mobile\.css"/);
+  assert.doesNotMatch(response.body, /src="\/mobile\.js"/);
 });
 
 test("request handler serves the mobile-lite shell for thread deep links", async () => {
