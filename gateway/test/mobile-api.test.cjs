@@ -451,6 +451,77 @@ test("listLocalSessionThreadDetail keeps a full-scan fallback for older deep lin
   assert.equal(detail.metrics.lookupSource, "scan");
 });
 
+test("local mobile history reads avoid loading whole large session files", () => {
+  const root = tempDir();
+  const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const file = path.join(sessionsDir, "rollout-2026-06-30T10-00-00-large-alias.jsonl");
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T10:00:00.000Z",
+        type: "session_meta",
+        payload: {
+          cwd: "/repo/window-read",
+          session_id: "thread-window-read",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T10:00:01.000Z",
+        type: "event_msg",
+        payload: {
+          message: "大文件也只读头尾窗口",
+          type: "user_message",
+        },
+      }),
+      ...Array.from({ length: 1200 }, (_, index) =>
+        JSON.stringify({
+          type: "internal_state",
+          payload: { index, blob: "x".repeat(1024) },
+        })
+      ),
+      JSON.stringify({
+        timestamp: "2026-06-30T10:20:00.000Z",
+        type: "response_item",
+        payload: {
+          content: [{ text: "尾部消息仍然可见", type: "output_text" }],
+          role: "assistant",
+          type: "message",
+        },
+      }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const originalReadFileSync = fs.readFileSync;
+  fs.readFileSync = function patchedReadFileSync(target, ...args) {
+    if (path.resolve(String(target)) === file) throw new Error("mobile path must not read the whole session file");
+    return originalReadFileSync.call(this, target, ...args);
+  };
+  try {
+    const threads = listLocalSessionThreads({ cacheTtlMs: 0, codexHome: root, limit: 5 });
+    const detail = listLocalSessionThreadDetail({
+      cacheTtlMs: 0,
+      codexHome: root,
+      limit: 5,
+      threadId: "thread-window-read",
+    });
+
+    assert.equal(threads[0].id, "thread-window-read");
+    assert.equal(detail.ok, true);
+    assert.equal(detail.thread.id, "thread-window-read");
+    assert.equal(detail.thread.title, "大文件也只读头尾窗口");
+    assert.deepEqual(
+      detail.messages.map((message) => message.text),
+      ["尾部消息仍然可见"]
+    );
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+  }
+});
+
 test("listLocalSessionThreadDetail reads recent messages from the tail of large histories", () => {
   const root = tempDir();
   const sessionsDir = path.join(root, "sessions", "2026", "06", "30");

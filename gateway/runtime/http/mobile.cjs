@@ -14,6 +14,7 @@ const MOBILE_THREAD_DETAIL_TAIL_BYTES = 512 * 1024;
 const MOBILE_MESSAGE_TEXT_MAX_CHARS = 12_000;
 const MOBILE_THREAD_LIST_CACHE_TTL_MS = 5_000;
 const MOBILE_THREAD_FIND_RECENT_FILE_LIMIT = 600;
+const MOBILE_SESSION_META_HEAD_BYTES = 64 * 1024;
 const localSessionFileCache = new Map();
 const localThreadListCache = new Map();
 
@@ -181,7 +182,7 @@ function matchLocalSessionFile(threadId, root, filePath) {
     return { archived: root.archived, filePath };
   }
   try {
-    const firstLine = fs.readFileSync(filePath, "utf8").split(/\r?\n/, 1)[0] || "";
+    const firstLine = readFileHeadLines(filePath, 1)[0] || "";
     const record = JSON.parse(firstLine);
     const payload = record && record.payload && typeof record.payload === "object" ? record.payload : {};
     if (firstString(payload.session_id, payload.id) === threadId) return { archived: root.archived, filePath };
@@ -280,7 +281,7 @@ function sessionThreadFromFile(filePath, archived) {
     updatedAt: stat.mtime.toISOString(),
   };
   try {
-    const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/).filter(Boolean).slice(0, 40);
+    const lines = readFileHeadLines(filePath, 40);
     for (const line of lines) {
       let record = null;
       try {
@@ -316,6 +317,14 @@ function readFileWindow(filePath, start, length) {
   } catch {
     return "";
   }
+}
+
+function readFileHeadLines(filePath, maxLines, maxBytes = MOBILE_SESSION_META_HEAD_BYTES) {
+  // 会话文件可能很大，读取元信息和标题时只需要头部窗口，不能为了第一行把整段历史读进内存。
+  return jsonlLinesFromWindow(readFileWindow(filePath, 0, Math.max(1024, Number(maxBytes) || MOBILE_SESSION_META_HEAD_BYTES))).slice(
+    0,
+    Math.max(1, Number(maxLines) || 1)
+  );
 }
 
 function jsonlLinesFromWindow(text, options = {}) {
