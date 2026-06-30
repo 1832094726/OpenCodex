@@ -154,11 +154,13 @@
     if (role) role.textContent = "你";
   }
 
-  function connectThreadEvents(threadId) {
+  function connectThreadEvents(threadId, sinceOffset) {
     if (!("EventSource" in window)) return;
     if (threadEvents) threadEvents.close();
+    const offset = Number(sinceOffset);
+    const query = Number.isFinite(offset) && offset >= 0 ? `?sinceOffset=${encodeURIComponent(String(Math.floor(offset)))}` : "";
     // 增量通道只订阅当前会话，避免手机端恢复完整官方 WS/app-host 状态流。
-    threadEvents = new EventSource(`/api/mobile/thread/${encodeURIComponent(threadId)}/events`);
+    threadEvents = new EventSource(`/api/mobile/thread/${encodeURIComponent(threadId)}/events${query}`);
     threadEvents.addEventListener("ready", () => {
       setText(statusEl, "已连接当前会话增量");
     });
@@ -275,7 +277,7 @@
     const cached = readMobileCache("thread", threadId);
     if (cached) {
       renderThreadPayload(threadId, cached, "已加载本地快照，正在刷新");
-      connectThreadEvents(threadId);
+      connectThreadEvents(threadId, cached.metrics && cached.metrics.nextEventOffset);
     }
     // 详情页只读取当前会话的轻量消息，实时增量会在这个边界上继续扩展。
     try {
@@ -292,7 +294,7 @@
       const payload = await response.json();
       writeMobileCache("thread", threadId, payload);
       renderThreadPayload(threadId, payload);
-      connectThreadEvents(threadId);
+      connectThreadEvents(threadId, payload.metrics && payload.metrics.nextEventOffset);
     } catch (error) {
       if (cached) {
         setText(statusEl, `刷新失败，继续使用本地快照：${error && error.message ? error.message : String(error)}`);

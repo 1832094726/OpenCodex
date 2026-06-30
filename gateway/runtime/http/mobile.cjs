@@ -405,6 +405,7 @@ function parseSessionFile(filePath, archived, options = {}) {
       fileBytes: stat.size,
       headBytesRead: Math.min(stat.size, headBytes),
       messageCount: messages.length,
+      nextEventOffset: stat.size,
       tailBytesRead: Math.min(stat.size, tailBytes),
       truncatedCount: messages.filter((message) => message && message.truncated).length,
       windowed: stat.size > headBytes + tailBytes,

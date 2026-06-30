@@ -590,6 +590,7 @@ test("listLocalSessionThreadDetail reads recent messages from the tail of large 
   assert.equal(detail.thread.id, "thread-large-1");
   assert.equal(detail.thread.projectPath, "/repo/large-mobile");
   assert.equal(detail.thread.title, "这是很早之前的消息，不应该压到手机详情");
+  assert.equal(detail.metrics.nextEventOffset, fs.statSync(file).size);
   assert.deepEqual(
     detail.messages.map((message) => message.text),
     ["最近用户消息", "最近助手回复"]
@@ -738,6 +739,59 @@ test("createMobileThreadEventStream emits only appended visible messages and cle
   assert.match(output, /收到，继续只推增量。/);
   assert.doesNotMatch(output, /旧消息不应该重复推送/);
   assert.doesNotMatch(output, /environment_context/);
+
+  harness.close();
+  assert.equal(stream.closed(), true);
+});
+
+test("createMobileThreadEventStream resumes from detail snapshot offset", async () => {
+  const root = tempDir();
+  const file = path.join(root, "thread-offset.jsonl");
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:00.000Z",
+        type: "event_msg",
+        payload: { message: "详情快照里已有的消息", type: "user_message" },
+      }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  const snapshotOffset = fs.statSync(file).size;
+  fs.appendFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:01.000Z",
+        type: "response_item",
+        payload: {
+          content: [{ text: "连接前写入，也必须补发", type: "output_text" }],
+          role: "assistant",
+          type: "message",
+        },
+      }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  const harness = createStreamHarness();
+
+  const stream = createMobileThreadEventStream({
+    filePath: file,
+    pollMs: 10,
+    req: harness.req,
+    res: harness.res,
+    sinceOffset: snapshotOffset,
+    threadId: "thread-sse-offset",
+  });
+
+  await wait(40);
+  const output = harness.writes.join("");
+  assert.match(output, new RegExp(`id: ${snapshotOffset}\\n`));
+  assert.match(output, /连接前写入，也必须补发/);
+  assert.doesNotMatch(output, /详情快照里已有的消息/);
 
   harness.close();
   assert.equal(stream.closed(), true);

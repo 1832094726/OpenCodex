@@ -34,3 +34,11 @@ test("mobile lite cache stays scoped to trimmed mobile payloads", () => {
   assert.match(source, /payload\.ok !== true/);
   assert.doesNotMatch(source, /plugin\/list|mcpServerStatus\/list|desktop-state/);
 });
+
+test("mobile lite connects realtime events from the detail snapshot offset", () => {
+  const source = readMobileSource();
+
+  assert.match(source, /nextEventOffset/);
+  assert.match(source, /sinceOffset=/);
+  assert.match(source, /connectThreadEvents\(threadId, payload\.metrics && payload\.metrics\.nextEventOffset\)/);
+});
