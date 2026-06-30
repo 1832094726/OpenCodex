@@ -139,6 +139,10 @@
     return MOBILE_THREAD_LIMIT_DEFAULT;
   }
 
+  function shouldReuseFreshCacheWithoutRefresh() {
+    return mobileNetworkTier() === "constrained";
+  }
+
   function mobileBootstrapUrl() {
     return `/api/mobile/bootstrap?limit=${encodeURIComponent(String(bootstrapThreadLimit()))}`;
   }
@@ -368,6 +372,11 @@
     const cached = readMobileCache("bootstrap", "list");
     if (cached) {
       renderBootstrapPayload(cached, "已加载本地快照，正在刷新");
+      if (shouldReuseFreshCacheWithoutRefresh()) {
+        // 省流量网络下短缓存已经足够支撑首屏；避免重复拉取完整列表状态。
+        setText(statusEl, "已加载本地快照，省流量模式下暂停刷新");
+        return;
+      }
     }
     // 手机入口只请求合并后的轻量状态，不加载官方 bridge，避免弱网下被插件/MCP/桌面状态拖慢。
     try {
@@ -406,6 +415,11 @@
     if (cached) {
       renderThreadPayload(threadId, cached, "已加载本地快照，正在刷新");
       connectThreadEvents(threadId, cached.metrics && cached.metrics.nextEventOffset);
+      if (shouldReuseFreshCacheWithoutRefresh()) {
+        // 当前会话的新内容由 SSE 增量补齐，省流量网络不再重复拉取详情快照。
+        setText(statusEl, "已加载本地快照，省流量模式下只同步增量");
+        return;
+      }
     }
     // 详情页只读取当前会话的轻量消息，实时增量会在这个边界上继续扩展。
     try {

@@ -48,6 +48,17 @@ test("mobile lite keeps a short persistent cache for reloads under weak networks
   assert.match(source, /writeMobileCacheTo\(localStorage, kind, id, payload\)/);
 });
 
+test("mobile lite reuses fresh cache without full refresh on constrained networks", () => {
+  const source = readMobileSource();
+
+  assert.match(source, /function shouldReuseFreshCacheWithoutRefresh\(\)/);
+  assert.match(source, /mobileNetworkTier\(\) === "constrained"/);
+  assert.match(source, /已加载本地快照，省流量模式下暂停刷新/);
+  assert.match(source, /已加载本地快照，省流量模式下只同步增量/);
+  assert.match(source, /connectThreadEvents\(threadId, cached\.metrics && cached\.metrics\.nextEventOffset\)/);
+  assert.match(source, /if \(shouldReuseFreshCacheWithoutRefresh\(\)\) \{/);
+});
+
 test("mobile lite prunes only its own persistent cache entries", () => {
   const source = readMobileSource();
 
