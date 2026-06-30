@@ -18,6 +18,9 @@
   const MOBILE_BOOTSTRAP_LIMIT_DEFAULT = 50;
   const MOBILE_BOOTSTRAP_LIMIT_CONSTRAINED = 12;
   const MOBILE_BOOTSTRAP_LIMIT_CELLULAR = 24;
+  const MOBILE_THREAD_LIMIT_DEFAULT = 120;
+  const MOBILE_THREAD_LIMIT_CONSTRAINED = 40;
+  const MOBILE_THREAD_LIMIT_CELLULAR = 80;
   let threadEvents = null;
   let activeThreadId = "";
 
@@ -53,18 +56,36 @@
     return `${MOBILE_CACHE_PREFIX}${kind}:${id || "default"}`;
   }
 
-  function bootstrapThreadLimit() {
+  function mobileNetworkTier() {
     const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-    if (!connection) return MOBILE_BOOTSTRAP_LIMIT_DEFAULT;
+    if (!connection) return "default";
     const effectiveType = String(connection.effectiveType || "").toLowerCase();
-    // 省流量或极慢网络下只拉最近少量会话；当前会话详情和 SSE 增量仍按需单独加载。
-    if (connection.saveData || effectiveType === "slow-2g" || effectiveType === "2g") return MOBILE_BOOTSTRAP_LIMIT_CONSTRAINED;
-    if (effectiveType === "3g") return MOBILE_BOOTSTRAP_LIMIT_CELLULAR;
+    // 省流量或极慢网络下只拉最近少量历史；当前会话后续内容仍通过 SSE 增量补齐。
+    if (connection.saveData || effectiveType === "slow-2g" || effectiveType === "2g") return "constrained";
+    if (effectiveType === "3g") return "cellular";
+    return "default";
+  }
+
+  function bootstrapThreadLimit() {
+    const tier = mobileNetworkTier();
+    if (tier === "constrained") return MOBILE_BOOTSTRAP_LIMIT_CONSTRAINED;
+    if (tier === "cellular") return MOBILE_BOOTSTRAP_LIMIT_CELLULAR;
     return MOBILE_BOOTSTRAP_LIMIT_DEFAULT;
+  }
+
+  function threadMessageLimit() {
+    const tier = mobileNetworkTier();
+    if (tier === "constrained") return MOBILE_THREAD_LIMIT_CONSTRAINED;
+    if (tier === "cellular") return MOBILE_THREAD_LIMIT_CELLULAR;
+    return MOBILE_THREAD_LIMIT_DEFAULT;
   }
 
   function mobileBootstrapUrl() {
     return `/api/mobile/bootstrap?limit=${encodeURIComponent(String(bootstrapThreadLimit()))}`;
+  }
+
+  function mobileThreadUrl(threadId) {
+    return `/api/mobile/thread/${encodeURIComponent(threadId)}?limit=${encodeURIComponent(String(threadMessageLimit()))}`;
   }
 
   function readMobileCache(kind, id) {
@@ -319,7 +340,7 @@
     }
     // 详情页只读取当前会话的轻量消息，实时增量会在这个边界上继续扩展。
     try {
-      const payload = await fetchJsonWithTimeout(`/api/mobile/thread/${encodeURIComponent(threadId)}`, {
+      const payload = await fetchJsonWithTimeout(mobileThreadUrl(threadId), {
         cache: "no-store",
         credentials: "same-origin",
         headers: { accept: "application/json" },
