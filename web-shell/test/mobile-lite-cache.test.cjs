@@ -42,3 +42,16 @@ test("mobile lite connects realtime events from the detail snapshot offset", () 
   assert.match(source, /sinceOffset=/);
   assert.match(source, /connectThreadEvents\(threadId, payload\.metrics && payload\.metrics\.nextEventOffset\)/);
 });
+
+test("mobile lite fetches use timeouts so weak networks do not hang forever", () => {
+  const source = readMobileSource();
+
+  assert.match(source, /MOBILE_READ_TIMEOUT_MS = 8_000/);
+  assert.match(source, /MOBILE_SEND_TIMEOUT_MS = 30_000/);
+  assert.match(source, /AbortController/);
+  assert.match(source, /controller\.abort\(\)/);
+  assert.match(source, /请求超时/);
+  assert.match(source, /fetchJsonWithTimeout\("\/api\/mobile\/bootstrap"/);
+  assert.match(source, /fetchJsonWithTimeout\(`\/api\/mobile\/thread\/\$\{encodeURIComponent\(threadId\)\}`/);
+  assert.match(source, /fetchJsonWithTimeout\(`\/api\/mobile\/thread\/\$\{encodeURIComponent\(activeThreadId\)\}\/turns`/);
+});

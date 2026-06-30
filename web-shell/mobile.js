@@ -13,6 +13,8 @@
   const composeSendEl = document.getElementById("mobile-compose-send");
   const MOBILE_CACHE_PREFIX = "opencodex.mobile-lite.";
   const MOBILE_CACHE_TTL_MS = 60_000;
+  const MOBILE_READ_TIMEOUT_MS = 8_000;
+  const MOBILE_SEND_TIMEOUT_MS = 30_000;
   let threadEvents = null;
   let activeThreadId = "";
 
@@ -76,6 +78,34 @@
         })
       );
     } catch {}
+  }
+
+  async function fetchJsonWithTimeout(url, options, timeoutMs) {
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : MOBILE_READ_TIMEOUT_MS;
+    const timer = controller
+      ? setTimeout(() => {
+          // 弱网请求不能无限挂住；超时后交给缓存兜底或页面错误态处理。
+          controller.abort();
+        }, timeout)
+      : null;
+    try {
+      const response = await fetch(url, {
+        ...(options || {}),
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+      if (response.status === 401) {
+        location.href = "/";
+        return null;
+      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    } catch (error) {
+      if (error && error.name === "AbortError") throw new Error(`请求超时（${Math.round(timeout / 1000)} 秒）`);
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   function renderThreads(threads) {
@@ -200,7 +230,7 @@
     // 手机端先显示本地 pending，真正的追加内容仍通过当前会话 SSE 收敛回来。
     appendMessage({ role: "user", text }, { localSendId, pending: true });
     try {
-      const response = await fetch(`/api/mobile/thread/${encodeURIComponent(activeThreadId)}/turns`, {
+      const payload = await fetchJsonWithTimeout(`/api/mobile/thread/${encodeURIComponent(activeThreadId)}/turns`, {
         body: JSON.stringify({ localSendId, text }),
         cache: "no-store",
         credentials: "same-origin",
@@ -209,13 +239,9 @@
           "content-type": "application/json",
         },
         method: "POST",
-      });
-      if (response.status === 401) {
-        location.href = "/";
-        return;
-      }
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || !payload.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      }, MOBILE_SEND_TIMEOUT_MS);
+      if (!payload) return;
+      if (!payload.ok) throw new Error(payload.error || "发送失败");
       if (statusEl) statusEl.classList.remove("error");
       markPendingAccepted(localSendId);
       setText(statusEl, payload.duplicate ? "消息已提交，重复请求已合并" : "消息已提交，等待增量回包");
@@ -238,17 +264,12 @@
     }
     // 手机入口只请求合并后的轻量状态，不加载官方 bridge，避免弱网下被插件/MCP/桌面状态拖慢。
     try {
-      const response = await fetch("/api/mobile/bootstrap", {
+      const payload = await fetchJsonWithTimeout("/api/mobile/bootstrap", {
         cache: "no-store",
         credentials: "same-origin",
         headers: { accept: "application/json" },
-      });
-      if (response.status === 401) {
-        location.href = "/";
-        return;
-      }
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = await response.json();
+      }, MOBILE_READ_TIMEOUT_MS);
+      if (!payload) return;
       writeMobileCache("bootstrap", "list", payload);
       renderBootstrapPayload(payload);
     } catch (error) {
@@ -281,17 +302,12 @@
     }
     // 详情页只读取当前会话的轻量消息，实时增量会在这个边界上继续扩展。
     try {
-      const response = await fetch(`/api/mobile/thread/${encodeURIComponent(threadId)}`, {
+      const payload = await fetchJsonWithTimeout(`/api/mobile/thread/${encodeURIComponent(threadId)}`, {
         cache: "no-store",
         credentials: "same-origin",
         headers: { accept: "application/json" },
-      });
-      if (response.status === 401) {
-        location.href = "/";
-        return;
-      }
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = await response.json();
+      }, MOBILE_READ_TIMEOUT_MS);
+      if (!payload) return;
       writeMobileCache("thread", threadId, payload);
       renderThreadPayload(threadId, payload);
       connectThreadEvents(threadId, payload.metrics && payload.metrics.nextEventOffset);
