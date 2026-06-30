@@ -80,6 +80,17 @@ test("mobile lite connects realtime events from the detail snapshot offset", () 
   assert.match(source, /connectThreadEvents\(threadId, nextThreadEventOffset\(payload\)\)/);
 });
 
+test("mobile lite keeps an existing realtime connection for unchanged detail refreshes", () => {
+  const source = readMobileSource();
+
+  assert.match(source, /threadEventsThreadId/);
+  assert.match(source, /threadEventsRequestedOffset/);
+  assert.match(source, /threadEvents && threadEventsThreadId === threadId/);
+  assert.match(source, /requestedOffset <= threadEventsRequestedOffset/);
+  assert.match(source, /return;/);
+  assert.match(source, /threadEventsThreadId = ""/);
+});
+
 test("mobile lite confirms matching pending user messages instead of duplicating them", () => {
   const source = readMobileSource();
 

@@ -24,6 +24,8 @@
   const MOBILE_THREAD_LIMIT_CONSTRAINED = 40;
   const MOBILE_THREAD_LIMIT_CELLULAR = 80;
   let threadEvents = null;
+  let threadEventsThreadId = "";
+  let threadEventsRequestedOffset = null;
   let activeThreadId = "";
   let activeThreadEventOffset = null;
   let lastBootstrapFingerprint = "";
@@ -335,17 +337,29 @@
     if (!threadEvents) return;
     threadEvents.close();
     threadEvents = null;
+    threadEventsThreadId = "";
+    threadEventsRequestedOffset = null;
     if (statusText) setText(statusEl, statusText);
   }
 
   function connectThreadEvents(threadId, sinceOffset) {
     if (!("EventSource" in window)) return;
-    closeThreadEvents();
     const offset = Number(sinceOffset == null ? activeThreadEventOffset : sinceOffset);
-    const query = Number.isFinite(offset) && offset >= 0 ? `?sinceOffset=${encodeURIComponent(String(Math.floor(offset)))}` : "";
-    if (Number.isFinite(offset) && offset >= 0) activeThreadEventOffset = Math.floor(offset);
+    const requestedOffset = Number.isFinite(offset) && offset >= 0 ? Math.floor(offset) : null;
+    if (threadEvents && threadEventsThreadId === threadId) {
+      const hasKnownOffset = Number.isFinite(Number(threadEventsRequestedOffset));
+      if (requestedOffset == null || (hasKnownOffset && requestedOffset <= threadEventsRequestedOffset)) {
+        // 详情刷新返回 304 或同一快照时，保留现有 SSE；弱网下避免无意义断开和重建长连接。
+        return;
+      }
+    }
+    closeThreadEvents();
+    const query = requestedOffset != null ? `?sinceOffset=${encodeURIComponent(String(requestedOffset))}` : "";
+    if (requestedOffset != null) activeThreadEventOffset = requestedOffset;
     // 增量通道只订阅当前会话，避免手机端恢复完整官方 WS/app-host 状态流。
     threadEvents = new EventSource(`/api/mobile/thread/${encodeURIComponent(threadId)}/events${query}`);
+    threadEventsThreadId = threadId;
+    threadEventsRequestedOffset = requestedOffset;
     threadEvents.addEventListener("ready", (event) => {
       rememberThreadEventOffset(event);
       setText(statusEl, "已连接当前会话增量");
