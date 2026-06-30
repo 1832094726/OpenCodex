@@ -78,6 +78,18 @@ test("mobile lite connects realtime events from the detail snapshot offset", () 
   assert.match(source, /connectThreadEvents\(threadId, payload\.metrics && payload\.metrics\.nextEventOffset\)/);
 });
 
+test("mobile lite confirms matching pending user messages instead of duplicating them", () => {
+  const source = readMobileSource();
+
+  assert.match(source, /function normalizeMessageText\(value\)/);
+  assert.match(source, /item\.dataset\.pendingText = normalizeMessageText\(message\.text\)/);
+  assert.match(source, /function confirmMatchingPendingUserMessage\(message\)/);
+  assert.match(source, /message\.role !== "user"/);
+  assert.match(source, /querySelectorAll\("\.message\.user\.pending"\)/);
+  assert.match(source, /candidate\.dataset\.pendingText === text/);
+  assert.match(source, /if \(confirmMatchingPendingUserMessage\(message\)\) return/);
+});
+
 test("mobile lite pauses realtime events while the page is hidden", () => {
   const source = readMobileSource();
 

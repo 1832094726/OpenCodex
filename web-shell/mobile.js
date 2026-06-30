@@ -55,6 +55,10 @@
     return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
   }
 
+  function normalizeMessageText(value) {
+    return String(value == null ? "" : value).trim();
+  }
+
   function mobileCacheKey(kind, id) {
     return `${MOBILE_CACHE_PREFIX}${kind}:${id || "default"}`;
   }
@@ -246,6 +250,7 @@
     item.className = `message ${message.role === "user" ? "user" : "assistant"}`;
     if (options && options.pending) item.classList.add("pending");
     if (options && options.localSendId) item.dataset.localSendId = options.localSendId;
+    if (options && options.pending) item.dataset.pendingText = normalizeMessageText(message.text);
 
     const role = document.createElement("span");
     role.className = "message-role";
@@ -268,6 +273,21 @@
     item.classList.remove("pending");
     const role = item.querySelector(".message-role");
     if (role) role.textContent = "你";
+  }
+
+  function confirmMatchingPendingUserMessage(message) {
+    if (!message || message.role !== "user") return false;
+    const text = normalizeMessageText(message.text);
+    if (!text) return false;
+    const pendingItems = Array.from(messageListEl.querySelectorAll(".message.user.pending"));
+    const item = pendingItems.find((candidate) => candidate.dataset.pendingText === text);
+    if (!item) return false;
+    // SSE 回来同一条用户增量时只确认本地 pending，避免手机端重复展示和重复计数。
+    item.classList.remove("pending");
+    delete item.dataset.pendingText;
+    const role = item.querySelector(".message-role");
+    if (role) role.textContent = "你";
+    return true;
   }
 
   function rememberThreadEventOffset(event) {
@@ -301,6 +321,7 @@
         if (!message || !message.text) return;
         const empty = messageListEl.querySelector(".empty");
         if (empty) empty.remove();
+        if (confirmMatchingPendingUserMessage(message)) return;
         appendMessage(message);
         const count = Number(countEl.textContent || 0);
         setText(countEl, Number.isFinite(count) ? count + 1 : messageListEl.querySelectorAll(".message").length);
