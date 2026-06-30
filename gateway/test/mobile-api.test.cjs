@@ -1485,6 +1485,54 @@ test("request handler keeps the official shell for mobile browsers and enables t
   assert.match(response.body, /config\.mobileTrafficMode\) return/);
 });
 
+test("request handler serves the official renderer directly when it is available", async () => {
+  const { createRequestHandler } = require("../runtime/server.cjs");
+  const calls = [];
+  const staticAssets = {
+    createRendererResponse(options) {
+      calls.push(options);
+      // 已认证/免密入口直接返回官方 renderer，避免登录壳再 document.write 造成空白页。
+      return options && options.mobileTrafficMode
+        ? '<html><head><script src="/codex-web-config.js"></script><!-- mobile renderer --></head><body><div id="root">official mobile</div></body></html>'
+        : '<html><head><script src="/opencodex-plugin-loader.js"></script></head><body><div id="root">official desktop</div></body></html>';
+    },
+    isAppShellRoute: (req, pathname) => req.method === "GET" && (pathname === "/" || pathname === "/m"),
+    isPublicStaticPath: () => false,
+    staticFile: () => null,
+    serveWebShellIndex: () => assert.fail("authenticated app shell should not fall back to login shell"),
+  };
+  const handler = createRequestHandler({
+    localFiles: {},
+    mobileApi: { handleBootstrap: () => assert.fail("mobile bootstrap should not handle shell HTML") },
+    pickedFiles: {},
+    staticAssets,
+  });
+
+  const desktop = await collectResponse(handler, {
+    headers: { accept: "text/html", host: "127.0.0.1:8080", "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" },
+    method: "GET",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/",
+  });
+  const mobile = await collectResponse(handler, {
+    headers: {
+      accept: "text/html",
+      host: "127.0.0.1:8080",
+      "user-agent": "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Mobile Safari/537.36",
+    },
+    method: "GET",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/",
+  });
+
+  assert.equal(desktop.statusCode, 200);
+  assert.equal(mobile.statusCode, 200);
+  assert.match(desktop.body, /official desktop/);
+  assert.match(mobile.body, /official mobile/);
+  assert.equal(calls[0].mobileTrafficMode, false);
+  assert.equal(calls[1].mobileTrafficMode, true);
+});
+
 test("request handler no longer serves a standalone mobile-lite shell at /m", async () => {
   const { createRequestHandler } = require("../runtime/server.cjs");
   const staticAssets = createStaticAssetService({

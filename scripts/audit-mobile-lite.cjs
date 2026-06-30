@@ -130,11 +130,18 @@ async function auditMobileLite() {
   const shell = await requestOnce(resolveUrl(config.baseUrl, "/"));
   printSummary(summarizeResult("shell", shell), config);
   const shellText = shell.body.toString("utf8");
-  if (!shellText.includes("mobileTrafficMode")) {
-    throw new Error("Expected mobile official shell to enable mobileTrafficMode");
+  if (!shellText.includes("/codex-bridge-polyfill.js")) {
+    throw new Error("Expected phone root to serve the official renderer with the OpenCodex bridge");
   }
   if (shellText.includes("data-opencodex-mobile-lite")) {
     throw new Error("Standalone mobile-lite shell should not be served from the phone root");
+  }
+
+  const runtimeConfig = await requestOnce(resolveUrl(config.baseUrl, "/codex-web-config.js"));
+  printSummary(summarizeResult("config", runtimeConfig), config);
+  const runtimeConfigText = runtimeConfig.body.toString("utf8");
+  if (!runtimeConfigText.includes("mobileTrafficMode: true")) {
+    throw new Error("Expected mobile runtime config to enable mobileTrafficMode");
   }
 
   const bootstrapPath = `/api/mobile/bootstrap?limit=${encodeURIComponent(String(config.bootstrapLimit))}`;

@@ -76,6 +76,30 @@ function isMobileHtmlRequest(req, pathname, url) {
   return /Android|iPhone|iPad|iPod|Mobile|Windows Phone|Mobi/i.test(userAgent);
 }
 
+function isMobileTrafficRequest(req, url) {
+  if (url && url.searchParams.get("full") === "1") return false;
+  const userAgent = String((req && req.headers && req.headers["user-agent"]) || "");
+  return /Android|iPhone|iPad|iPod|Mobile|Windows Phone|Mobi/i.test(userAgent);
+}
+
+function rendererOptionsForRequest(req, url) {
+  return { mobileTrafficMode: isMobileTrafficRequest(req, url) };
+}
+
+function serveOfficialRendererOrShell(req, res, url, staticAssets) {
+  const requestAuth = AUTH_PASSWORD_HASH ? authResultForRequest(req, url) : null;
+  const canServeRenderer = !AUTH_PASSWORD_HASH || requestAuth.authenticated;
+  if (canServeRenderer) {
+    const html = staticAssets.createRendererResponse(rendererOptionsForRequest(req, url));
+    if (html) {
+      // 已认证或未启用密码时直接返回官方 renderer，绕开客户端 document.write 白屏路径。
+      return send(res, 200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }, html);
+    }
+  }
+  // 未认证时仍返回登录壳；登录成功后再进入受保护的官方 renderer。
+  return staticAssets.serveWebShellIndex(res, { mobileTrafficMode: isMobileHtmlRequest(req, url.pathname, url) });
+}
+
 function remoteAddressFromRequest(req) {
   return String(req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "");
 }
@@ -325,7 +349,7 @@ function createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets
     if (staticAssets.isAppShellRoute(req, pathname)) {
       // index shell 允许公开返回；后续 renderer 资源、API 和 WS 再走 token 校验。
       // 这么做可以让未登录用户刷新任意前端路由时仍回到登录体验，而不是直接 401 文本页。
-      return staticAssets.serveWebShellIndex(res, { mobileTrafficMode: isMobileHtmlRequest(req, pathname, url) });
+      return serveOfficialRendererOrShell(req, res, url, staticAssets);
     }
 
     // 从这里开始进入受保护区：官方 renderer、IPC API、本地文件和诊断接口都不能匿名访问。
@@ -347,7 +371,7 @@ function createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets
           "cache-control": "no-store",
           ...requestAuthRefreshHeaders,
         },
-        await webConfigScript()
+        await webConfigScript(rendererOptionsForRequest(req, url))
       );
     }
 
@@ -442,7 +466,7 @@ function createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets
 
     if (pathname === "/official-index.patched.html") {
       // 保留这个调试入口，便于单独查看官方 renderer HTML 的注入和 CSP patch 结果。
-      const html = staticAssets.createRendererResponse();
+      const html = staticAssets.createRendererResponse(rendererOptionsForRequest(req, url));
       if (!html) {
         return send(
           res,
@@ -459,7 +483,7 @@ function createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets
 
     if (staticAssets.isAppShellRoute(req, pathname)) {
       // 受保护区内再兜底一次 SPA shell，覆盖登录后深链刷新场景。
-      return staticAssets.serveWebShellIndex(res, { mobileTrafficMode: isMobileHtmlRequest(req, pathname, url) });
+      return serveOfficialRendererOrShell(req, res, url, staticAssets);
     }
 
     return send(res, 404, { "content-type": "text/plain; charset=utf-8" }, "Not Found");

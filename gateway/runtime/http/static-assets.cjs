@@ -82,7 +82,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   }
 
   /** 给官方 renderer HTML 注入 web-shell polyfill 和运行时配置。 */
-  function transformOfficialHtml(rawHtml) {
+  function transformOfficialHtml(rawHtml, options = {}) {
     /**
      * 官方 index.html 原本跑在 Electron app:///file 环境。
      * 浏览器环境需要额外注入：
@@ -122,7 +122,9 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       `<link id="codex-web-window-controls-overlay-styles" rel="stylesheet" href="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH}">`,
       '<script src="/codex-web-config.js"></script>',
       `<script src="${OPENCODEX_PLUGIN_SYSTEM_PATH}"></script>`,
-      `<script src="${OPENCODEX_PLUGIN_LOADER_PATH}"></script>`,
+      options.mobileTrafficMode === true
+        ? "<!-- OpenCodex 手机流量模式跳过插件 loader，减少首屏脚本和后台状态请求。 -->"
+        : `<script src="${OPENCODEX_PLUGIN_LOADER_PATH}"></script>`,
       `<script src="${OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH}"></script>`,
       `<script src="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH}"></script>`,
       // fast-sync store 必须早于 bridge polyfill 初始化，后续 polyfill 才能首屏读取本地快照。
@@ -314,12 +316,12 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     return reqPath.startsWith("/official/");
   }
 
-  function createRendererResponse() {
-    // 这个响应主要用于调试官方 renderer；实际页面入口仍是 web-shell index。
+  function createRendererResponse(options = {}) {
+    // 认证通过后直接返回官方 renderer，避免客户端 document.write 在浏览器里清空 body 后失败造成白屏。
     const located = locateOfficialIndex();
     if (!located) return null;
     const html = readText(located.file);
-    return transformOfficialHtml(html);
+    return transformOfficialHtml(html, options);
   }
 
   /** 判断是否应该回退到 SPA shell；刷新 /local/:id 这类官方前端路由时不能返回 404。 */

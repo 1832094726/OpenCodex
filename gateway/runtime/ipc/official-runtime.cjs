@@ -2530,9 +2530,10 @@ function buildGatewayStatus() {
   };
 }
 
-async function webConfigScript() {
+async function webConfigScript(options = {}) {
   // 这个脚本由浏览器入口动态加载，避免把本机路径和端口写死到 web-shell 构建产物里。
   const i18n = withPluginI18nMessages(getI18nSnapshot());
+  const mobileTrafficMode = options.mobileTrafficMode === true;
   return `(() => {
   window.__CODEX_WEB_CONFIG__ = {
     gatewayBaseUrl: location.origin,
@@ -2546,6 +2547,8 @@ async function webConfigScript() {
     // debugWs 只控制浏览器侧诊断采集，不控制 WS 压缩；压缩属于 gateway 传输层优化。
     // OPENCODEX_DEBUG_WS=1 时才开启 WS 大包/慢解析诊断，平时不采集。
     debugWs: ${JSON.stringify(process.env.OPENCODEX_DEBUG_WS === "1")},
+    // 手机流量模式仍使用官方 renderer，只在 bridge/插件层裁剪非关键状态。
+    mobileTrafficMode: ${JSON.stringify(mobileTrafficMode)},
     appServer: ${JSON.stringify({ kind: "official-electron-ipc", spawnHook: appServerSpawnHookStatus() })},
     sharedObjectSnapshot: ${JSON.stringify({
       host_config: { id: "local", kind: "local" },
