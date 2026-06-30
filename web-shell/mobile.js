@@ -15,6 +15,7 @@
   const MOBILE_CACHE_TTL_MS = 60_000;
   const MOBILE_PERSISTENT_CACHE_TTL_MS = 5 * 60_000;
   const MOBILE_PERSISTENT_CACHE_MAX_ENTRIES = 24;
+  const MOBILE_BOOTSTRAP_REFRESH_COOLDOWN_MS = 15_000;
   const MOBILE_READ_TIMEOUT_MS = 8_000;
   const MOBILE_SEND_TIMEOUT_MS = 30_000;
   const MOBILE_BOOTSTRAP_LIMIT_DEFAULT = 50;
@@ -98,6 +99,8 @@
         storage.removeItem(key);
         return null;
       }
+      const savedAtMs = Number(cached.savedAtMs || 0);
+      if (savedAtMs > 0 && cached.payload && typeof cached.payload === "object") cached.payload._cacheSavedAtMs = savedAtMs;
       return cached.payload;
     } catch {
       return null;
@@ -169,6 +172,18 @@
 
   function shouldReuseFreshCacheWithoutRefresh() {
     return mobileNetworkTier() === "constrained";
+  }
+
+  function cachedPayloadAgeMs(payload) {
+    const savedAtMs = Number(payload && payload._cacheSavedAtMs);
+    return savedAtMs > 0 ? Math.max(0, Date.now() - savedAtMs) : Number.POSITIVE_INFINITY;
+  }
+
+  function shouldSkipBootstrapRefresh(cached) {
+    if (!cached) return false;
+    if (shouldReuseFreshCacheWithoutRefresh()) return true;
+    // 最近会话列表不是实时通道；短时间重复打开时直接复用本地快照，当前会话增量仍由详情页 SSE 负责。
+    return cachedPayloadAgeMs(cached) <= MOBILE_BOOTSTRAP_REFRESH_COOLDOWN_MS;
   }
 
   function mobileBootstrapUrl() {
@@ -443,9 +458,12 @@
     const cached = readMobileCache("bootstrap", "list");
     if (cached) {
       renderBootstrapPayload(cached, "已加载本地快照，正在刷新");
-      if (shouldReuseFreshCacheWithoutRefresh()) {
-        // 省流量网络下短缓存已经足够支撑首屏；避免重复拉取完整列表状态。
-        setText(statusEl, "已加载本地快照，省流量模式下暂停刷新");
+      if (shouldSkipBootstrapRefresh(cached)) {
+        // 省流量网络或刚刷新的列表快照足够支撑首屏；避免重复拉取完整列表状态。
+        setText(
+          statusEl,
+          shouldReuseFreshCacheWithoutRefresh() ? "已加载本地快照，省流量模式下暂停刷新" : "已加载本地快照，短时间内不重复刷新列表"
+        );
         return;
       }
     }
