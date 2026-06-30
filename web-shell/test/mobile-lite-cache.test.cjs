@@ -55,7 +55,7 @@ test("mobile lite reuses fresh cache without full refresh on constrained network
   assert.match(source, /mobileNetworkTier\(\) === "constrained"/);
   assert.match(source, /已加载本地快照，省流量模式下暂停刷新/);
   assert.match(source, /已加载本地快照，省流量模式下只同步增量/);
-  assert.match(source, /connectThreadEvents\(threadId, cached\.metrics && cached\.metrics\.nextEventOffset\)/);
+  assert.match(source, /connectThreadEvents\(threadId, nextThreadEventOffset\(cached\)\)/);
   assert.match(source, /if \(shouldReuseFreshCacheWithoutRefresh\(\)\) \{/);
 });
 
@@ -74,8 +74,10 @@ test("mobile lite connects realtime events from the detail snapshot offset", () 
   const source = readMobileSource();
 
   assert.match(source, /nextEventOffset/);
+  assert.match(source, /function nextThreadEventOffset\(payload\)/);
+  assert.match(source, /Math\.max\(\.\.\.candidates\)/);
   assert.match(source, /sinceOffset=/);
-  assert.match(source, /connectThreadEvents\(threadId, payload\.metrics && payload\.metrics\.nextEventOffset\)/);
+  assert.match(source, /connectThreadEvents\(threadId, nextThreadEventOffset\(payload\)\)/);
 });
 
 test("mobile lite confirms matching pending user messages instead of duplicating them", () => {
@@ -110,7 +112,7 @@ test("mobile lite sends cached etags and reuses snapshots on 304", () => {
   assert.match(source, /payload\._etag = etag/);
   assert.match(source, /"if-none-match": cached\._etag/);
   assert.match(source, /payload\._notModified && cached/);
-  assert.match(source, /connectThreadEvents\(threadId, cached\.metrics && cached\.metrics\.nextEventOffset\)/);
+  assert.match(source, /connectThreadEvents\(threadId, nextThreadEventOffset\(cached\)\)/);
 });
 
 test("mobile lite pauses realtime events while the page is hidden", () => {

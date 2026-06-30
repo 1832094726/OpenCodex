@@ -323,6 +323,14 @@
     if (Number.isFinite(offset) && offset >= 0) activeThreadEventOffset = Math.floor(offset);
   }
 
+  function nextThreadEventOffset(payload) {
+    const payloadOffset = Number(payload && payload.metrics && payload.metrics.nextEventOffset);
+    const activeOffset = Number(activeThreadEventOffset);
+    const candidates = [payloadOffset, activeOffset].filter((value) => Number.isFinite(value) && value >= 0);
+    if (!candidates.length) return null;
+    return Math.max(...candidates);
+  }
+
   function closeThreadEvents(statusText) {
     if (!threadEvents) return;
     threadEvents.close();
@@ -473,7 +481,7 @@
     const cached = readMobileCache("thread", threadId);
     if (cached) {
       renderThreadPayload(threadId, cached, "已加载本地快照，正在刷新");
-      connectThreadEvents(threadId, cached.metrics && cached.metrics.nextEventOffset);
+      connectThreadEvents(threadId, nextThreadEventOffset(cached));
       if (shouldReuseFreshCacheWithoutRefresh()) {
         // 当前会话的新内容由 SSE 增量补齐，省流量网络不再重复拉取详情快照。
         setText(statusEl, "已加载本地快照，省流量模式下只同步增量");
@@ -490,12 +498,12 @@
       if (!payload) return;
       if (payload._notModified && cached) {
         setText(statusEl, "当前会话轻量消息无变化");
-        connectThreadEvents(threadId, cached.metrics && cached.metrics.nextEventOffset);
+        connectThreadEvents(threadId, nextThreadEventOffset(cached));
         return;
       }
       writeMobileCache("thread", threadId, payload);
       renderThreadPayload(threadId, payload);
-      connectThreadEvents(threadId, payload.metrics && payload.metrics.nextEventOffset);
+      connectThreadEvents(threadId, nextThreadEventOffset(payload));
     } catch (error) {
       if (cached) {
         setText(statusEl, `刷新失败，继续使用本地快照：${error && error.message ? error.message : String(error)}`);
