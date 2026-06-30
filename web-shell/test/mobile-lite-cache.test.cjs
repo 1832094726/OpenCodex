@@ -41,10 +41,22 @@ test("mobile lite keeps a short persistent cache for reloads under weak networks
   const source = readMobileSource();
 
   assert.match(source, /MOBILE_PERSISTENT_CACHE_TTL_MS = 5 \* 60_000/);
+  assert.match(source, /MOBILE_PERSISTENT_CACHE_MAX_ENTRIES = 24/);
   assert.match(source, /readMobileCacheFrom\(sessionStorage, kind, id, MOBILE_CACHE_TTL_MS\)/);
   assert.match(source, /readMobileCacheFrom\(localStorage, kind, id, MOBILE_PERSISTENT_CACHE_TTL_MS\)/);
   assert.match(source, /writeMobileCacheTo\(sessionStorage, kind, id, persistent\)/);
   assert.match(source, /writeMobileCacheTo\(localStorage, kind, id, payload\)/);
+});
+
+test("mobile lite prunes only its own persistent cache entries", () => {
+  const source = readMobileSource();
+
+  assert.match(source, /function pruneMobilePersistentCache\(storage\)/);
+  assert.match(source, /key\.startsWith\(MOBILE_CACHE_PREFIX\)/);
+  assert.match(source, /savedAtMs/);
+  assert.match(source, /slice\(MOBILE_PERSISTENT_CACHE_MAX_ENTRIES\)/);
+  assert.match(source, /storage\.removeItem\(entry\.key\)/);
+  assert.match(source, /pruneMobilePersistentCache\(localStorage\)/);
 });
 
 test("mobile lite connects realtime events from the detail snapshot offset", () => {

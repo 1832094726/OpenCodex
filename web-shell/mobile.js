@@ -14,6 +14,7 @@
   const MOBILE_CACHE_PREFIX = "opencodex.mobile-lite.";
   const MOBILE_CACHE_TTL_MS = 60_000;
   const MOBILE_PERSISTENT_CACHE_TTL_MS = 5 * 60_000;
+  const MOBILE_PERSISTENT_CACHE_MAX_ENTRIES = 24;
   const MOBILE_READ_TIMEOUT_MS = 8_000;
   const MOBILE_SEND_TIMEOUT_MS = 30_000;
   const MOBILE_BOOTSTRAP_LIMIT_DEFAULT = 50;
@@ -89,6 +90,30 @@
     } catch {}
   }
 
+  function pruneMobilePersistentCache(storage) {
+    if (!storage) return;
+    try {
+      const entries = [];
+      for (let index = 0; index < storage.length; index += 1) {
+        const key = storage.key(index);
+        if (!key || !key.startsWith(MOBILE_CACHE_PREFIX)) continue;
+        let savedAtMs = 0;
+        try {
+          const cached = JSON.parse(storage.getItem(key) || "{}");
+          savedAtMs = Number(cached.savedAtMs || 0);
+        } catch {}
+        entries.push({ key, savedAtMs });
+      }
+      entries
+        .sort((left, right) => right.savedAtMs - left.savedAtMs)
+        .slice(MOBILE_PERSISTENT_CACHE_MAX_ENTRIES)
+        .forEach((entry) => {
+          // 只清理 mobile-lite 自己的短时快照，避免影响同源下其它浏览器状态。
+          storage.removeItem(entry.key);
+        });
+    } catch {}
+  }
+
   function mobileNetworkTier() {
     const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
     if (!connection) return "default";
@@ -133,6 +158,7 @@
     if (!payload || payload.ok !== true) return;
     writeMobileCacheTo(sessionStorage, kind, id, payload);
     writeMobileCacheTo(localStorage, kind, id, payload);
+    pruneMobilePersistentCache(localStorage);
   }
 
   async function fetchJsonWithTimeout(url, options, timeoutMs) {
