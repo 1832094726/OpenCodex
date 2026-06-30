@@ -727,15 +727,19 @@ function createMobileTurnSender(options = {}) {
       return { ...sentByKey.get(idempotencyKey).value, duplicate: true };
     }
     const payload = createMobileTurnStartPayload({ localSendId, text, threadId });
-    // 手机端只提交当前会话的一条正文；官方 IPC 形状集中在这里，避免前端恢复完整桌面状态。
-    const value = await invokeTurnStart(payload);
+    // 手机端先快速确认“已接收”，后台再投递官方 runtime；真正结果由当前会话 JSONL/SSE 增量回到手机。
+    Promise.resolve()
+      .then(() => invokeTurnStart(payload))
+      .catch((error) => {
+        console.warn(`[mobile-lite] queued turn delivery failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
     const result = {
       accepted: true,
+      delivery: "queued",
       localSendId,
       mode: "mobile-lite",
       ok: true,
       requestId: payload.request.id,
-      value,
     };
     if (idempotencyKey) sentByKey.set(idempotencyKey, { createdAtMs: now(), value: result });
     return result;

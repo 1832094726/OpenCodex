@@ -1253,6 +1253,38 @@ test("mobile turn handler validates text and sends through injected turn/start b
   assert.equal(calls[0].request.params.input, "继续压缩手机端状态");
 });
 
+test("mobile turn handler accepts quickly without waiting for official runtime delivery", async () => {
+  const calls = [];
+  let releaseDelivery = null;
+  const delivery = new Promise((resolve) => {
+    releaseDelivery = resolve;
+  });
+  const api = createMobileApi({
+    fastSyncCache: { readSnapshot: () => null },
+    invokeTurnStart: async (payload) => {
+      calls.push(payload);
+      await delivery;
+      return { acceptedByMock: true };
+    },
+  });
+
+  const responsePromise = collectResponse(
+    (req, res) => api.handleThreadTurn(req, res, new URL("http://127.0.0.1/api/mobile/thread/thread-send-fast/turns"), "thread-send-fast"),
+    jsonPostReq({ localSendId: "local-fast", text: "手机先恢复可操作，后续靠当前会话增量同步" })
+  );
+  const response = await Promise.race([responsePromise, wait(25).then(() => null)]);
+
+  assert.ok(response, "mobile handler should respond before official runtime delivery resolves");
+  assert.equal(response.statusCode, 202);
+  const body = JSON.parse(response.body);
+  assert.equal(body.ok, true);
+  assert.equal(body.delivery, "queued");
+  assert.equal(body.localSendId, "local-fast");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].request.params.threadId, "thread-send-fast");
+  releaseDelivery({ acceptedByMock: true });
+});
+
 test("mobile turn handler coalesces repeated local send ids", async () => {
   let invokeCount = 0;
   const api = createMobileApi({
