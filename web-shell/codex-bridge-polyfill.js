@@ -37,6 +37,7 @@
   const FAST_SYNC_PENDING_CREATE_TIMEOUT_MS = Number(cfg.fastSyncPendingCreateTimeoutMs || 120);
   // debugWs 由 gateway 的 OPENCODEX_DEBUG_WS 注入；默认关闭，避免每条 WS 消息都额外计时/算长度。
   const WS_DEBUG_ENABLED = cfg.debugWs === true || cfg.debugWs === "1";
+  const CLIENT_DIAGNOSTIC_UPLOAD_ENABLED = cfg.debugClientDiagnostics === true || cfg.debugClientDiagnostics === "1";
   // 下面三个阈值只在 debugWs 开启时生效，用来定位“远端首个会话打开慢”的浏览器侧瓶颈。
   const WS_INBOUND_LARGE_CHARS = Number(cfg.wsInboundLargeChars || 256 * 1024);
   const WS_INBOUND_PARSE_SLOW_MS = Number(cfg.wsInboundParseSlowMs || 30);
@@ -557,6 +558,11 @@
     clientDiagnosticFlushTimer = w.setTimeout(flushClientDiagnostics, CLIENT_DIAGNOSTIC_FLUSH_DELAY_MS);
   }
 
+  function shouldUploadClientDiagnostic(event) {
+    // gateway 默认只消费 fast-sync-flow；其它前端诊断保留在本页面板，避免首屏和进会话时制造额外 POST 洪峰。
+    return CLIENT_DIAGNOSTIC_UPLOAD_ENABLED || event === "fast-sync-flow";
+  }
+
   function clientDiagnostic(event, data) {
     try {
       const diagnosticData = {
@@ -571,10 +577,15 @@
           if (sanitized !== undefined) diagnosticData[key] = sanitized;
         }
       }
-      clientDiagnosticQueue.push({ event, data: diagnosticData });
+      if (shouldUploadClientDiagnostic(event)) {
+        clientDiagnosticQueue.push({ event, data: diagnosticData });
+      }
       recentClientDiagnostics.push({ event, data: diagnosticData });
       while (recentClientDiagnostics.length > 30) recentClientDiagnostics.shift();
       updateNetworkStatusWidget();
+      if (clientDiagnosticQueue.length === 0) {
+        return;
+      }
       if (clientDiagnosticQueue.length >= CLIENT_DIAGNOSTIC_MAX_BATCH) {
         if (clientDiagnosticFlushTimer) {
           w.clearTimeout(clientDiagnosticFlushTimer);

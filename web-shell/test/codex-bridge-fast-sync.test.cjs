@@ -82,6 +82,22 @@ test("mobile traffic mode disables token usage capability initialization", () =>
   assert.match(source, /const tokenUsageCapability = MOBILE_TRAFFIC_MODE \? null : createTokenUsageCapability\(\);/);
 });
 
+test("client diagnostics upload only flow events by default", () => {
+  const source = readPolyfillSource();
+  // 服务端默认只消费 fast-sync-flow，普通诊断不上报可以避免进入会话时出现大量 /api/client-log。
+  assert.match(source, /CLIENT_DIAGNOSTIC_UPLOAD_ENABLED/);
+  assert.match(source, /event === "fast-sync-flow"/);
+  assert.match(source, /shouldUploadClientDiagnostic\(event\)/);
+});
+
+test("token usage inline waits until conversation entry is idle", () => {
+  const source = fs.readFileSync(path.join(repoRoot, "web-shell/plugins/token-usage-inline/index.js"), "utf8");
+  // token 用量 badge 是辅助信息，必须晚于会话正文加载，避免抢占 thread/resume 和 turns/list。
+  assert.match(source, /REQUEST_IDLE_DELAY_MS = 5000/);
+  assert.match(source, /requestUsageForRowNow\(row, ids\)/);
+  assert.match(source, /pendingRequestTimers/);
+});
+
 test("turn starts create pending sends and flow diagnostics", () => {
   const source = readPolyfillSource();
   // turn/start 是写操作，不能进快照缓存，但需要本地 pending 与链路诊断帮助排查弱网转圈。

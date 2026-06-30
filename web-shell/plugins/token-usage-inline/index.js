@@ -5,6 +5,7 @@
 
   const PLUGIN_ID = "opencodex.token-usage-inline";
   const BADGE_ATTR = "data-opencodex-token-usage-inline";
+  const REQUEST_IDLE_DELAY_MS = 5000;
   const REQUEST_RETRY_MS = 65 * 1000;
   const MAX_REQUESTED_KEYS = 600;
   const DIAGNOSTIC_KEY = "__OpenCodexTokenUsageInline";
@@ -243,6 +244,7 @@
 
       const observedRows = new Set();
       const pendingScanRoots = new Set();
+      const pendingRequestTimers = new Map();
       const requestedAtByKey = new Map();
       // WeakMap 绑定 DOM row 和 turn 信息；虚拟列表卸载后可被 GC 自动回收。
       const rowIds = new WeakMap();
@@ -334,6 +336,18 @@
         if (disposed || !context.plugin.isEnabled()) return;
         const ids = rememberRowIds(row, providedIds || idsForRow(row));
         if (!ids) return;
+        if (pendingRequestTimers.has(ids.key)) return;
+        // token 用量是辅助信息；延后到会话内容先稳定，避免进历史对话时抢 thread/resume/turns/list 的关键路径。
+        const timer = w.setTimeout(() => {
+          pendingRequestTimers.delete(ids.key);
+          requestUsageForRowNow(row, ids);
+        }, REQUEST_IDLE_DELAY_MS);
+        pendingRequestTimers.set(ids.key, timer);
+      };
+
+      const requestUsageForRowNow = (row, ids) => {
+        if (disposed || !context.plugin.isEnabled()) return;
+        if (!row?.isConnected || !ids) return;
         diagnostics.lastIds = ids;
         diagnostics.lastRequestAt = Date.now();
         diagnostics.requested += 1;
@@ -374,7 +388,7 @@
         if (intersectionObserver) {
           intersectionObserver.observe(row);
         }
-        // DOM 已经渲染出来时立即懒查一次；observer 只作为后续滚动进入视口的补偿。
+        // DOM 已经渲染出来时只登记延迟查询；observer 作为滚动进入视口后的补偿。
         requestUsageForRow(row, ids);
       };
 
@@ -485,6 +499,8 @@
       return () => {
         disposed = true;
         if (scanTimer) w.clearTimeout(scanTimer);
+        for (const timer of pendingRequestTimers.values()) w.clearTimeout(timer);
+        pendingRequestTimers.clear();
         disposeUpdate();
         releaseConsumer();
         mutationObserver.disconnect();
