@@ -115,6 +115,20 @@ test("mobile lite keeps an existing realtime connection for unchanged detail ref
   assert.match(source, /threadEventsThreadId = ""/);
 });
 
+test("mobile lite falls back to lightweight polling when realtime events are unavailable", () => {
+  const source = readMobileSource();
+
+  assert.match(source, /MOBILE_THREAD_POLL_FALLBACK_MS = 12_000/);
+  assert.match(source, /threadPollTimer/);
+  assert.match(source, /function closeThreadPollFallback\(\)/);
+  assert.match(source, /function startThreadPollFallback\(threadId/);
+  assert.match(source, /function pollThreadDetail\(threadId/);
+  assert.match(source, /readMobileCache\("thread", threadId\)/);
+  assert.match(source, /"if-none-match": cached\._etag/);
+  assert.match(source, /增量连接不可用，已切换轻量轮询/);
+  assert.match(source, /增量连接失败，已切换轻量轮询/);
+});
+
 test("mobile lite confirms matching pending user messages instead of duplicating them", () => {
   const source = readMobileSource();
 
@@ -158,9 +172,10 @@ test("mobile lite pauses realtime events while the page is hidden", () => {
   assert.match(source, /function closeThreadEvents\(statusText\)/);
   assert.match(source, /document\.visibilityState === "hidden"/);
   assert.match(source, /已暂停后台增量连接/);
+  assert.match(source, /closeThreadPollFallback\(\)/);
   assert.match(source, /connectThreadEvents\(activeThreadId, activeThreadEventOffset\)/);
   assert.match(source, /document\.addEventListener\("visibilitychange", handleVisibilityChange\)/);
-  assert.match(source, /window\.addEventListener\("pagehide", \(\) => closeThreadEvents\(\)\)/);
+  assert.match(source, /window\.addEventListener\("pagehide", \(\) => \{/);
 });
 
 test("mobile lite fetches use timeouts so weak networks do not hang forever", () => {

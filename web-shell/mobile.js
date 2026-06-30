@@ -17,6 +17,7 @@
   const MOBILE_PERSISTENT_CACHE_MAX_ENTRIES = 24;
   const MOBILE_BOOTSTRAP_REFRESH_COOLDOWN_MS = 15_000;
   const MOBILE_THREAD_DETAIL_REFRESH_COOLDOWN_MS = 10_000;
+  const MOBILE_THREAD_POLL_FALLBACK_MS = 12_000;
   const MOBILE_READ_TIMEOUT_MS = 8_000;
   const MOBILE_SEND_TIMEOUT_MS = 30_000;
   const MOBILE_BOOTSTRAP_LIMIT_DEFAULT = 50;
@@ -28,6 +29,9 @@
   let threadEvents = null;
   let threadEventsThreadId = "";
   let threadEventsRequestedOffset = null;
+  let threadPollTimer = null;
+  let threadPollInFlight = false;
+  let threadPollThreadId = "";
   let activeThreadId = "";
   let activeThreadEventOffset = null;
   let lastBootstrapFingerprint = "";
@@ -365,8 +369,56 @@
     if (statusText) setText(statusEl, statusText);
   }
 
+  function closeThreadPollFallback() {
+    if (threadPollTimer) clearInterval(threadPollTimer);
+    threadPollTimer = null;
+    threadPollInFlight = false;
+    threadPollThreadId = "";
+  }
+
+  async function pollThreadDetail(threadId) {
+    if (!threadId || threadPollInFlight) return;
+    threadPollInFlight = true;
+    const cached = readMobileCache("thread", threadId);
+    try {
+      const payload = await fetchJsonWithTimeout(mobileThreadUrl(threadId), {
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: { accept: "application/json", ...(cached && cached._etag ? { "if-none-match": cached._etag } : {}) },
+      }, MOBILE_READ_TIMEOUT_MS);
+      if (!payload) return;
+      if (payload._notModified && cached) {
+        setText(statusEl, "轻量轮询中，当前会话无变化");
+        return;
+      }
+      writeMobileCache("thread", threadId, payload);
+      renderThreadPayload(threadId, payload, "已通过轻量轮询同步当前会话");
+    } catch (error) {
+      setText(statusEl, `轻量轮询失败：${error && error.message ? error.message : String(error)}`);
+      if (statusEl) statusEl.classList.add("error");
+    } finally {
+      threadPollInFlight = false;
+    }
+  }
+
+  function startThreadPollFallback(threadId, statusText = "增量连接不可用，已切换轻量轮询") {
+    if (!threadId) return;
+    if (threadPollTimer && threadPollThreadId === threadId) {
+      if (statusText) setText(statusEl, statusText);
+      return;
+    }
+    closeThreadPollFallback();
+    threadPollThreadId = threadId;
+    if (statusText) setText(statusEl, statusText);
+    // 手机代理或浏览器不支持 SSE 时，退化为低频详情轮询；请求仍带 ETag，未变化时 304/0 body。
+    threadPollTimer = setInterval(() => pollThreadDetail(threadId), MOBILE_THREAD_POLL_FALLBACK_MS);
+  }
+
   function connectThreadEvents(threadId, sinceOffset) {
-    if (!("EventSource" in window)) return;
+    if (!("EventSource" in window)) {
+      startThreadPollFallback(threadId, "增量连接不可用，已切换轻量轮询");
+      return;
+    }
     const offset = Number(sinceOffset == null ? activeThreadEventOffset : sinceOffset);
     const requestedOffset = Number.isFinite(offset) && offset >= 0 ? Math.floor(offset) : null;
     if (threadEvents && threadEventsThreadId === threadId) {
@@ -376,6 +428,7 @@
         return;
       }
     }
+    closeThreadPollFallback();
     closeThreadEvents();
     const query = requestedOffset != null ? `?sinceOffset=${encodeURIComponent(String(requestedOffset))}` : "";
     if (requestedOffset != null) activeThreadEventOffset = requestedOffset;
@@ -401,7 +454,8 @@
       } catch {}
     });
     threadEvents.addEventListener("error", () => {
-      setText(statusEl, "增量连接已断开，浏览器会自动重连");
+      closeThreadEvents("增量连接失败，已切换轻量轮询");
+      startThreadPollFallback(threadId, "增量连接失败，已切换轻量轮询");
     });
   }
 
@@ -410,6 +464,7 @@
     if (document.visibilityState === "hidden") {
       // 手机后台不保留长连接；回到前台再用最后 event id 续上当前会话增量。
       closeThreadEvents("已暂停后台增量连接");
+      closeThreadPollFallback();
       return;
     }
     if (!threadEvents) connectThreadEvents(activeThreadId, activeThreadEventOffset);
@@ -587,7 +642,10 @@
   if (composeEl) composeEl.addEventListener("submit", submitMessage);
   if (composeTextEl) composeTextEl.addEventListener("input", resizeComposeText);
   document.addEventListener("visibilitychange", handleVisibilityChange);
-  window.addEventListener("pagehide", () => closeThreadEvents());
+  window.addEventListener("pagehide", () => {
+    closeThreadEvents();
+    closeThreadPollFallback();
+  });
   if (threadId) {
     loadThread(threadId).catch((error) => {
       setText(statusEl, `读取失败：${error && error.message ? error.message : String(error)}`);
