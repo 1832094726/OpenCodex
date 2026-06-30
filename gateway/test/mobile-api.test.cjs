@@ -154,6 +154,7 @@ test("createMobileBootstrapPayload uses cached thread list and records snapshot 
   assert.equal(payload.snapshotAgeMs, 600);
   assert.equal(payload.metrics.threadCount, 1);
   assert.equal(payload.metrics.deferredStateCount, 4);
+  assert.equal(payload.metrics.listCacheTtlMs, 5_000);
   assert.ok(payload.metrics.estimatedPayloadBytes > 0);
   assert.deepEqual(payload.threads, [
     {
@@ -212,6 +213,64 @@ test("listLocalSessionThreads builds a phone-safe list from Codex jsonl history"
       updatedAt: "2026-06-30T08:00:00.000Z",
     },
   ]);
+});
+
+test("listLocalSessionThreads reuses a short cache for repeated mobile opens", () => {
+  const root = tempDir();
+  const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const firstFile = path.join(sessionsDir, "rollout-2026-06-30T08-00-00-thread-cache-1.jsonl");
+  fs.writeFileSync(
+    firstFile,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T08:00:00.000Z",
+        type: "session_meta",
+        payload: {
+          cwd: "/repo/cache",
+          session_id: "thread-cache-1",
+        },
+      }),
+      JSON.stringify({
+        type: "user_message",
+        payload: {
+          message: "第一次打开手机列表",
+        },
+      }),
+    ].join("\n"),
+    "utf8"
+  );
+
+  const first = listLocalSessionThreads({ cacheTtlMs: 1_000, codexHome: root, limit: 5, now: () => 10_000 });
+  const secondFile = path.join(sessionsDir, "rollout-2026-06-30T08-01-00-thread-cache-2.jsonl");
+  fs.writeFileSync(
+    secondFile,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T08:01:00.000Z",
+        type: "session_meta",
+        payload: {
+          cwd: "/repo/cache",
+          session_id: "thread-cache-2",
+        },
+      }),
+      JSON.stringify({
+        type: "user_message",
+        payload: {
+          message: "TTL 内新增但不重新扫描",
+        },
+      }),
+    ].join("\n"),
+    "utf8"
+  );
+  fs.utimesSync(secondFile, new Date("2026-06-30T08:01:00.000Z"), new Date("2026-06-30T08:01:00.000Z"));
+
+  const cached = listLocalSessionThreads({ cacheTtlMs: 1_000, codexHome: root, limit: 5, now: () => 10_500 });
+  const refreshed = listLocalSessionThreads({ cacheTtlMs: 1_000, codexHome: root, limit: 5, now: () => 11_500 });
+
+  assert.deepEqual(first.map((thread) => thread.id), ["thread-cache-1"]);
+  assert.deepEqual(cached.map((thread) => thread.id), ["thread-cache-1"]);
+  assert.deepEqual(refreshed.map((thread) => thread.id), ["thread-cache-2", "thread-cache-1"]);
 });
 
 test("createMobileBootstrapPayload falls back to local history when thread snapshot is missing", async () => {

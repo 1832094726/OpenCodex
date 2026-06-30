@@ -12,7 +12,9 @@ const MOBILE_TURN_SEND_TTL_MS = 10 * 60 * 1000;
 const MOBILE_THREAD_DETAIL_HEAD_BYTES = 64 * 1024;
 const MOBILE_THREAD_DETAIL_TAIL_BYTES = 512 * 1024;
 const MOBILE_MESSAGE_TEXT_MAX_CHARS = 12_000;
+const MOBILE_THREAD_LIST_CACHE_TTL_MS = 5_000;
 const localSessionFileCache = new Map();
+const localThreadListCache = new Map();
 
 function firstString(...values) {
   for (const value of values) {
@@ -133,6 +135,37 @@ function cachedLocalSessionFile(threadId) {
     localSessionFileCache.delete(id);
     return null;
   }
+}
+
+function cloneMobileThreadList(threads) {
+  return Array.isArray(threads) ? threads.map((thread) => ({ ...thread })) : [];
+}
+
+function localThreadListCacheKey(options = {}) {
+  return [path.resolve(options.codexHome || CODEX_HOME), Math.max(1, Math.min(Number(options.limit) || 50, 200))].join("|");
+}
+
+function cachedLocalThreadList(options = {}) {
+  const ttlMs = Math.max(0, Number(options.cacheTtlMs ?? MOBILE_THREAD_LIST_CACHE_TTL_MS));
+  if (ttlMs === 0) return null;
+  const now = typeof options.now === "function" ? options.now() : Date.now();
+  const key = localThreadListCacheKey(options);
+  const cached = localThreadListCache.get(key);
+  if (!cached || cached.expiresAtMs <= now) {
+    localThreadListCache.delete(key);
+    return null;
+  }
+  return cloneMobileThreadList(cached.threads);
+}
+
+function rememberLocalThreadList(options = {}, threads = []) {
+  const ttlMs = Math.max(0, Number(options.cacheTtlMs ?? MOBILE_THREAD_LIST_CACHE_TTL_MS));
+  if (ttlMs === 0) return;
+  const now = typeof options.now === "function" ? options.now() : Date.now();
+  localThreadListCache.set(localThreadListCacheKey(options), {
+    expiresAtMs: now + ttlMs,
+    threads: cloneMobileThreadList(threads),
+  });
 }
 
 function titleFromRecord(record) {
@@ -352,6 +385,8 @@ function parseSessionFile(filePath, archived, options = {}) {
 }
 
 function listLocalSessionThreads(options = {}) {
+  const cached = cachedLocalThreadList(options);
+  if (cached) return cached;
   const codexHome = options.codexHome || CODEX_HOME;
   const limit = Math.max(1, Math.min(Number(options.limit) || 50, 200));
   const roots = [
@@ -385,6 +420,7 @@ function listLocalSessionThreads(options = {}) {
     }
     if (threads.length >= limit) break;
   }
+  rememberLocalThreadList({ ...options, limit }, threads);
   return threads;
 }
 
@@ -617,6 +653,7 @@ function createMobileBootstrapPayload(options = {}) {
   payload.metrics = {
     deferredStateCount: MOBILE_DEFERRED_STATE.length,
     estimatedPayloadBytes: estimatedJsonBytes(payload),
+    listCacheTtlMs: MOBILE_THREAD_LIST_CACHE_TTL_MS,
     threadCount: payload.threads.length,
   };
   return Promise.resolve(payload);
