@@ -19,6 +19,7 @@ const MOBILE_THREAD_LIST_CACHE_TTL_MS = 5_000;
 const MOBILE_THREAD_LIST_SCAN_MAX_MS = 250;
 const MOBILE_THREAD_EVENT_CHUNK_BYTES = 64 * 1024;
 const MOBILE_THREAD_EVENT_PENDING_MAX_BYTES = 256 * 1024;
+const MOBILE_THREAD_EVENT_RETRY_MS = 5_000;
 const MOBILE_THREAD_FIND_RECENT_FILE_LIMIT = 600;
 const MOBILE_SESSION_META_HEAD_BYTES = 64 * 1024;
 const MOBILE_THREAD_ID_MAX_CHARS = 160;
@@ -577,9 +578,10 @@ function listLocalSessionThreadDetail(options = {}) {
   return parsed || { ok: false };
 }
 
-function sseWrite(res, { data, event, id }) {
+function sseWrite(res, { data, event, id, retry }) {
   if (id != null) res.write(`id: ${String(id)}\n`);
   if (event) res.write(`event: ${event}\n`);
+  if (retry != null) res.write(`retry: ${String(retry)}\n`);
   const body = data == null ? "" : JSON.stringify(data);
   for (const line of body.split(/\r?\n/)) res.write(`data: ${line}\n`);
   res.write("\n");
@@ -753,7 +755,8 @@ function createMobileThreadEventStream(options = {}) {
     "x-accel-buffering": "no",
   });
   // ready 只同步文件游标，避免手机端一连上 SSE 就重复接收全量历史。
-  writeSseEvent({ data: { offset, threadId: options.threadId || "" }, event: "ready", id: offset });
+  // 明确放慢手机弱网断线后的 EventSource 重连节奏，避免抖动网络反复建立无效连接。
+  writeSseEvent({ data: { offset, threadId: options.threadId || "" }, event: "ready", id: offset, retry: MOBILE_THREAD_EVENT_RETRY_MS });
   pollTimer = setInterval(readNewBytes, pollMs);
   heartbeatTimer = setInterval(() => {
     if (!closed) writeSseEvent({ data: { at: Date.now() }, event: "ping", id: offset });

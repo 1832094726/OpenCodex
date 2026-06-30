@@ -863,6 +863,7 @@ test("createMobileThreadEventStream emits only appended visible messages and cle
   assert.equal(harness.res.headers["content-type"], "text/event-stream; charset=utf-8");
   const readyOutput = harness.writes.join("");
   assert.match(readyOutput, /event: ready/);
+  assert.match(readyOutput, /retry: 5000/);
   assert.match(readyOutput, new RegExp(`id: ${fs.statSync(file).size}\\n`));
 
   fs.appendFileSync(
