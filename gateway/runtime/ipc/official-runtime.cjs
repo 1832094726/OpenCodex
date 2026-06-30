@@ -55,8 +55,8 @@ const requestRoutes = new Map();
 // requestRouteSummaries 保存 requestId 对应的入站摘要，让出站 fetch-response 日志也能带上原始 URL。
 const requestRouteSummaries = new Map();
 const APP_SERVER_READ_ONLY_CACHE_TTL_MS = Number(process.env.OPENCODEX_APP_SERVER_READ_ONLY_CACHE_TTL_MS || 5 * 60 * 1000);
-// plugin/list 会直接影响插件管理页和 agent 可见能力，安装/启用后必须实时读取，不能走只读缓存。
-const APP_SERVER_READ_ONLY_METHODS = new Set(["app/list", "mcpServerStatus/list", "thread/list"]);
+// plugin/list 仍不进入 fast-sync 长快照，但可短 TTL 去重/落盘；手机首屏会反复读插件状态，实时性不应压过会话可用性。
+const APP_SERVER_READ_ONLY_METHODS = new Set(["app/list", "mcpServerStatus/list", "plugin/list", "thread/list"]);
 const APP_SERVER_STALE_READ_ONLY_METHODS = new Set(["app/list", "mcpServerStatus/list"]);
 const APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS = Number(
   process.env.OPENCODEX_APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS || 24 * 60 * 60 * 1000

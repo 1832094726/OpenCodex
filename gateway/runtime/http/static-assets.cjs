@@ -125,7 +125,9 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       options.mobileTrafficMode === true
         ? "<!-- OpenCodex 手机流量模式跳过插件 loader，减少首屏脚本和后台状态请求。 -->"
         : `<script src="${OPENCODEX_PLUGIN_LOADER_PATH}"></script>`,
-      `<script src="${OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH}"></script>`,
+      options.mobileTrafficMode === true
+        ? "<!-- OpenCodex 手机流量模式跳过 token usage capability，避免进会话后逐条补统计阻塞渲染。 -->"
+        : `<script src="${OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH}"></script>`,
       `<script src="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH}"></script>`,
       // fast-sync store 必须早于 bridge polyfill 初始化，后续 polyfill 才能首屏读取本地快照。
       `<script src="${OPENCODEX_FAST_SYNC_PATH}?v=${webShellStaticVersion(OPENCODEX_FAST_SYNC_PATH)}"></script>`,

@@ -71,8 +71,15 @@ test("mobile traffic mode keeps official shell while localizing noncritical app 
   assert.match(source, /cfg\.mobileTrafficMode/);
   assert.match(localBlock, /"app\/list"/);
   assert.match(localBlock, /"mcpServerStatus\/list"/);
+  assert.match(localBlock, /"skills\/list"/);
   assert.match(source, /function mobileTrafficLocalAppServerValue/);
   assert.match(source, /mobile-traffic-local-state/);
+});
+
+test("mobile traffic mode disables token usage capability initialization", () => {
+  const source = readPolyfillSource();
+  // 手机端进入历史会话时会同时显示多条回复；跳过 tokenUsage 可避免逐条懒查询 session 文件。
+  assert.match(source, /const tokenUsageCapability = MOBILE_TRAFFIC_MODE \? null : createTokenUsageCapability\(\);/);
 });
 
 test("turn starts create pending sends and flow diagnostics", () => {

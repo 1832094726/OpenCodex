@@ -87,7 +87,7 @@
     } catch {}
   }
 
-  const tokenUsageCapability = createTokenUsageCapability();
+  const tokenUsageCapability = MOBILE_TRAFFIC_MODE ? null : createTokenUsageCapability();
 
   function createTokenUsageCapability() {
     const factory = w.__OpenCodexCreateTokenUsageCapability;
@@ -2664,10 +2664,12 @@
   const READ_ONLY_APP_SERVER_METHODS = new Set([
     "app/list",
     "mcpServerStatus/list",
+    "plugin/list",
   ]);
   const MOBILE_TRAFFIC_LOCAL_METHODS = new Set([
     "app/list",
     "mcpServerStatus/list",
+    "skills/list",
   ]);
   const FAST_SYNC_SNAPSHOT_METHODS = new Set([
     "account/read",

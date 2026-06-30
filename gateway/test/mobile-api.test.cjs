@@ -1485,6 +1485,30 @@ test("request handler keeps the official shell for mobile browsers and enables t
   assert.match(response.body, /config\.mobileTrafficMode\) return/);
 });
 
+test("official renderer skips token usage capability only for mobile traffic mode", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-official-html-"));
+  try {
+    fs.mkdirSync(path.join(tempRoot, "assets"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tempRoot, "index.html"),
+      '<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>Codex</title><script src="./assets/app.js"></script></head><body><div id="root"></div></body></html>'
+    );
+    const staticAssets = createStaticAssetService({
+      getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+      getOfficialBundle: () => ({ webviewDir: tempRoot }),
+    });
+
+    const desktop = staticAssets.createRendererResponse({ mobileTrafficMode: false });
+    const mobile = staticAssets.createRendererResponse({ mobileTrafficMode: true });
+
+    assert.match(desktop, /codex-token-usage-capability\.js/);
+    assert.doesNotMatch(mobile, /codex-token-usage-capability\.js/);
+    assert.match(mobile, /跳过 token usage capability/);
+  } finally {
+    fs.rmSync(tempRoot, { force: true, recursive: true });
+  }
+});
+
 test("request handler serves the official renderer directly when it is available", async () => {
   const { createRequestHandler } = require("../runtime/server.cjs");
   const calls = [];
@@ -1531,6 +1555,45 @@ test("request handler serves the official renderer directly when it is available
   assert.match(mobile.body, /official mobile/);
   assert.equal(calls[0].mobileTrafficMode, false);
   assert.equal(calls[1].mobileTrafficMode, true);
+});
+
+test("request handler supports an explicit mobile traffic query for desktop browser diagnostics", async () => {
+  const { createRequestHandler } = require("../runtime/server.cjs");
+  const calls = [];
+  const staticAssets = {
+    createRendererResponse(options) {
+      calls.push(options);
+      return options && options.mobileTrafficMode ? "<html>mobile</html>" : "<html>desktop</html>";
+    },
+    isAppShellRoute: (req, pathname) => req.method === "GET" && (pathname === "/" || pathname === "/m"),
+    isPublicStaticPath: () => false,
+    staticFile: () => null,
+    serveWebShellIndex: () => assert.fail("authenticated app shell should not fall back to login shell"),
+  };
+  const handler = createRequestHandler({
+    localFiles: {},
+    mobileApi: { handleBootstrap: () => assert.fail("mobile bootstrap should not handle shell HTML") },
+    pickedFiles: {},
+    staticAssets,
+  });
+
+  const mobile = await collectResponse(handler, {
+    headers: { accept: "text/html", host: "127.0.0.1:8080", "user-agent": "Mozilla/5.0 (Macintosh)" },
+    method: "GET",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/?mobile=1",
+  });
+  const full = await collectResponse(handler, {
+    headers: { accept: "text/html", host: "127.0.0.1:8080", "user-agent": "Mozilla/5.0 (Linux; Android 15) Mobile" },
+    method: "GET",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/?mobile=1&full=1",
+  });
+
+  assert.equal(mobile.body, "<html>mobile</html>");
+  assert.equal(full.body, "<html>desktop</html>");
+  assert.equal(calls[0].mobileTrafficMode, true);
+  assert.equal(calls[1].mobileTrafficMode, false);
 });
 
 test("request handler no longer serves a standalone mobile-lite shell at /m", async () => {

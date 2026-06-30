@@ -69,6 +69,7 @@ function isMobileHtmlRequest(req, pathname, url) {
   if (!req || req.method !== "GET") return false;
   if (pathname !== "/" && pathname !== "") return false;
   if (url && url.searchParams.get("full") === "1") return false;
+  if (url && url.searchParams.get("mobile") === "1") return true;
   const accept = String(req.headers.accept || "");
   if (accept && !accept.includes("text/html") && !accept.includes("*/*")) return false;
   const userAgent = String(req.headers["user-agent"] || "");
@@ -78,6 +79,8 @@ function isMobileHtmlRequest(req, pathname, url) {
 
 function isMobileTrafficRequest(req, url) {
   if (url && url.searchParams.get("full") === "1") return false;
+  // 允许桌面浏览器显式复现手机瘦身路径，方便排查弱网首屏和会话进入链路。
+  if (url && url.searchParams.get("mobile") === "1") return true;
   const userAgent = String((req && req.headers && req.headers["user-agent"]) || "");
   return /Android|iPhone|iPad|iPod|Mobile|Windows Phone|Mobi/i.test(userAgent);
 }
