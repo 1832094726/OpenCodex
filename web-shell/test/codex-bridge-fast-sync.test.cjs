@@ -90,10 +90,30 @@ test("client diagnostics upload only flow events by default", () => {
   assert.match(source, /shouldUploadClientDiagnostic\(event\)/);
 });
 
+test("desktop conversation entry auxiliary reads use browser read-only cache", () => {
+  const source = readPolyfillSource();
+  const start = source.indexOf("const READ_ONLY_APP_SERVER_METHODS");
+  const end = source.indexOf("const MOBILE_TRAFFIC_LOCAL_METHODS", start);
+  assert.ok(start >= 0 && end > start, "missing READ_ONLY_APP_SERVER_METHODS block");
+  const block = source.slice(start, end);
+  // 这些辅助读在电脑端首屏会并发触发；页内去重/短缓存可避免它们拖慢历史会话打开。
+  for (const method of [
+    "config/read",
+    "configRequirements/read",
+    "experimentalFeature/list",
+    "hooks/list",
+    "model/list",
+    "permissionProfile/list",
+    "thread/list",
+  ]) {
+    assert.match(block, new RegExp(JSON.stringify(method).replace("/", "\\/")));
+  }
+});
+
 test("token usage inline waits until conversation entry is idle", () => {
   const source = fs.readFileSync(path.join(repoRoot, "web-shell/plugins/token-usage-inline/index.js"), "utf8");
   // token 用量 badge 是辅助信息，必须晚于会话正文加载，避免抢占 thread/resume 和 turns/list。
-  assert.match(source, /REQUEST_IDLE_DELAY_MS = 5000/);
+  assert.match(source, /REQUEST_IDLE_DELAY_MS = 15000/);
   assert.match(source, /requestUsageForRowNow\(row, ids\)/);
   assert.match(source, /pendingRequestTimers/);
 });
@@ -114,6 +134,21 @@ test("turn starts create pending sends and flow diagnostics", () => {
   ]) {
     assert.match(source, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
+});
+
+test("blank startup thread starts are deferred behind conversation entry", () => {
+  const source = readPolyfillSource();
+  const deferredBlock = sourceBetween(source, "function isBackgroundThreadStartPayload", "function invokeBackgroundThreadStartDeferred");
+  const invokeBlock = sourceBetween(source, "async function invokeGateway(channel, args)", "const cachedReadOnlyAppServerInvoke");
+  // 官方主页启动期会预创建空白 thread/start；延后它，避免抢占历史会话的 thread/read/resume/turns/list。
+  assert.match(source, /BACKGROUND_THREAD_START_DELAY_MS = 4500/);
+  assert.match(source, /BACKGROUND_THREAD_START_STARTUP_WINDOW_MS = 30000/);
+  assert.match(deferredBlock, /appServerMethod\(payload\) !== "thread\/start"/);
+  assert.match(deferredBlock, /hasThreadStartUserContent\(payload\)/);
+  assert.match(source, /background-thread-start-deferred/);
+  assert.match(invokeBlock, /invokeBackgroundThreadStartDeferred/);
+  // 真正发送消息使用 turn/start，不能被空白 thread/start 的低优先级策略误伤。
+  assert.doesNotMatch(deferredBlock, /turn\/start/);
 });
 
 test("mobile resume reconnect does not automatically reload the page", () => {

@@ -55,9 +55,30 @@ const requestRoutes = new Map();
 // requestRouteSummaries 保存 requestId 对应的入站摘要，让出站 fetch-response 日志也能带上原始 URL。
 const requestRouteSummaries = new Map();
 const APP_SERVER_READ_ONLY_CACHE_TTL_MS = Number(process.env.OPENCODEX_APP_SERVER_READ_ONLY_CACHE_TTL_MS || 5 * 60 * 1000);
-// plugin/list 仍不进入 fast-sync 长快照，但可短 TTL 去重/落盘；手机首屏会反复读插件状态，实时性不应压过会话可用性。
-const APP_SERVER_READ_ONLY_METHODS = new Set(["app/list", "mcpServerStatus/list", "plugin/list", "thread/list"]);
-const APP_SERVER_STALE_READ_ONLY_METHODS = new Set(["app/list", "mcpServerStatus/list"]);
+// 首屏辅助读允许走短 TTL 只读缓存；会话详情和发送链路仍保持官方实时 IPC。
+const APP_SERVER_READ_ONLY_METHODS = new Set([
+  "app/list",
+  "config/read",
+  "configRequirements/read",
+  "experimentalFeature/list",
+  "hooks/list",
+  "mcpServerStatus/list",
+  "model/list",
+  "permissionProfile/list",
+  "plugin/list",
+  "thread/list",
+]);
+const APP_SERVER_STALE_READ_ONLY_METHODS = new Set([
+  "app/list",
+  "configRequirements/read",
+  "experimentalFeature/list",
+  "hooks/list",
+  "mcpServerStatus/list",
+  "model/list",
+  "permissionProfile/list",
+  "plugin/list",
+  "thread/list",
+]);
 const APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS = Number(
   process.env.OPENCODEX_APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS || 24 * 60 * 60 * 1000
 );
@@ -538,7 +559,7 @@ function refreshHiddenOfficialRuntime(reason, changedPath) {
   appServerSpawnHook.lastRestartAt = new Date().toISOString();
   appServerSpawnHook.lastRestartReason = reason;
   appServerSpawnHook.lastRestartChangedPath = changedPath || null;
-  appServerReadOnlyCache.clear();
+  // 只读缓存不含账号/配置；刷新隐藏 runtime 时保留它，避免线程列表冷扫再次阻塞首屏和进会话。
   const closedRelays = wsHub && typeof wsHub.closeAllAppHostRelays === "function"
     ? wsHub.closeAllAppHostRelays("official_runtime_refresh")
     : 0;
@@ -1372,7 +1393,7 @@ function attachFastSyncSnapshotKey(summary, invokeArgs) {
 function canServeStaleReadOnlyCache(method, entry, nowMs = Date.now()) {
   if (!APP_SERVER_STALE_READ_ONLY_METHODS.has(method)) return false;
   if (!entry || typeof entry.expiresAtMs !== "number") return false;
-  // app/plugin/MCP 状态只是辅助 UI。Win 上这些扫描可能十几秒，允许短期过期缓存先撑住对话加载。
+  // app/plugin/MCP/线程列表只是入口辅助 UI。弱网或冷启动下这些扫描可能十几秒，允许短期过期缓存先撑住对话加载。
   return entry.expiresAtMs + APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS > nowMs;
 }
 

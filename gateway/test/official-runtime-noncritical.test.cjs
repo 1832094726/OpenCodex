@@ -39,4 +39,47 @@ test("hidden official runtime refresh closes app-host relays and reloads hidden 
   assert.match(refreshBody, /terminateTrackedAppServerChildren\(reason\)/);
   assert.match(refreshBody, /reloadHiddenOfficialRuntime\(reason\)/);
   assert.match(source, /webContents\.reloadIgnoringCache\(\)/);
+  // 只读列表缓存应穿过 hidden runtime refresh，避免配置变更后重新冷扫历史会话列表。
+  assert.doesNotMatch(refreshBody, /appServerReadOnlyCache\.clear\(\)/);
+});
+
+test("conversation entry auxiliary reads can use read-only cache", () => {
+  // 这些读只影响首屏辅助状态；缓存它们能避免进对话时被插件、权限、实验开关扫描拖住。
+  const readOnlyBody = source.slice(
+    source.indexOf("const APP_SERVER_READ_ONLY_METHODS"),
+    source.indexOf("const APP_SERVER_STALE_READ_ONLY_METHODS")
+  );
+  for (const method of [
+    "config/read",
+    "configRequirements/read",
+    "experimentalFeature/list",
+    "hooks/list",
+    "model/list",
+    "permissionProfile/list",
+    "plugin/list",
+    "thread/list",
+  ]) {
+    assert.match(readOnlyBody, new RegExp(JSON.stringify(method).replace("/", "\\/")));
+  }
+});
+
+test("thread list and auxiliary state can use stale read-only cache during conversation entry", () => {
+  // thread/list 是进入会话前的入口数据；旧列表比长时间白屏更可接受，详情仍由 thread/read/resume 拉新。
+  const staleBody = source.slice(
+    source.indexOf("const APP_SERVER_STALE_READ_ONLY_METHODS"),
+    source.indexOf("const APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS")
+  );
+  for (const method of [
+    "configRequirements/read",
+    "experimentalFeature/list",
+    "hooks/list",
+    "model/list",
+    "permissionProfile/list",
+    "plugin/list",
+    "thread/list",
+  ]) {
+    assert.match(staleBody, new RegExp(JSON.stringify(method).replace("/", "\\/")));
+  }
+  // config/read 涉及供应商切换，只走短 TTL，不允许 24 小时 stale。
+  assert.doesNotMatch(staleBody, /"config\/read"/);
 });

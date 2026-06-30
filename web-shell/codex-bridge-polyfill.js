@@ -473,6 +473,8 @@
   const readOnlyAppServerCache = new Map();
   const readOnlyAppServerInFlight = new Map();
   const statsigBootstrapRequestIds = new Set();
+  const BACKGROUND_THREAD_START_DELAY_MS = 4500;
+  const BACKGROUND_THREAD_START_STARTUP_WINDOW_MS = 30000;
   let activeLowPriorityIpcCount = 0;
   let lowPriorityIpcQueuedCount = 0;
   let lowPriorityIpcStartedCount = 0;
@@ -2674,8 +2676,15 @@
 
   const READ_ONLY_APP_SERVER_METHODS = new Set([
     "app/list",
+    "config/read",
+    "configRequirements/read",
+    "experimentalFeature/list",
+    "hooks/list",
     "mcpServerStatus/list",
+    "model/list",
+    "permissionProfile/list",
     "plugin/list",
+    "thread/list",
   ]);
   const MOBILE_TRAFFIC_LOCAL_METHODS = new Set([
     "app/list",
@@ -2725,6 +2734,45 @@
     if (!MOBILE_TRAFFIC_MODE || !MOBILE_TRAFFIC_LOCAL_METHODS.has(method)) return null;
     // 手机官方壳首屏保留会话与输入体验；插件/MCP 管理类状态在手机弱网下本地空响应，避免阻塞 app-server。
     return [];
+  }
+
+  function hasThreadStartUserContent(value, depth = 0, seen = new WeakSet()) {
+    if (!value || typeof value !== "object" || depth > 5) return false;
+    if (seen.has(value)) return false;
+    seen.add(value);
+    if (Array.isArray(value)) return value.some((item) => hasThreadStartUserContent(item, depth + 1, seen));
+    for (const [key, item] of Object.entries(value)) {
+      const normalizedKey = String(key || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (normalizedKey === "bodyjsonstring" && typeof item === "string") {
+        try {
+          if (hasThreadStartUserContent(JSON.parse(item), depth + 1, seen)) return true;
+        } catch {}
+        continue;
+      }
+      const userContentKey = /^(prompt|input|text|content|message|instructions|usermessage)$/.test(normalizedKey);
+      if (userContentKey && typeof item === "string" && item.trim()) return true;
+      if (userContentKey && item && typeof item === "object" && hasThreadStartUserContent(item, depth + 1, seen)) {
+        return true;
+      }
+      if (item && typeof item === "object" && hasThreadStartUserContent(item, depth + 1, seen)) return true;
+    }
+    return false;
+  }
+
+  function isBackgroundThreadStartPayload(payload) {
+    if (appServerMethod(payload) !== "thread/start") return false;
+    if (Date.now() - bridgeStartedAtMs > BACKGROUND_THREAD_START_STARTUP_WINDOW_MS) return false;
+    // 启动期空 thread/start 多用于官方主页预创建草稿；带用户内容的首条发送必须保持实时。
+    return !hasThreadStartUserContent(payload);
+  }
+
+  function invokeBackgroundThreadStartDeferred(channel, ipcArgs, payload, diagnosticSummary) {
+    if (!isBackgroundThreadStartPayload(payload)) return null;
+    clientDiagnostic("background-thread-start-deferred", {
+      ...diagnosticSummary,
+      delayMs: BACKGROUND_THREAD_START_DELAY_MS,
+    });
+    return delay(BACKGROUND_THREAD_START_DELAY_MS).then(() => invokeGatewayImmediate(channel, ipcArgs, payload));
   }
 
   function diagnosticThreadIdFromValue(value, depth = 0, seen = new WeakSet()) {
@@ -3139,6 +3187,8 @@
       clientDiagnostic("mobile-traffic-local-state", diagnosticSummary);
       return Promise.resolve(mobileLocalValue);
     }
+    const backgroundThreadStartInvoke = invokeBackgroundThreadStartDeferred(channel, ipcArgs, payload, diagnosticSummary);
+    if (backgroundThreadStartInvoke) return backgroundThreadStartInvoke;
     const cachedReadOnlyAppServerInvoke = invokeReadOnlyAppServerCached(channel, ipcArgs, payload, diagnosticSummary);
     if (cachedReadOnlyAppServerInvoke) return cachedReadOnlyAppServerInvoke;
     const fastSyncInvoke = await invokeFastSyncSnapshot(channel, ipcArgs, payload, diagnosticSummary);

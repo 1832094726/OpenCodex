@@ -5,7 +5,7 @@
 
   const PLUGIN_ID = "opencodex.token-usage-inline";
   const BADGE_ATTR = "data-opencodex-token-usage-inline";
-  const REQUEST_IDLE_DELAY_MS = 5000;
+  const REQUEST_IDLE_DELAY_MS = 15000;
   const REQUEST_RETRY_MS = 65 * 1000;
   const MAX_REQUESTED_KEYS = 600;
   const DIAGNOSTIC_KEY = "__OpenCodexTokenUsageInline";
