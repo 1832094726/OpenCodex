@@ -297,6 +297,52 @@ test("listLocalSessionThreads reuses a short cache for repeated mobile opens", (
   assert.deepEqual(refreshed.map((thread) => thread.id), ["thread-cache-2", "thread-cache-1"]);
 });
 
+test("listLocalSessionThreads returns partial recent results when scan budget is exhausted", () => {
+  const root = tempDir();
+  const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  for (let index = 0; index < 20; index += 1) {
+    const id = `thread-budget-${String(index).padStart(2, "0")}`;
+    const file = path.join(sessionsDir, `rollout-2026-06-30T08-${String(index).padStart(2, "0")}-00-${id}.jsonl`);
+    fs.writeFileSync(
+      file,
+      [
+        JSON.stringify({
+          timestamp: `2026-06-30T08:${String(index).padStart(2, "0")}:00.000Z`,
+          type: "session_meta",
+          payload: {
+            cwd: "/repo/budget",
+            session_id: id,
+          },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          payload: {
+            message: `预算内最近会话 ${index}`,
+            type: "user_message",
+          },
+        }),
+      ].join("\n"),
+      "utf8"
+    );
+    fs.utimesSync(file, new Date(`2026-06-30T08:${String(index).padStart(2, "0")}:00.000Z`), new Date(`2026-06-30T08:${String(index).padStart(2, "0")}:00.000Z`));
+  }
+  let nowMs = -50;
+  const threads = listLocalSessionThreads({
+    cacheTtlMs: 0,
+    codexHome: root,
+    limit: 20,
+    now: () => {
+      nowMs += 50;
+      return nowMs;
+    },
+    scanMaxMs: 250,
+  });
+
+  assert.ok(threads.length > 0);
+  assert.ok(threads.length < 20);
+});
+
 test("createMobileBootstrapPayload falls back to local history when thread snapshot is missing", async () => {
   const payload = await createMobileBootstrapPayload({
     listLocalThreads: () => [

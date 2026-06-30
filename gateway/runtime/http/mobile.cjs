@@ -13,6 +13,7 @@ const MOBILE_THREAD_DETAIL_HEAD_BYTES = 64 * 1024;
 const MOBILE_THREAD_DETAIL_TAIL_BYTES = 512 * 1024;
 const MOBILE_MESSAGE_TEXT_MAX_CHARS = 12_000;
 const MOBILE_THREAD_LIST_CACHE_TTL_MS = 5_000;
+const MOBILE_THREAD_LIST_SCAN_MAX_MS = 250;
 const MOBILE_THREAD_FIND_RECENT_FILE_LIMIT = 600;
 const MOBILE_SESSION_META_HEAD_BYTES = 64 * 1024;
 const MOBILE_THREAD_ID_MAX_CHARS = 160;
@@ -117,6 +118,9 @@ function normalizeMobileThreads(value, options = {}) {
 
 function walkJsonlFiles(root, files = [], options = {}) {
   const maxFiles = Number(options.maxFiles) > 0 ? Number(options.maxFiles) : 0;
+  const minFiles = Math.max(0, Number(options.minFiles) || 0);
+  const hasBudget = typeof options.hasBudget === "function" ? options.hasBudget : () => true;
+  if (!hasBudget() && files.length >= minFiles) return files;
   if (maxFiles > 0 && files.length >= maxFiles) return files;
   let entries = [];
   try {
@@ -126,6 +130,7 @@ function walkJsonlFiles(root, files = [], options = {}) {
   }
   if (options.newestFirst) entries.sort((left, right) => right.name.localeCompare(left.name));
   for (const entry of entries) {
+    if (!hasBudget() && files.length >= minFiles) break;
     if (maxFiles > 0 && files.length >= maxFiles) break;
     const fullPath = path.join(root, entry.name);
     if (entry.isDirectory()) {
@@ -441,26 +446,32 @@ function listLocalSessionThreads(options = {}) {
   if (cached) return cached;
   const codexHome = options.codexHome || CODEX_HOME;
   const limit = Math.max(1, Math.min(Number(options.limit) || 50, 200));
+  const now = typeof options.now === "function" ? options.now : Date.now;
+  const scanMaxMs = Math.max(0, Number(options.scanMaxMs ?? MOBILE_THREAD_LIST_SCAN_MAX_MS));
+  const scanStartedAtMs = now();
+  const hasScanBudget = () => scanMaxMs === 0 || now() - scanStartedAtMs <= scanMaxMs;
   const roots = localSessionRoots(codexHome);
   const files = [];
+  const minimumCandidateFiles = Math.min(limit, 3);
   for (const root of roots) {
+    if (!hasScanBudget() && files.length >= minimumCandidateFiles) break;
     // 手机首屏只需要最近候选；按日期目录/文件名倒序提前停止，避免每次弱网打开都遍历全部历史。
-    for (const filePath of walkJsonlFiles(root.dir, [], { maxFiles: limit * 6, newestFirst: true })) {
+    for (const filePath of walkJsonlFiles(root.dir, [], { hasBudget: hasScanBudget, maxFiles: limit * 6, minFiles: minimumCandidateFiles, newestFirst: true })) {
       files.push({ archived: root.archived, filePath });
+      if (!hasScanBudget() && files.length >= minimumCandidateFiles) break;
     }
   }
-  const filesWithMtime = files
-    .map((item) => {
-      try {
-        return { ...item, mtimeMs: fs.statSync(item.filePath).mtimeMs };
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean)
-    .sort((left, right) => right.mtimeMs - left.mtimeMs);
+  const filesWithMtime = [];
+  for (const item of files) {
+    if (!hasScanBudget() && filesWithMtime.length >= limit) break;
+    try {
+      filesWithMtime.push({ ...item, mtimeMs: fs.statSync(item.filePath).mtimeMs });
+    } catch {}
+  }
+  filesWithMtime.sort((left, right) => right.mtimeMs - left.mtimeMs);
   const threads = [];
   for (const item of filesWithMtime.slice(0, limit * 3)) {
+    if (!hasScanBudget() && threads.length > 0) break;
     const thread = sessionThreadFromFile(item.filePath, item.archived);
     if (thread) {
       // 列表页已经定位过文件，缓存映射后详情页无需再次全量扫描历史目录。
@@ -469,6 +480,7 @@ function listLocalSessionThreads(options = {}) {
     }
     if (threads.length >= limit) break;
   }
+  // 手机弱网首屏宁可先返回已拿到的最近会话，也不要为了补全全部候选阻塞页面可交互。
   rememberLocalThreadList({ ...options, limit }, threads);
   return threads;
 }
