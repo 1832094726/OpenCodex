@@ -38,6 +38,10 @@ body {
   align-content: start;
 }
 
+.mobile-shell > * {
+  min-width: 0;
+}
+
 .topbar,
 .summary,
 .thread-list,
@@ -59,6 +63,10 @@ body {
   padding: 12px;
   /* 顶栏只承载当前会话状态和模式切换，保持官方工具壳的低装饰密度。 */
   backdrop-filter: blur(12px);
+}
+
+.topbar > div {
+  min-width: 0;
 }
 
 h1,
@@ -116,6 +124,7 @@ p,
 .summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
+  min-width: 0;
   border-radius: 8px;
 }
 
@@ -146,11 +155,13 @@ strong {
 
 .thread-list {
   display: grid;
+  min-width: 0;
 }
 
 .message-list {
   display: grid;
   gap: 10px;
+  min-width: 0;
   padding: 12px;
 }
 
@@ -207,7 +218,9 @@ strong {
 
 .thread-card {
   display: block;
+  min-width: 0;
   min-height: 74px;
+  overflow: hidden;
   padding: 12px;
   border-width: 0 0 1px;
   background: var(--panel);
@@ -251,6 +264,7 @@ strong {
 .message {
   display: grid;
   gap: 6px;
+  min-width: 0;
   max-width: 92%;
   padding: 10px 12px;
   border: 1px solid var(--line);

@@ -874,13 +874,16 @@ function createMobileBootstrapPayload(options = {}) {
       ? normalizeMobileThreads(options.listLocalThreads(), { limit: options.limit })
       : [];
   const payload = {
-    deferredState: MOBILE_DEFERRED_STATE,
     mode: "mobile-lite",
     ok: true,
     snapshotAgeMs,
     source: snapshotThreads.length > 0 ? snapshot.source || "snapshot" : localThreads.length > 0 ? "local-history" : "empty",
     threads: snapshotThreads.length > 0 ? snapshotThreads : localThreads,
   };
+  if (options.includeDeferredState === true) {
+    // 默认不向手机传诊断态；需要排查时再显式打开，避免弱网首屏携带用不到的桌面状态说明。
+    payload.deferredState = MOBILE_DEFERRED_STATE;
+  }
   payload.metrics = {
     deferredStateCount: MOBILE_DEFERRED_STATE.length,
     estimatedPayloadBytes: estimatedJsonBytes(payload),
@@ -926,6 +929,7 @@ function createMobileApi({ codexHome, fastSyncCache, invokeTurnStart, mobileRece
   async function handleBootstrap(req, res, url) {
     const limit = Number(url.searchParams.get("limit") || 50);
     const payload = await createMobileBootstrapPayload({
+      includeDeferredState: url.searchParams.get("debugState") === "1",
       limit,
       listLocalThreads: () => listLocalSessionThreads({ ...(codexHome ? { codexHome } : {}), limit }),
       readThreadListSnapshot,

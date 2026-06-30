@@ -19,8 +19,16 @@ test("mobile shell keeps an official-like compact application frame", () => {
   assert.match(css, /--panel: #ffffff/);
   assert.match(css, /--signal: #10a37f/);
   assert.match(css, /\.mobile-shell \{[^}]*max-width: 840px/s);
+  assert.match(css, /\.mobile-shell > \* \{[^}]*min-width: 0/s);
   assert.match(css, /\.topbar \{[^}]*position: sticky/s);
+  assert.match(css, /\.topbar > div \{[^}]*min-width: 0/s);
   assert.match(css, /\.topbar,\n\.summary,\n\.thread-list,\n\.thread-card,\n\.message-list \{[^}]*border-radius: 8px/s);
+  assert.match(css, /\.summary \{[^}]*min-width: 0/s);
+  assert.match(css, /\.thread-list \{[^}]*min-width: 0/s);
+  assert.match(css, /\.message-list \{[^}]*min-width: 0/s);
+  assert.match(css, /\.thread-card \{[^}]*min-width: 0/s);
+  assert.match(css, /\.thread-card \{[^}]*overflow: hidden/s);
+  assert.match(css, /\.message \{[^}]*min-width: 0/s);
   assert.doesNotMatch(css, /box-shadow:/);
   assert.match(css, /\.summary \{[^}]*border-radius: 8px/s);
 });

@@ -161,6 +161,16 @@ test("createMobileBootstrapPayload returns stale-first empty state without block
   assert.equal(payload.mode, "mobile-lite");
   assert.equal(payload.source, "empty");
   assert.deepEqual(payload.threads, []);
+  assert.equal(payload.deferredState, undefined);
+  assert.equal(payload.metrics.deferredStateCount, 4);
+});
+
+test("createMobileBootstrapPayload only returns deferred state diagnostics when requested", async () => {
+  const payload = await createMobileBootstrapPayload({
+    includeDeferredState: true,
+    readThreadListSnapshot: () => null,
+  });
+
   assert.deepEqual(payload.deferredState, ["app/list", "mcpServerStatus/list", "plugin/list", "desktop-state"]);
 });
 
