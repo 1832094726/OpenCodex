@@ -90,6 +90,18 @@ test("mobile lite confirms matching pending user messages instead of duplicating
   assert.match(source, /if \(confirmMatchingPendingUserMessage\(message\)\) return/);
 });
 
+test("mobile lite skips rerendering unchanged visible snapshots", () => {
+  const source = readMobileSource();
+
+  assert.match(source, /function visiblePayloadFingerprint\(payload\)/);
+  assert.match(source, /lastBootstrapFingerprint/);
+  assert.match(source, /lastThreadFingerprint/);
+  assert.match(source, /fingerprint === lastBootstrapFingerprint/);
+  assert.match(source, /轻量会话列表无变化/);
+  assert.match(source, /fingerprint === lastThreadFingerprint/);
+  assert.match(source, /当前会话轻量消息无变化/);
+});
+
 test("mobile lite pauses realtime events while the page is hidden", () => {
   const source = readMobileSource();
 

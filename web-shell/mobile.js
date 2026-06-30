@@ -26,6 +26,8 @@
   let threadEvents = null;
   let activeThreadId = "";
   let activeThreadEventOffset = null;
+  let lastBootstrapFingerprint = "";
+  let lastThreadFingerprint = "";
 
   function setText(node, value) {
     if (node) node.textContent = String(value == null ? "" : value);
@@ -57,6 +59,26 @@
 
   function normalizeMessageText(value) {
     return String(value == null ? "" : value).trim();
+  }
+
+  function visiblePayloadFingerprint(payload) {
+    if (!payload || payload.ok !== true) return "";
+    try {
+      const thread = payload.thread && typeof payload.thread === "object" ? payload.thread : {};
+      return JSON.stringify({
+        messages: Array.isArray(payload.messages) ? payload.messages : [],
+        thread: {
+          archived: Boolean(thread.archived),
+          id: thread.id || "",
+          projectPath: thread.projectPath || "",
+          title: thread.title || "",
+          updatedAt: thread.updatedAt || "",
+        },
+        threads: Array.isArray(payload.threads) ? payload.threads : [],
+      });
+    } catch {
+      return "";
+    }
   }
 
   function mobileCacheKey(kind, id) {
@@ -421,6 +443,12 @@
 
   function renderBootstrapPayload(payload, statusText) {
     const threads = Array.isArray(payload.threads) ? payload.threads : [];
+    const fingerprint = visiblePayloadFingerprint(payload);
+    if (!statusText && fingerprint && fingerprint === lastBootstrapFingerprint) {
+      setText(statusEl, "轻量会话列表无变化");
+      return;
+    }
+    lastBootstrapFingerprint = fingerprint;
     // 渲染层只消费裁剪后的 DTO；会话详情和实时增量后续再按当前会话单独订阅。
     if (statusEl) statusEl.classList.remove("error");
     setText(statusEl, statusText || (payload.source === "empty" ? "未命中快照，可切换完整模式刷新" : "已加载轻量会话列表"));
@@ -466,6 +494,12 @@
   function renderThreadPayload(threadId, payload, statusText) {
     const messages = Array.isArray(payload.messages) ? payload.messages : [];
     const thread = payload.thread || {};
+    const fingerprint = visiblePayloadFingerprint(payload);
+    if (!statusText && fingerprint && fingerprint === lastThreadFingerprint) {
+      setText(statusEl, "当前会话轻量消息无变化");
+      return;
+    }
+    lastThreadFingerprint = fingerprint;
     document.title = thread.title ? `${thread.title} - OpenCodex Mobile` : "OpenCodex Mobile";
     setText(titleEl, thread.title || "OpenCodex");
     setText(sectionTitleEl, "当前会话");
