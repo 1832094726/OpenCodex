@@ -16,6 +16,7 @@
   const MOBILE_PERSISTENT_CACHE_TTL_MS = 5 * 60_000;
   const MOBILE_PERSISTENT_CACHE_MAX_ENTRIES = 24;
   const MOBILE_BOOTSTRAP_REFRESH_COOLDOWN_MS = 15_000;
+  const MOBILE_THREAD_DETAIL_REFRESH_COOLDOWN_MS = 10_000;
   const MOBILE_READ_TIMEOUT_MS = 8_000;
   const MOBILE_SEND_TIMEOUT_MS = 30_000;
   const MOBILE_BOOTSTRAP_LIMIT_DEFAULT = 50;
@@ -184,6 +185,13 @@
     if (shouldReuseFreshCacheWithoutRefresh()) return true;
     // 最近会话列表不是实时通道；短时间重复打开时直接复用本地快照，当前会话增量仍由详情页 SSE 负责。
     return cachedPayloadAgeMs(cached) <= MOBILE_BOOTSTRAP_REFRESH_COOLDOWN_MS;
+  }
+
+  function shouldSkipThreadDetailRefresh(cached) {
+    if (!cached) return false;
+    if (shouldReuseFreshCacheWithoutRefresh()) return true;
+    // 当前会话的新消息由 SSE 续接；刚读取过的详情快照无需立刻再次请求。
+    return cachedPayloadAgeMs(cached) <= MOBILE_THREAD_DETAIL_REFRESH_COOLDOWN_MS;
   }
 
   function mobileBootstrapUrl() {
@@ -514,9 +522,12 @@
     if (cached) {
       renderThreadPayload(threadId, cached, "已加载本地快照，正在刷新");
       connectThreadEvents(threadId, nextThreadEventOffset(cached));
-      if (shouldReuseFreshCacheWithoutRefresh()) {
+      if (shouldSkipThreadDetailRefresh(cached)) {
         // 当前会话的新内容由 SSE 增量补齐，省流量网络不再重复拉取详情快照。
-        setText(statusEl, "已加载本地快照，省流量模式下只同步增量");
+        setText(
+          statusEl,
+          shouldReuseFreshCacheWithoutRefresh() ? "已加载本地快照，省流量模式下只同步增量" : "已加载本地快照，短时间内只同步增量"
+        );
         return;
       }
     }

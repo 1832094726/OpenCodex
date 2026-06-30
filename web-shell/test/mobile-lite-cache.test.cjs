@@ -56,19 +56,31 @@ test("mobile lite reuses fresh cache without full refresh on constrained network
   assert.match(source, /已加载本地快照，省流量模式下暂停刷新/);
   assert.match(source, /已加载本地快照，省流量模式下只同步增量/);
   assert.match(source, /connectThreadEvents\(threadId, nextThreadEventOffset\(cached\)\)/);
-  assert.match(source, /if \(shouldReuseFreshCacheWithoutRefresh\(\)\) \{/);
+  assert.match(source, /if \(shouldSkipBootstrapRefresh\(cached\)\) \{/);
+  assert.match(source, /if \(shouldSkipThreadDetailRefresh\(cached\)\) \{/);
 });
 
 test("mobile lite coalesces non-critical bootstrap refreshes when cached state is fresh", () => {
   const source = readMobileSource();
 
   assert.match(source, /MOBILE_BOOTSTRAP_REFRESH_COOLDOWN_MS = 15_000/);
+  assert.match(source, /MOBILE_THREAD_DETAIL_REFRESH_COOLDOWN_MS = 10_000/);
   assert.match(source, /payload\._cacheSavedAtMs = savedAtMs/);
   assert.match(source, /function cachedPayloadAgeMs\(payload\)/);
   assert.match(source, /function shouldSkipBootstrapRefresh\(cached\)/);
   assert.match(source, /cachedPayloadAgeMs\(cached\) <= MOBILE_BOOTSTRAP_REFRESH_COOLDOWN_MS/);
   assert.match(source, /if \(shouldSkipBootstrapRefresh\(cached\)\) \{/);
   assert.match(source, /已加载本地快照，短时间内不重复刷新列表/);
+});
+
+test("mobile lite coalesces fresh thread detail refreshes behind realtime events", () => {
+  const source = readMobileSource();
+
+  assert.match(source, /function shouldSkipThreadDetailRefresh\(cached\)/);
+  assert.match(source, /cachedPayloadAgeMs\(cached\) <= MOBILE_THREAD_DETAIL_REFRESH_COOLDOWN_MS/);
+  assert.match(source, /if \(shouldSkipThreadDetailRefresh\(cached\)\) \{/);
+  assert.match(source, /connectThreadEvents\(threadId, nextThreadEventOffset\(cached\)\)/);
+  assert.match(source, /已加载本地快照，短时间内只同步增量/);
 });
 
 test("mobile lite prunes only its own persistent cache entries", () => {
