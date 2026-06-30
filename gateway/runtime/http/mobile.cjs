@@ -2,11 +2,13 @@ const fs = require("fs");
 const path = require("path");
 const { cacheKeyForSnapshot } = require("../core/fast-sync-cache.cjs");
 const { CODEX_HOME } = require("../core/config.cjs");
-const { sendJson } = require("./http-utils.cjs");
+const { readBody, sendJson } = require("./http-utils.cjs");
 
 const MOBILE_DEFERRED_STATE = ["app/list", "mcpServerStatus/list", "plugin/list", "desktop-state"];
 const MOBILE_THREAD_LIST_METHOD = "thread/list";
 const MOBILE_THREAD_LIST_ARGS = [];
+const MOBILE_TURN_TEXT_MAX_CHARS = 20_000;
+const MOBILE_TURN_SEND_TTL_MS = 10 * 60 * 1000;
 
 function firstString(...values) {
   for (const value of values) {
@@ -309,6 +311,80 @@ function sseWrite(res, { data, event, id }) {
   res.write("\n");
 }
 
+function parseJsonBody(rawBody) {
+  try {
+    return { ok: true, value: JSON.parse(rawBody || "{}") };
+  } catch {
+    return { ok: false, error: "Invalid JSON body" };
+  }
+}
+
+function normalizeMobileTurnText(value) {
+  const text = firstString(value);
+  if (!text) return "";
+  return text.slice(0, MOBILE_TURN_TEXT_MAX_CHARS);
+}
+
+function mobileTurnLocalSendId(value) {
+  const text = firstString(value);
+  return text ? text.slice(0, 120) : "";
+}
+
+function createMobileTurnStartPayload({ localSendId, text, threadId }) {
+  const requestId = `mobile-turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return {
+    method: "turn/start",
+    request: {
+      id: requestId,
+      method: "turn/start",
+      params: {
+        input: text,
+        localSendId,
+        prompt: text,
+        source: "opencodex-mobile-lite",
+        threadId,
+      },
+    },
+  };
+}
+
+function createMobileTurnSender(options = {}) {
+  const invokeTurnStart =
+    typeof options.invokeTurnStart === "function" ? options.invokeTurnStart : async () => ({ ok: false, skipped: true });
+  const now = typeof options.now === "function" ? options.now : Date.now;
+  const sentByKey = new Map();
+
+  function pruneSent() {
+    const threshold = now() - MOBILE_TURN_SEND_TTL_MS;
+    for (const [key, entry] of sentByKey) {
+      if (!entry || Number(entry.createdAtMs) < threshold) sentByKey.delete(key);
+    }
+  }
+
+  async function sendTurn({ localSendId, text, threadId }) {
+    pruneSent();
+    const idempotencyKey = localSendId ? `${threadId}:${localSendId}` : "";
+    if (idempotencyKey && sentByKey.has(idempotencyKey)) {
+      return { ...sentByKey.get(idempotencyKey).value, duplicate: true };
+    }
+    const payload = createMobileTurnStartPayload({ localSendId, text, threadId });
+    // 手机端只提交当前会话的一条正文；官方 IPC 形状集中在这里，避免前端恢复完整桌面状态。
+    const value = await invokeTurnStart(payload);
+    const result = {
+      accepted: true,
+      localSendId,
+      mode: "mobile-lite",
+      ok: true,
+      requestId: payload.request.id,
+      value,
+    };
+    if (idempotencyKey) sentByKey.set(idempotencyKey, { createdAtMs: now(), value: result });
+    return result;
+  }
+
+  return { sendTurn };
+}
+
 function createMobileThreadEventStream(options = {}) {
   const req = options.req;
   const res = options.res;
@@ -428,7 +504,9 @@ function createMobileThreadPayload(options = {}) {
   });
 }
 
-function createMobileApi({ fastSyncCache }) {
+function createMobileApi({ fastSyncCache, invokeTurnStart }) {
+  const turnSender = createMobileTurnSender({ invokeTurnStart });
+
   function readThreadListSnapshot() {
     const key = cacheKeyForSnapshot(MOBILE_THREAD_LIST_METHOD, MOBILE_THREAD_LIST_ARGS);
     return fastSyncCache.readSnapshot({ key });
@@ -472,7 +550,40 @@ function createMobileApi({ fastSyncCache }) {
     });
   }
 
-  return { handleBootstrap, handleThread, handleThreadEvents };
+  async function handleThreadTurn(req, res, _url, threadId) {
+    let parsedBody = null;
+    try {
+      parsedBody = parseJsonBody(await readBody(req, { maxBytes: 128 * 1024 }));
+    } catch (error) {
+      const status = error && typeof error.statusCode === "number" ? error.statusCode : 500;
+      return sendJson(res, status, { ok: false, error: error instanceof Error ? error.message : String(error) }, { "cache-control": "no-store" });
+    }
+    if (!parsedBody.ok) return sendJson(res, 400, { ok: false, error: parsedBody.error }, { "cache-control": "no-store" });
+    const body = parsedBody.value && typeof parsedBody.value === "object" ? parsedBody.value : {};
+    const text = normalizeMobileTurnText(body.text || body.message || body.prompt);
+    if (!firstString(threadId)) {
+      return sendJson(res, 400, { ok: false, error: "Missing threadId" }, { "cache-control": "no-store" });
+    }
+    if (!text) return sendJson(res, 400, { ok: false, error: "Missing message text" }, { "cache-control": "no-store" });
+
+    try {
+      const payload = await turnSender.sendTurn({
+        localSendId: mobileTurnLocalSendId(body.localSendId),
+        text,
+        threadId,
+      });
+      return sendJson(res, 202, payload, { "cache-control": "no-store" });
+    } catch (error) {
+      return sendJson(
+        res,
+        502,
+        { ok: false, error: error instanceof Error ? error.message : String(error) },
+        { "cache-control": "no-store" }
+      );
+    }
+  }
+
+  return { handleBootstrap, handleThread, handleThreadEvents, handleThreadTurn };
 }
 
 module.exports = {
@@ -483,6 +594,8 @@ module.exports = {
   createMobileBootstrapPayload,
   createMobileThreadEventStream,
   createMobileThreadPayload,
+  createMobileTurnSender,
+  createMobileTurnStartPayload,
   listLocalSessionThreadDetail,
   listLocalSessionThreads,
   normalizeMobileThreads,

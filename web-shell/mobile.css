@@ -146,6 +146,58 @@ strong {
   padding: 12px;
 }
 
+.compose {
+  position: sticky;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: rgba(26, 28, 31, 0.08) 0 4px 18px;
+}
+
+.compose[hidden] {
+  display: none;
+}
+
+.compose textarea {
+  min-height: 38px;
+  max-height: 140px;
+  resize: none;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 9px 10px;
+  background: #ffffff;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.35;
+  outline: none;
+}
+
+.compose textarea:focus {
+  border-color: rgba(16, 163, 127, 0.55);
+}
+
+.compose button {
+  min-width: 58px;
+  height: 38px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--signal);
+  color: #ffffff;
+  font: inherit;
+  font-size: 14px;
+}
+
+.compose button:disabled {
+  opacity: 0.55;
+}
+
 .thread-card {
   display: block;
   min-height: 74px;
@@ -202,6 +254,10 @@ strong {
 .message.user {
   justify-self: end;
   background: #f7f7f8;
+}
+
+.message.pending {
+  opacity: 0.72;
 }
 
 .message.assistant {

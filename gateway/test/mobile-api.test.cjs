@@ -5,9 +5,11 @@ const path = require("node:path");
 const test = require("node:test");
 
 const {
+  createMobileApi,
   createMobileBootstrapPayload,
   createMobileThreadPayload,
   createMobileThreadEventStream,
+  createMobileTurnStartPayload,
   listLocalSessionThreadDetail,
   listLocalSessionThreads,
   normalizeMobileThreads,
@@ -45,6 +47,20 @@ function tempDir() {
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function jsonPostReq(body) {
+  const events = {};
+  return {
+    headers: { "content-type": "application/json" },
+    method: "POST",
+    on(event, handler) {
+      events[event] = handler;
+      if (event === "data") process.nextTick(() => handler(Buffer.from(JSON.stringify(body))));
+      if (event === "end") process.nextTick(handler);
+    },
+    socket: { remoteAddress: "127.0.0.1" },
+  };
 }
 
 function createStreamHarness() {
@@ -364,6 +380,87 @@ test("createMobileThreadEventStream emits only appended visible messages and cle
 
   harness.close();
   assert.equal(stream.closed(), true);
+});
+
+test("createMobileTurnStartPayload keeps phone send payload minimal", () => {
+  const payload = createMobileTurnStartPayload({
+    localSendId: "local-1",
+    text: "手机流量下只发送当前增量",
+    threadId: "thread-send-1",
+  });
+
+  assert.equal(payload.method, "turn/start");
+  assert.equal(payload.request.method, "turn/start");
+  assert.equal(payload.request.params.threadId, "thread-send-1");
+  assert.equal(payload.request.params.input, "手机流量下只发送当前增量");
+  assert.equal(payload.request.params.localSendId, "local-1");
+  assert.equal(payload.request.params.source, "opencodex-mobile-lite");
+  assert.deepEqual(Object.keys(payload.request.params).sort(), ["input", "localSendId", "prompt", "source", "threadId"]);
+});
+
+test("mobile turn handler validates text and sends through injected turn/start bridge", async () => {
+  const calls = [];
+  const api = createMobileApi({
+    fastSyncCache: { readSnapshot: () => null },
+    invokeTurnStart: async (payload) => {
+      calls.push(payload);
+      return { acceptedByMock: true };
+    },
+  });
+
+  const response = await collectResponse(
+    (req, res) => api.handleThreadTurn(req, res, new URL("http://127.0.0.1/api/mobile/thread/thread-send-1/turns"), "thread-send-1"),
+    jsonPostReq({ localSendId: "local-2", text: "继续压缩手机端状态" })
+  );
+
+  assert.equal(response.statusCode, 202);
+  const body = JSON.parse(response.body);
+  assert.equal(body.ok, true);
+  assert.equal(body.mode, "mobile-lite");
+  assert.equal(body.localSendId, "local-2");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].request.params.threadId, "thread-send-1");
+  assert.equal(calls[0].request.params.input, "继续压缩手机端状态");
+});
+
+test("mobile turn handler coalesces repeated local send ids", async () => {
+  let invokeCount = 0;
+  const api = createMobileApi({
+    fastSyncCache: { readSnapshot: () => null },
+    invokeTurnStart: async () => {
+      invokeCount += 1;
+      return { acceptedByMock: true };
+    },
+  });
+  const url = new URL("http://127.0.0.1/api/mobile/thread/thread-send-2/turns");
+  const first = await collectResponse(
+    (req, res) => api.handleThreadTurn(req, res, url, "thread-send-2"),
+    jsonPostReq({ localSendId: "same-send", text: "第一次提交" })
+  );
+  const second = await collectResponse(
+    (req, res) => api.handleThreadTurn(req, res, url, "thread-send-2"),
+    jsonPostReq({ localSendId: "same-send", text: "第一次提交" })
+  );
+
+  assert.equal(first.statusCode, 202);
+  assert.equal(second.statusCode, 202);
+  assert.equal(JSON.parse(second.body).duplicate, true);
+  assert.equal(invokeCount, 1);
+});
+
+test("mobile turn handler rejects empty message text", async () => {
+  const api = createMobileApi({
+    fastSyncCache: { readSnapshot: () => null },
+    invokeTurnStart: () => assert.fail("empty text should not invoke official runtime"),
+  });
+
+  const response = await collectResponse(
+    (req, res) => api.handleThreadTurn(req, res, new URL("http://127.0.0.1/api/mobile/thread/thread-send-3/turns"), "thread-send-3"),
+    jsonPostReq({ text: "   " })
+  );
+
+  assert.equal(response.statusCode, 400);
+  assert.equal(JSON.parse(response.body).error, "Missing message text");
 });
 
 test("request handler serves the mobile-lite shell at /m before the full app shell fallback", async () => {

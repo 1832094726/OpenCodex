@@ -38,6 +38,10 @@
         <h2 id="mobile-section-title">最近会话</h2>
         <div id="mobile-thread-list" class="thread-list" aria-live="polite"></div>
         <div id="mobile-message-list" class="message-list" aria-live="polite" hidden></div>
+        <form id="mobile-compose" class="compose" hidden>
+          <textarea id="mobile-compose-text" rows="1" maxlength="20000" autocomplete="off" placeholder="输入消息"></textarea>
+          <button id="mobile-compose-send" type="submit">发送</button>
+        </form>
       </section>
     </main>
     <script src="/mobile.js"></script>

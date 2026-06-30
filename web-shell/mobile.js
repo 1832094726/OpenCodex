@@ -7,7 +7,11 @@
   const countEl = document.getElementById("mobile-count");
   const listEl = document.getElementById("mobile-thread-list");
   const messageListEl = document.getElementById("mobile-message-list");
+  const composeEl = document.getElementById("mobile-compose");
+  const composeTextEl = document.getElementById("mobile-compose-text");
+  const composeSendEl = document.getElementById("mobile-compose-send");
   let threadEvents = null;
+  let activeThreadId = "";
 
   function setText(node, value) {
     if (node) node.textContent = String(value == null ? "" : value);
@@ -25,10 +29,16 @@
     return `/m/thread/${id}`;
   }
 
+  function cssEscape(value) {
+    if (window.CSS && typeof window.CSS.escape === "function") return window.CSS.escape(value);
+    return String(value).replace(/["\\]/g, "\\$&");
+  }
+
   function renderThreads(threads) {
     listEl.innerHTML = "";
     listEl.hidden = false;
     messageListEl.hidden = true;
+    if (composeEl) composeEl.hidden = true;
     if (!threads.length) {
       const empty = document.createElement("div");
       empty.className = "empty";
@@ -58,6 +68,7 @@
     messageListEl.innerHTML = "";
     listEl.hidden = true;
     messageListEl.hidden = false;
+    if (composeEl) composeEl.hidden = false;
     if (!messages.length) {
       const empty = document.createElement("div");
       empty.className = "empty";
@@ -70,13 +81,15 @@
     }
   }
 
-  function appendMessage(message) {
+  function appendMessage(message, options) {
     const item = document.createElement("article");
     item.className = `message ${message.role === "user" ? "user" : "assistant"}`;
+    if (options && options.pending) item.classList.add("pending");
+    if (options && options.localSendId) item.dataset.localSendId = options.localSendId;
 
     const role = document.createElement("span");
     role.className = "message-role";
-    role.textContent = message.role === "user" ? "你" : "Codex";
+    role.textContent = options && options.pending ? "你 · 发送中" : message.role === "user" ? "你" : "Codex";
 
     const text = document.createElement("p");
     text.className = "message-text";
@@ -84,6 +97,16 @@
 
     item.append(role, text);
     messageListEl.append(item);
+    item.scrollIntoView({ block: "end" });
+  }
+
+  function markPendingAccepted(localSendId) {
+    if (!localSendId) return;
+    const item = messageListEl.querySelector(`[data-local-send-id="${cssEscape(localSendId)}"]`);
+    if (!item) return;
+    item.classList.remove("pending");
+    const role = item.querySelector(".message-role");
+    if (role) role.textContent = "你";
   }
 
   function connectThreadEvents(threadId) {
@@ -110,6 +133,57 @@
     });
   }
 
+  function resizeComposeText() {
+    if (!composeTextEl) return;
+    composeTextEl.style.height = "auto";
+    composeTextEl.style.height = `${Math.min(composeTextEl.scrollHeight, 140)}px`;
+  }
+
+  async function submitMessage(event) {
+    event.preventDefault();
+    if (!activeThreadId || !composeTextEl || !composeSendEl) return;
+    const text = composeTextEl.value.trim();
+    if (!text) return;
+    const localSendId = `mobile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    composeSendEl.disabled = true;
+    composeTextEl.value = "";
+    resizeComposeText();
+    const empty = messageListEl.querySelector(".empty");
+    if (empty) empty.remove();
+    // 手机端先显示本地 pending，真正的追加内容仍通过当前会话 SSE 收敛回来。
+    appendMessage({ role: "user", text }, { localSendId, pending: true });
+    try {
+      const response = await fetch(`/api/mobile/thread/${encodeURIComponent(activeThreadId)}/turns`, {
+        body: JSON.stringify({ localSendId, text }),
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+        },
+        method: "POST",
+      });
+      if (response.status === 401) {
+        location.href = "/";
+        return;
+      }
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      if (statusEl) statusEl.classList.remove("error");
+      markPendingAccepted(localSendId);
+      setText(statusEl, payload.duplicate ? "消息已提交，重复请求已合并" : "消息已提交，等待增量回包");
+    } catch (error) {
+      setText(statusEl, `发送失败：${error && error.message ? error.message : String(error)}`);
+      if (statusEl) statusEl.classList.add("error");
+      if (composeTextEl && !composeTextEl.value) composeTextEl.value = text;
+      const item = messageListEl.querySelector(`[data-local-send-id="${cssEscape(localSendId)}"]`);
+      if (item) item.remove();
+    } finally {
+      if (composeSendEl) composeSendEl.disabled = false;
+      if (composeTextEl) composeTextEl.focus();
+    }
+  }
+
   async function loadBootstrap() {
     // 手机入口只请求合并后的轻量状态，不加载官方 bridge，避免弱网下被插件/MCP/桌面状态拖慢。
     const response = await fetch("/api/mobile/bootstrap", {
@@ -132,6 +206,7 @@
   }
 
   async function loadThread(threadId) {
+    activeThreadId = threadId;
     // 详情页只读取当前会话的轻量消息，实时增量会在这个边界上继续扩展。
     const response = await fetch(`/api/mobile/thread/${encodeURIComponent(threadId)}`, {
       cache: "no-store",
@@ -163,6 +238,8 @@
   }
 
   const threadId = currentThreadId();
+  if (composeEl) composeEl.addEventListener("submit", submitMessage);
+  if (composeTextEl) composeTextEl.addEventListener("input", resizeComposeText);
   if (threadId) {
     loadThread(threadId).catch((error) => {
       setText(statusEl, `读取失败：${error && error.message ? error.message : String(error)}`);

@@ -361,6 +361,13 @@ function createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets
       return mobileApi.handleThreadEvents(req, res, url, threadId);
     }
 
+    if (pathname.startsWith("/api/mobile/thread/") && pathname.endsWith("/turns") && req.method === "POST") {
+      const rawThreadId = pathname.slice("/api/mobile/thread/".length, -"/turns".length);
+      const threadId = decodeURIComponent(rawThreadId);
+      // 手机发送只走一条轻量 turn/start，避免为了提交消息恢复完整官方页面状态。
+      return mobileApi.handleThreadTurn(req, res, url, threadId);
+    }
+
     if (pathname.startsWith("/api/mobile/thread/") && req.method === "GET") {
       const threadId = decodeURIComponent(pathname.slice("/api/mobile/thread/".length));
       // 只读取当前会话的轻量消息列表，为后续按会话增量订阅留出边界。
@@ -548,7 +555,22 @@ async function createGateway() {
   const localFiles = createLocalFileService();
   const pickedFiles = createPickedFilesService();
   const staticAssets = createStaticAssetService({ getI18nSnapshot, getOfficialBundle });
-  const mobileApi = createMobileApi({ fastSyncCache });
+  const mobileApi = createMobileApi({
+    fastSyncCache,
+    invokeTurnStart: (payload) =>
+      requestContext.run({ clientId: "mobile-lite", remoteAddress: "mobile-lite" }, () =>
+        invokeOfficialIpc("codex_desktop:message-from-view", [payload], {
+          clientId: "mobile-lite",
+          remoteAddress: "mobile-lite",
+          setTitle: () => true,
+          openExternal: (urlToOpen) => {
+            if (urlToOpen) console.log(`[openExternal] ${urlToOpen}`);
+            return true;
+          },
+          openFile: (filePath) => localFiles.createLocalFilePreview(filePath),
+        })
+      ),
+  });
   const requestHandler = createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets });
   const server = http.createServer((req, res) => {
     requestHandler(req, res).catch((error) => {
