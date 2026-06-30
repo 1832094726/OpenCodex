@@ -13,6 +13,7 @@ const {
   createMobileTurnStartPayload,
   listLocalSessionThreadDetail,
   listLocalSessionThreads,
+  mobileThreadDetailTailBytesForLimit,
   normalizeMobileThreads,
 } = require("../runtime/http/mobile.cjs");
 const { createStaticAssetService } = require("../runtime/http/static-assets.cjs");
@@ -784,6 +785,13 @@ test("createMobileThreadPayload reports lightweight transfer metrics", async () 
   assert.equal(payload.metrics.truncatedCount, 1);
   assert.equal(payload.metrics.windowed, true);
   assert.ok(payload.metrics.estimatedPayloadBytes > 0);
+});
+
+test("mobile thread detail tail window follows requested message limit", () => {
+  assert.equal(mobileThreadDetailTailBytesForLimit(40), 128 * 1024);
+  assert.equal(mobileThreadDetailTailBytesForLimit(80), 256 * 1024);
+  assert.equal(mobileThreadDetailTailBytesForLimit(120), 512 * 1024);
+  assert.equal(mobileThreadDetailTailBytesForLimit("bad-limit"), 512 * 1024);
 });
 
 test("createMobileThreadEventStream emits only appended visible messages and cleans up on close", async () => {

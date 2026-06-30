@@ -11,6 +11,8 @@ const MOBILE_TURN_TEXT_MAX_CHARS = 20_000;
 const MOBILE_TURN_SEND_TTL_MS = 10 * 60 * 1000;
 const MOBILE_THREAD_DETAIL_HEAD_BYTES = 64 * 1024;
 const MOBILE_THREAD_DETAIL_TAIL_BYTES = 512 * 1024;
+const MOBILE_THREAD_DETAIL_TAIL_BYTES_CELLULAR = 256 * 1024;
+const MOBILE_THREAD_DETAIL_TAIL_BYTES_CONSTRAINED = 128 * 1024;
 const MOBILE_MESSAGE_TEXT_MAX_CHARS = 12_000;
 const MOBILE_THREAD_LIST_CACHE_TTL_MS = 5_000;
 const MOBILE_THREAD_LIST_SCAN_MAX_MS = 250;
@@ -248,6 +250,14 @@ function truncateMobileMessageText(text, maxChars = MOBILE_MESSAGE_TEXT_MAX_CHAR
   const limit = Math.max(200, Number(maxChars) || MOBILE_MESSAGE_TEXT_MAX_CHARS);
   if (value.length <= limit) return { text: value, truncated: false };
   return { text: value.slice(0, limit), truncated: true };
+}
+
+function mobileThreadDetailTailBytesForLimit(limit) {
+  const normalizedLimit = Math.max(1, Math.min(Number(limit) || 120, 500));
+  // 前端弱网会降低消息条数；后端同步缩小 tail 窗口，避免少量消息仍读取 512KB 历史。
+  if (normalizedLimit <= 40) return MOBILE_THREAD_DETAIL_TAIL_BYTES_CONSTRAINED;
+  if (normalizedLimit <= 80) return MOBILE_THREAD_DETAIL_TAIL_BYTES_CELLULAR;
+  return MOBILE_THREAD_DETAIL_TAIL_BYTES;
 }
 
 function mobileMessageFromRecord(record, fallbackTimestamp = "") {
@@ -785,8 +795,9 @@ function createMobileApi({ fastSyncCache, invokeTurnStart }) {
 
   async function handleThread(req, res, url, threadId) {
     const limit = Number(url.searchParams.get("limit") || 120);
+    const tailBytes = mobileThreadDetailTailBytesForLimit(limit);
     const payload = await createMobileThreadPayload({
-      readLocalThreadDetail: () => listLocalSessionThreadDetail({ limit, threadId }),
+      readLocalThreadDetail: () => listLocalSessionThreadDetail({ limit, tailBytes, threadId }),
       threadId,
     });
     if (!payload.ok) return sendJsonCompressed(req, res, 404, payload, { "cache-control": "no-store" });
@@ -860,5 +871,6 @@ module.exports = {
   createMobileTurnStartPayload,
   listLocalSessionThreadDetail,
   listLocalSessionThreads,
+  mobileThreadDetailTailBytesForLimit,
   normalizeMobileThreads,
 };
