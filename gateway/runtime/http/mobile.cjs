@@ -15,6 +15,10 @@ const MOBILE_MESSAGE_TEXT_MAX_CHARS = 12_000;
 const MOBILE_THREAD_LIST_CACHE_TTL_MS = 5_000;
 const MOBILE_THREAD_FIND_RECENT_FILE_LIMIT = 600;
 const MOBILE_SESSION_META_HEAD_BYTES = 64 * 1024;
+const MOBILE_THREAD_ID_MAX_CHARS = 160;
+const MOBILE_THREAD_TITLE_MAX_CHARS = 160;
+const MOBILE_THREAD_PATH_MAX_CHARS = 320;
+const MOBILE_THREAD_TIME_MAX_CHARS = 80;
 const localSessionFileCache = new Map();
 const localThreadListCache = new Map();
 
@@ -30,6 +34,25 @@ function firstValue(...values) {
     if (value !== undefined && value !== null && value !== "") return value;
   }
   return null;
+}
+
+function mobileScalar(value, maxChars) {
+  // 移动端列表只展示短标量，避免官方快照里的复杂对象或异常长字段撑大弱网首屏。
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return "";
+  const text = value.trim();
+  if (!text) return "";
+  return text.length > maxChars ? text.slice(0, maxChars) : text;
+}
+
+function firstMobileScalar(maxChars, ...values) {
+  // 候选字段里可能混入复杂对象；跳过它们，继续寻找能安全下发到手机端的短标量。
+  for (const value of values) {
+    const normalized = mobileScalar(value, maxChars);
+    if (normalized !== "") return normalized;
+  }
+  return "";
 }
 
 function estimatedJsonBytes(value) {
@@ -52,18 +75,16 @@ function threadsArrayFromValue(value) {
 
 function normalizeMobileThread(thread) {
   if (!thread || typeof thread !== "object") return null;
-  const id = firstString(thread.id, thread.threadId, thread.thread_id, thread.conversationId, thread.conversation_id);
+  const id = mobileScalar(firstString(thread.id, thread.threadId, thread.thread_id, thread.conversationId, thread.conversation_id), MOBILE_THREAD_ID_MAX_CHARS);
   if (!id) return null;
-  const title = firstString(thread.title, thread.name, thread.summary, thread.firstMessage) || "Untitled";
-  const projectPath = firstString(
-    thread.projectPath,
-    thread.project_path,
-    thread.cwd,
-    thread.workspace,
-    thread.workspacePath,
-    thread.repoPath
+  const title =
+    mobileScalar(firstString(thread.title, thread.name, thread.summary, thread.firstMessage), MOBILE_THREAD_TITLE_MAX_CHARS) || "Untitled";
+  const projectPath = mobileScalar(
+    firstString(thread.projectPath, thread.project_path, thread.cwd, thread.workspace, thread.workspacePath, thread.repoPath),
+    MOBILE_THREAD_PATH_MAX_CHARS
   );
-  const updatedAt = firstValue(
+  const updatedAt = firstMobileScalar(
+    MOBILE_THREAD_TIME_MAX_CHARS,
     thread.updatedAt,
     thread.updated_at,
     thread.updatedAtMs,

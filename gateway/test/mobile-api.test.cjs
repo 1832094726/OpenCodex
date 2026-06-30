@@ -120,6 +120,27 @@ test("normalizeMobileThreads trims thread list to phone-safe fields", () => {
   ]);
 });
 
+test("normalizeMobileThreads caps oversized thread fields to small scalars", () => {
+  const threads = normalizeMobileThreads({
+    threads: [
+      {
+        cwd: `/repo/${"deep/".repeat(120)}`,
+        id: `thread-${"x".repeat(300)}`,
+        title: "移动端列表标题".repeat(80),
+        updatedAt: { nested: "drop-me", huge: "y".repeat(2_000) },
+        updatedAtMs: 1_782_723_600_000,
+      },
+    ],
+  });
+
+  assert.equal(threads.length, 1);
+  assert.equal(threads[0].id.length, 160);
+  assert.equal(threads[0].title.length, 160);
+  assert.equal(threads[0].projectPath.length, 320);
+  assert.equal(threads[0].updatedAt, 1_782_723_600_000);
+  assert.doesNotMatch(JSON.stringify(threads), /drop-me|yyyy/);
+});
+
 test("createMobileBootstrapPayload returns stale-first empty state without blocking on live runtime", async () => {
   const payload = await createMobileBootstrapPayload({
     readThreadListSnapshot: () => null,
