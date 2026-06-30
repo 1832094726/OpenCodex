@@ -1322,6 +1322,39 @@ test("request handler serves the mobile-lite shell at /m before the full app she
   assert.doesNotMatch(response.body, /src="\/mobile\.js"/);
 });
 
+test("request handler returns 304 for unchanged mobile-lite shell", async () => {
+  const { createRequestHandler } = require("../runtime/server.cjs");
+  const staticAssets = createStaticAssetService({
+    getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+    getOfficialBundle: () => null,
+  });
+  const handler = createRequestHandler({
+    localFiles: {},
+    mobileApi: { handleBootstrap: () => assert.fail("mobile bootstrap should not handle shell HTML") },
+    pickedFiles: {},
+    staticAssets,
+  });
+  const first = await collectResponse(handler, {
+    headers: { accept: "text/html", host: "127.0.0.1:8080" },
+    method: "GET",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/m",
+  });
+  const second = await collectResponse(handler, {
+    headers: { accept: "text/html", host: "127.0.0.1:8080", "if-none-match": first.headers.etag },
+    method: "GET",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/m",
+  });
+
+  assert.equal(first.statusCode, 200);
+  assert.ok(first.headers.etag);
+  assert.equal(first.headers["cache-control"], "no-cache");
+  assert.equal(second.statusCode, 304);
+  assert.equal(second.headers.etag, first.headers.etag);
+  assert.equal(second.body, "");
+});
+
 test("request handler serves the mobile-lite shell for thread deep links", async () => {
   const { createRequestHandler } = require("../runtime/server.cjs");
   const staticAssets = createStaticAssetService({

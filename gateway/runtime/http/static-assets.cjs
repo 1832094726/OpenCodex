@@ -467,10 +467,17 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   function serveMobileShell(req, res) {
     const response = gzipIfUseful(
       req,
-      { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+      { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" },
       Buffer.from(createMobileShellResponse(), "utf8")
     );
-    send(res, 200, response.headers, response.body);
+    const etag = etagForResponseBody(response.body);
+    const headers = { ...response.headers, etag };
+    if (String(req.headers["if-none-match"] || "") === etag) {
+      // 手机轻量壳内联了 CSS/JS；内容未变时用 304 避免弱网重复传整页。
+      send(res, 304, headers, "");
+      return;
+    }
+    send(res, 200, headers, response.body);
   }
 
   function servePluginLoader(res) {
