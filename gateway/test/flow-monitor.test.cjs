@@ -32,11 +32,14 @@ test("client diagnostics feed fast sync flow events safely", () => {
   const wsHubSource = fs.readFileSync(path.join(repoRoot, "gateway", "runtime", "ipc", "ws-hub.cjs"), "utf8");
 
   // HTTP /api/client-log 是当前真实路径，WS 入口保留为同形态兼容。
-  assert.match(serverSource, /event !== "fast-sync-flow"/);
+  assert.match(serverSource, /event === "fast-sync-flow"/);
+  assert.match(serverSource, /event === "ws-transport-selected" \|\| event === "ws-hello-ack"/);
   assert.match(serverSource, /recordFlowEvent\(flowEvent\)/);
   assert.match(serverSource, /safeFastSyncFlowData/);
+  assert.match(serverSource, /safeConnectionFlowData/);
   assert.match(serverSource, /typeof rawValue === "object"/);
   assert.match(wsHubSource, /message\.type !== "client-diagnostic"/);
-  assert.match(wsHubSource, /message\.event !== "fast-sync-flow"/);
+  assert.match(wsHubSource, /message\.event === "fast-sync-flow"/);
+  assert.match(wsHubSource, /message\.event === "ws-transport-selected" \|\| message\.event === "ws-hello-ack"/);
   assert.match(wsHubSource, /recordFlowEvent\(flowEvent\)/);
 });

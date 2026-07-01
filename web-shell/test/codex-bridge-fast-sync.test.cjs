@@ -222,9 +222,11 @@ test("mobile traffic mode disables token usage capability initialization", () =>
 
 test("client diagnostics upload only flow events by default", () => {
   const source = readPolyfillSource();
-  // 服务端默认只消费 fast-sync-flow，普通诊断不上报可以避免进入会话时出现大量 /api/client-log。
+  // 服务端默认只消费发送链路和传输选择诊断，普通诊断不上报可以避免进入会话时出现大量 /api/client-log。
   assert.match(source, /CLIENT_DIAGNOSTIC_UPLOAD_ENABLED/);
   assert.match(source, /event === "fast-sync-flow"/);
+  assert.match(source, /event === "ws-transport-selected"/);
+  assert.match(source, /event === "ws-hello-ack"/);
   assert.match(source, /shouldUploadClientDiagnostic\(event\)/);
 });
 
@@ -327,9 +329,14 @@ test("gateway transport prefers Socket.IO client with raw websocket fallback", (
   assert.match(source, /function loadSocketIoClientScript/);
   assert.match(source, /function createSocketIoGatewaySocket/);
   assert.match(source, /function createRawGatewayWebSocket/);
+  assert.match(source, /function socketDiagnosticInfo/);
   assert.match(connectBody, /openGatewaySocket\(\)\.then/);
   assert.match(source, /createSocketIoGatewaySocket\(ioFactory\)/);
-  assert.match(source, /return createRawGatewayWebSocket\(\)/);
+  assert.match(source, /const socket = createRawGatewayWebSocket\(\)/);
+  assert.match(source, /socket\.transport = "websocket"/);
+  assert.match(source, /socket\.fallbackTransport = "socket\.io"/);
+  assert.match(connectBody, /ws-transport-selected/);
+  assert.match(connectBody, /\.\.\.socketDiagnosticInfo\(socket\)/);
 });
 
 test("socket.io gateway adapter preserves the existing websocket-shaped contract", () => {
@@ -341,6 +348,8 @@ test("socket.io gateway adapter preserves the existing websocket-shaped contract
   assert.match(adapterBody, /socket\.on\("message"/);
   assert.match(adapterBody, /emitGatewaySocketEvent\(adapter, "message", \{ data \}\)/);
   assert.match(adapterBody, /socket\.on\("connect"/);
+  assert.match(adapterBody, /adapter\.socketId = socket\.id \|\| ""/);
+  assert.match(adapterBody, /adapter\.recovered = socket\.recovered === true/);
   assert.match(adapterBody, /socket\.on\("disconnect"/);
   assert.match(adapterBody, /addEventListener\(type, handler\)/);
 });

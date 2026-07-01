@@ -85,6 +85,10 @@ OpenCodex 采用域名隔离：Mac 域名只表示 Mac gateway，Win 域名只�
 
 - `scope`：`connection`、`thread`、`turn`、`relay`、`health`。
 - `stage`：状态机里的状态名。
+- `transport`：当前 gateway 传输层，常见值为 `socket.io` 或 `websocket`。
+- `socketId`：Socket.IO 服务端分配的连接 ID；raw `/ws` 没有该字段。
+- `recovered`：Socket.IO 是否通过 connection state recovery 恢复了连接。
+- `fallbackTransport`：浏览器尝试 Socket.IO 失败后实际回退的传输层，例如 `websocket`。
 - `level`：`info`、`warn`、`error`。
 - `requestId`：官方 IPC 请求 ID，用于和 `AppServerConnection` 日志关联。
 - `hint`：面向用户的短说明，不放敏感路径、token 或完整消息内容。
@@ -94,6 +98,7 @@ OpenCodex 采用域名隔离：Mac 域名只表示 Mac gateway，Win 域名只�
 后端要把离散日志转成可查询的最近状态：
 
 - `ws-hub`：记录 `hello`、`hello-ack`、`send_to_missing_client`、`app_host_message_missing_relay`、`app_host_pending_messages_flushed`、`app_host_missing_relay_recreate_failed`。
+- 浏览器 `clientDiagnostic`：默认只上报 `fast-sync-flow`、`ws-transport-selected` 和 `ws-hello-ack`，用于把发送链路和传输选择写入 flow monitor；其它前端诊断只留在本页面板，避免首屏 POST 洪峰。
 - `AppServerConnection`：记录 `thread/read`、`thread/resume`、`thread/turns/list`、`turn/start` 的开始、成功、失败、耗时。
 - `server`：提供健康摘要，展示 gateway uptime、WS 客户端数、最近错误、当前域名环境。
 
@@ -239,3 +244,9 @@ OpenCodex 优先复用成熟传输层。当前 gateway 同时支持：
 - `/ws`：raw WebSocket 兼容入口，保留给旧浏览器 polyfill 和回退路径。
 
 传输层只负责“消息可靠送达”；Codex 私有状态仍由 OpenCodex 管：`threadSeq`、快照水位、app-host MessagePort relay、缺口检测和脱敏诊断。短断线优先让 Socket.IO 恢复包，恢复不了再走 OpenCodex 的 thread replay 或 snapshot repair。
+
+诊断判断方式：
+
+- `connection.transport === "socket.io"` 且 `connection.recovered === true`：短断线优先由 Socket.IO 自身恢复。
+- `connection.transport === "websocket"` 且 `connection.fallbackTransport === "socket.io"`：浏览器尝试 Socket.IO 失败，已回退 raw `/ws`。
+- `connection.transport === "socket.io"` 但后续仍出现 `replayGap`：传输层恢复窗口不够，需要 OpenCodex 的 thread replay 或 memory snapshot repair 兜底。

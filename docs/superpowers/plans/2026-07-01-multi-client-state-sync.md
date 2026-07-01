@@ -90,7 +90,7 @@ gateway 使用该 ack 做两件事：
 - 修改：`web-shell/test/codex-bridge-fast-sync.test.cjs`
 - 修改：`docs/STATUS-FLOW-MONITORING.md`
 
-- [ ] **步骤 1：新增失败测试**
+- [x] **步骤 1：新增失败测试**
 
 增加断言，要求 Socket.IO 连接事件记录：
 
@@ -107,7 +107,7 @@ clientDiagnostic("ws-transport-selected", {
 });
 ```
 
-- [ ] **步骤 2：实现传输诊断**
+- [x] **步骤 2：实现传输诊断**
 
 在 flow event 和相关 thread diagnostics 中暴露：
 
@@ -116,7 +116,7 @@ clientDiagnostic("ws-transport-selected", {
 - `recovered`
 - `fallbackTransport`
 
-- [ ] **步骤 3：验证**
+- [x] **步骤 3：验证**
 
 ```bash
 rtk node --test gateway/test/app-host-frame-observer.test.cjs

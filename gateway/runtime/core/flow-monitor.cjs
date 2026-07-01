@@ -38,6 +38,10 @@ function normalizeEvent(input) {
     ok: typeof (input && input.ok) === "boolean" ? input.ok : undefined,
     requestId: boundedText(input && input.requestId, 120),
     scope: boundedText((input && input.scope) || "connection", 40),
+    transport: boundedText(input && input.transport, 40),
+    socketId: boundedText(input && input.socketId, 120),
+    recovered: typeof (input && input.recovered) === "boolean" ? input.recovered : undefined,
+    fallbackTransport: boundedText(input && input.fallbackTransport, 40),
     stage: boundedText((input && input.stage) || "unknown", 80),
     threadId: boundedText(input && input.threadId, 120),
     turnId: boundedText(input && input.turnId, 120),
@@ -63,12 +67,18 @@ function recordFlowEvent(input) {
   const clientId = event.clientId;
   if (!clientId) return event;
   if (event.scope === "connection") {
-    remember(connectionByClientId, clientId, {
+    const patch = {
       lastEventAtMs: event.atMs,
       lastHint: event.hint || "",
       state: event.stage,
       wsReady: event.stage === "ws_ready" || event.stage === "ready" ? true : undefined,
-    });
+    };
+    // 传输字段只在握手/恢复事件里出现；缺省事件不能清掉已有诊断水位。
+    if (event.fallbackTransport) patch.fallbackTransport = event.fallbackTransport;
+    if (event.recovered !== undefined) patch.recovered = event.recovered;
+    if (event.socketId) patch.socketId = event.socketId;
+    if (event.transport) patch.transport = event.transport;
+    remember(connectionByClientId, clientId, patch);
   } else if (event.scope === "thread") {
     remember(threadByClientId, clientId, {
       lastDurationMs: event.durationMs,

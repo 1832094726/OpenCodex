@@ -805,6 +805,7 @@ test("ws hub exposes a Socket.IO transport beside raw websocket fallback", () =>
 
 test("socket.io transport accepts the existing gateway json protocol", async () => {
   const { createWsHub } = require("../runtime/ipc/ws-hub.cjs");
+  const { snapshotFlowState } = require("../runtime/core/flow-monitor.cjs");
   const server = http.createServer((req, res) => {
     res.writeHead(404);
     res.end();
@@ -828,8 +829,16 @@ test("socket.io transport accepts the existing gateway json protocol", async () 
     client.emit("message", { type: "hello", clientId: "client-socketio" });
     const [helloAckRaw] = await helloAckPromise;
     const helloAck = JSON.parse(String(helloAckRaw));
-    assert.deepEqual(helloAck, { type: "hello-ack", clientId: "client-socketio" });
+    assert.equal(helloAck.type, "hello-ack");
+    assert.equal(helloAck.clientId, "client-socketio");
+    assert.equal(helloAck.transport, "socket.io");
+    assert.equal(typeof helloAck.socketId, "string");
+    assert.equal(helloAck.recovered, false);
     assert.equal(hub.hasClient("client-socketio"), true);
+    const flow = snapshotFlowState({ clientId: "client-socketio" });
+    assert.equal(flow.connection.transport, "socket.io");
+    assert.equal(flow.connection.recovered, false);
+    assert.equal(flow.connection.socketId, helloAck.socketId);
 
     const targetedPromise = once(client, "message");
     assert.equal(hub.sendTo("client-socketio", { type: "socketio-targeted", value: 1 }), true);

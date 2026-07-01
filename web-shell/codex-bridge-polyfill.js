@@ -237,6 +237,8 @@
     };
     socket.on("connect", () => {
       adapter.readyState = w.WebSocket.OPEN;
+      adapter.recovered = socket.recovered === true;
+      adapter.socketId = socket.id || "";
       emitGatewaySocketEvent(adapter, "open", { type: "open" });
     });
     socket.on("message", (data) => {
@@ -257,7 +259,18 @@
   }
 
   function createRawGatewayWebSocket() {
-    return new WebSocket(gatewayWebSocketUrl());
+    const socket = new WebSocket(gatewayWebSocketUrl());
+    socket.transport = "websocket";
+    return socket;
+  }
+
+  function socketDiagnosticInfo(socket) {
+    return {
+      fallbackTransport: socket && socket.fallbackTransport ? String(socket.fallbackTransport) : "",
+      recovered: socket && typeof socket.recovered === "boolean" ? socket.recovered : undefined,
+      socketId: socket && socket.socketId ? String(socket.socketId) : "",
+      transport: socket && socket.transport ? socket.transport : "websocket",
+    };
   }
 
   function openGatewaySocket() {
@@ -267,8 +280,13 @@
       .catch((error) => {
         clientDiagnostic("socketio-client-fallback", {
           error: error instanceof Error ? error.message : String(error),
+          fallbackTransport: "websocket",
+          transport: "socket.io",
         });
-        return createRawGatewayWebSocket();
+        const socket = createRawGatewayWebSocket();
+        // Socket.IO 脚本或握手创建失败时，raw websocket 是本轮连接的显式回退路径。
+        socket.fallbackTransport = "socket.io";
+        return socket;
       });
   }
 
@@ -701,8 +719,8 @@
   }
 
   function shouldUploadClientDiagnostic(event) {
-    // gateway 默认只消费 fast-sync-flow；其它前端诊断保留在本页面板，避免首屏和进会话时制造额外 POST 洪峰。
-    return CLIENT_DIAGNOSTIC_UPLOAD_ENABLED || event === "fast-sync-flow";
+    // gateway 默认只消费发送链路和传输选择诊断；其它前端诊断留在本页面板，避免首屏制造额外 POST 洪峰。
+    return CLIENT_DIAGNOSTIC_UPLOAD_ENABLED || event === "fast-sync-flow" || event === "ws-transport-selected" || event === "ws-hello-ack";
   }
 
   function clientDiagnostic(event, data) {
@@ -4748,7 +4766,7 @@
       socket = openedSocket;
       ws = socket;
       clientDiagnostic("ws-transport-selected", {
-        transport: socket && socket.transport ? socket.transport : "websocket",
+        ...socketDiagnosticInfo(socket),
         wsState: websocketStateName(socket),
       });
       installGatewaySocketEventHandlers(socket);
@@ -4772,6 +4790,7 @@
       try {
         socket.send(JSON.stringify({ type: "hello", clientId }));
         clientDiagnostic("ws-hello-sent", {
+          ...socketDiagnosticInfo(socket),
           wsReady,
           wsState: websocketStateName(socket),
         });
@@ -4783,6 +4802,7 @@
         });
       }
       clientDiagnostic("ws-open", {
+        ...socketDiagnosticInfo(socket),
         wsReady,
         wsState: websocketStateName(socket),
       });
@@ -4804,6 +4824,10 @@
           markGatewayWsReady();
           clientDiagnostic("ws-hello-ack", {
             ready: true,
+            recovered: typeof msg.recovered === "boolean" ? msg.recovered : socketDiagnosticInfo(socket).recovered,
+            serverSocketId: msg.socketId || "",
+            serverTransport: msg.transport || "",
+            ...socketDiagnosticInfo(socket),
             wsReady,
             wsState: websocketStateName(socket),
           });

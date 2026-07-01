@@ -165,6 +165,16 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return (socket && socket.__codexWebClientId) || "";
   }
 
+  function socketTransportInfo(socket) {
+    const transport = socket && socket.__codexTransport ? String(socket.__codexTransport) : "websocket";
+    const socketId = socket && socket.__codexSocketIoId ? String(socket.__codexSocketIoId) : "";
+    return {
+      recovered: socket && typeof socket.__codexRecovered === "boolean" ? socket.__codexRecovered : undefined,
+      socketId,
+      transport,
+    };
+  }
+
   function socketIoWsLike(socket) {
     const ws = {
       CLOSED: 3,
@@ -172,7 +182,9 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       bufferedAmount: 0,
       readyState: 1,
       __codexRemoteAddress: socket && socket.handshake ? socket.handshake.address || "" : "",
+      __codexRecovered: socket ? socket.recovered === true : false,
       __codexSocketIoId: socket ? socket.id : "",
+      __codexTransport: "socket.io",
       close() {
         ws.readyState = ws.CLOSED;
         if (socket && socket.connected) socket.disconnect(true);
@@ -1243,15 +1255,38 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return result;
   }
 
+  function safeConnectionDiagnosticData(ws, message) {
+    const data = message && message.data && typeof message.data === "object" && !Array.isArray(message.data) ? message.data : {};
+    const clientId = normalizedWsClientId(ws, message) || (typeof data.clientId === "string" ? data.clientId : "");
+    if (!clientId || ws.__codexWebClientId !== clientId) return null;
+    const result = {
+      clientId,
+      scope: "connection",
+      stage: message.event === "ws-hello-ack" ? "ws_ready" : "transport_selected",
+    };
+    for (const key of ["fallbackTransport", "socketId", "transport"]) {
+      if (data[key] == null) continue;
+      result[key] = String(data[key]).slice(0, 120);
+    }
+    if (typeof data.recovered === "boolean") result.recovered = data.recovered;
+    return result;
+  }
+
   function handleClientDiagnosticMessage(ws, message) {
     if (
       !message ||
-      message.type !== "client-diagnostic" ||
-      message.event !== "fast-sync-flow"
+      message.type !== "client-diagnostic"
     ) {
       return false;
     }
-    const flowEvent = safeFastSyncFlowData(ws, message);
+    let flowEvent = null;
+    if (message.event === "fast-sync-flow") {
+      flowEvent = safeFastSyncFlowData(ws, message);
+    } else if (message.event === "ws-transport-selected" || message.event === "ws-hello-ack") {
+      flowEvent = safeConnectionDiagnosticData(ws, message);
+    } else {
+      return false;
+    }
     if (flowEvent) recordFlowEvent(flowEvent);
     return true;
   }
@@ -1674,6 +1709,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     if (previousClientId && previousClientId !== clientId && clientsById.get(previousClientId) === ws) {
       clientsById.delete(previousClientId);
     }
+    const transportInfo = socketTransportInfo(ws);
     // 后来重复 hello 时直接覆盖映射，保证同一 clientId 指向最新连接。
     ws.__codexWebClientId = clientId;
     clientsById.set(clientId, ws);
@@ -1682,8 +1718,11 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     recordFlowEvent({
       clientId,
       hint: "浏览器连接已确认 clientId，可以接收定向回包",
+      recovered: transportInfo.recovered,
       scope: "connection",
+      socketId: transportInfo.socketId,
       stage: "transport_ready",
+      transport: transportInfo.transport,
     });
     if (DEBUG_LOGS) {
       diagnosticLog("ws-hub", "hello", {
@@ -1691,12 +1730,15 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
         clientCount: clients.size,
         mappedClientCount: clientsById.size,
         remoteAddress: socketRemoteAddress(ws),
+        recovered: transportInfo.recovered,
+        socketId: shortId(transportInfo.socketId),
+        transport: transportInfo.transport,
       });
     }
     try {
       // ack 明确告诉浏览器：clientId 已经进入路由表，可以开始发会产生异步回包的官方 IPC。
-      ws.send(JSON.stringify({ type: "hello-ack", clientId }));
-      if (DEBUG_LOGS) diagnosticLog("ws-hub", "hello_ack", { clientId: shortId(clientId) });
+      ws.send(JSON.stringify({ type: "hello-ack", clientId, ...transportInfo }));
+      if (DEBUG_LOGS) diagnosticLog("ws-hub", "hello_ack", { clientId: shortId(clientId), ...transportInfo });
     } catch (error) {
       diagnosticWarn("ws-hub", "hello_ack_failed", {
         clientId: shortId(clientId),
@@ -1762,6 +1804,8 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
           clientCount: clients.size,
           recovered: socket.recovered === true,
           remoteAddress: socketRemoteAddress(ws),
+          socketId: shortId(socket.id || ""),
+          transport: "socket.io",
         });
       }
       socket.on("message", (raw) => handleClientMessageFrame(ws, socket.request, raw));
@@ -1811,6 +1855,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
       ws.__codexRemoteAddress = req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "";
+      ws.__codexTransport = "websocket";
       clients.add(ws);
       if (DEBUG_LOGS) {
         // WS 握手/关闭属于页面生命周期噪声，默认不写入常规日志；认证失败和异常仍会保留。

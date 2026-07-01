@@ -189,13 +189,19 @@ function safeClientLogData(value) {
     "rawChars",
     "ready",
     "reason",
+    "recovered",
     "requestId",
     "requestMethod",
     "responseType",
+    "serverSocketId",
+    "serverTransport",
+    "socketId",
     "status",
     "startedCount",
     "target",
     "totalQueuedCount",
+    "fallbackTransport",
+    "transport",
     "type",
     "url",
     "waitMs",
@@ -207,6 +213,23 @@ function safeClientLogData(value) {
     const sanitized = sanitizeDiagnosticValue(key, nestedValue);
     if (sanitized !== undefined) result[key] = key === "clientId" ? shortId(String(sanitized)) : sanitized;
   }
+  return result;
+}
+
+function safeConnectionFlowData(value, event, fallbackClientId = "") {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const clientId = sanitizeDiagnosticValue("clientId", value.clientId || fallbackClientId);
+  if (!clientId) return null;
+  const result = {
+    clientId: shortId(String(clientId)),
+    scope: "connection",
+    stage: event === "ws-hello-ack" ? "ws_ready" : "transport_selected",
+  };
+  for (const key of ["fallbackTransport", "socketId", "transport"]) {
+    const sanitized = sanitizeDiagnosticValue(key, value[key]);
+    if (sanitized !== undefined) result[key] = sanitized;
+  }
+  if (typeof value.recovered === "boolean") result.recovered = value.recovered;
   return result;
 }
 
@@ -242,8 +265,12 @@ async function handleClientLog(req, res) {
   const entries = Array.isArray(parsed.events) ? parsed.events.slice(0, 200) : [parsed];
   for (const entry of entries) {
     const event = entry && typeof entry.event === "string" ? entry.event.slice(0, 120) : "unknown";
-    if (event !== "fast-sync-flow") continue;
-    const flowEvent = safeFastSyncFlowData(entry && entry.data, parsed.clientId);
+    let flowEvent = null;
+    if (event === "fast-sync-flow") {
+      flowEvent = safeFastSyncFlowData(entry && entry.data, parsed.clientId);
+    } else if (event === "ws-transport-selected" || event === "ws-hello-ack") {
+      flowEvent = safeConnectionFlowData(entry && entry.data, event, parsed.clientId);
+    }
     if (flowEvent) recordFlowEvent(flowEvent);
   }
   if (DEBUG_LOGS) {
