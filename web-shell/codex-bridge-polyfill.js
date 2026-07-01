@@ -34,6 +34,7 @@
   const READ_ONLY_APP_SERVER_CACHE_TTL_MS = 15000;
   const FAST_SYNC_BROWSER_READ_TIMEOUT_MS = Number(cfg.fastSyncBrowserReadTimeoutMs || 120);
   const FAST_SYNC_GATEWAY_READ_TIMEOUT_MS = Number(cfg.fastSyncGatewayReadTimeoutMs || 250);
+  const FAST_SYNC_GATEWAY_KEY_SNAPSHOT_TTL_MS = Number(cfg.fastSyncGatewayKeySnapshotTtlMs || 5000);
   const FAST_SYNC_PENDING_CREATE_TIMEOUT_MS = Number(cfg.fastSyncPendingCreateTimeoutMs || 120);
   // debugWs 由 gateway 的 OPENCODEX_DEBUG_WS 注入；默认关闭，避免每条 WS 消息都额外计时/算长度。
   const WS_DEBUG_ENABLED = cfg.debugWs === true || cfg.debugWs === "1";
@@ -475,6 +476,7 @@
   const connectorLogoDiagnosticCounts = new Map();
   const readOnlyAppServerCache = new Map();
   const readOnlyAppServerInFlight = new Map();
+  const gatewayKeySnapshotCache = new Map();
   const statsigBootstrapRequestIds = new Set();
   const BACKGROUND_THREAD_START_DELAY_MS = 4500;
   const BACKGROUND_THREAD_START_STARTUP_WINDOW_MS = 30000;
@@ -3049,6 +3051,43 @@
     return !!snapshot && typeof snapshot === "object" && Object.prototype.hasOwnProperty.call(snapshot, "value");
   }
 
+  function gatewayKeySnapshotCacheKey(method, threadId) {
+    return `${method || ""}\n${threadId || ""}`;
+  }
+
+  function rememberGatewayKeySnapshot(method, threadId, snapshot) {
+    if (!method || !threadId || !snapshotHasValue(snapshot)) return false;
+    // 按 snapshotKey 预读到的是 gateway 内存全量状态；浏览器只短期保存在内存，避免把会话详情落盘。
+    gatewayKeySnapshotCache.set(gatewayKeySnapshotCacheKey(method, threadId), {
+      capturedAtMs: Number(snapshot.capturedAtMs || Date.now()),
+      snapshot,
+    });
+    while (gatewayKeySnapshotCache.size > 50) {
+      const firstKey = gatewayKeySnapshotCache.keys().next().value;
+      gatewayKeySnapshotCache.delete(firstKey);
+    }
+    return true;
+  }
+
+  function consumeGatewayKeySnapshot(method, threadId, diagnosticSummary) {
+    if (!method || !threadId) return null;
+    const cacheKey = gatewayKeySnapshotCacheKey(method, threadId);
+    const record = gatewayKeySnapshotCache.get(cacheKey);
+    if (!record || !snapshotHasValue(record.snapshot)) return null;
+    const ageMs = Date.now() - Number(record.capturedAtMs || 0);
+    if (ageMs > fastSyncTimeoutMs(FAST_SYNC_GATEWAY_KEY_SNAPSHOT_TTL_MS, 5000)) {
+      gatewayKeySnapshotCache.delete(cacheKey);
+      return null;
+    }
+    gatewayKeySnapshotCache.delete(cacheKey);
+    clientDiagnostic("fast-sync-gateway-key-consume", {
+      ...diagnosticSummary,
+      method,
+      threadId: shortThreadId(threadId),
+    });
+    return fastSyncSnapshotHit(record.snapshot.value);
+  }
+
   function fastSyncSnapshotHit(value) {
     // null 也可能是官方只读接口的合法返回值，所以用显式包装区分“命中空值”和“未命中”。
     return { hit: true, value };
@@ -3271,6 +3310,7 @@
         method,
         source: snapshot.source || "gateway",
       });
+      rememberGatewayKeySnapshot(method, diagnosticSummary && diagnosticSummary.threadId, snapshot);
       return fastSyncSnapshotHit(snapshot.value);
     } catch (error) {
       if (error && error.name === "AbortError") return null;
@@ -3289,6 +3329,12 @@
   async function invokeFastSyncSnapshot(channel, ipcArgs, payload, diagnosticSummary) {
     const method = fastSyncSnapshotMethod(payload);
     if (!method) return null;
+    const threadId = diagnosticThreadIdFromValue(payload) || diagnosticThreadIdFromValue(ipcArgs);
+    const keyedSnapshot = consumeGatewayKeySnapshot(method, threadId, diagnosticSummary);
+    if (keyedSnapshot && keyedSnapshot.hit) {
+      refreshFastSyncSnapshot(channel, ipcArgs, payload, method, diagnosticSummary, "gateway-key-hit");
+      return keyedSnapshot;
+    }
 
     if (FAST_SYNC_PERSISTENT_SNAPSHOT_METHODS.has(method)) {
       const browserValue = await readBrowserFastSyncSnapshot(method, ipcArgs, diagnosticSummary);
