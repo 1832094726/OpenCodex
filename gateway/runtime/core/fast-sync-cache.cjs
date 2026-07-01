@@ -240,19 +240,22 @@ function createMemoryFastSyncCache(options = {}) {
       key: entry.key,
       method: entry.method,
       source: "gateway-memory",
+      threadId: entry.threadId,
+      threadSeq: Math.max(0, Number(entry.threadSeq) || 0),
       value: safeClone(entry.value),
     };
   }
 
-  function writeSnapshot({ capturedAtMs = Date.now(), key, method, threadId = "", value }) {
+  function writeSnapshot({ capturedAtMs = Date.now(), key, method, threadId = "", threadSeq = 0, value }) {
     if (!key || !isFastSyncMemoryCacheableMethod(method)) return false;
     try {
-      // 详情快照只留在进程内，仍做 JSON clone，避免官方运行时对象被后续 mutation 污染。
+      // 详情快照只留在进程内，threadSeq 表示该全量状态覆盖到的 app-host 增量水位。
       snapshots.set(key, {
         capturedAtMs,
         key,
         method,
         threadId: typeof threadId === "string" ? threadId.slice(0, 160) : "",
+        threadSeq: Math.max(0, Number(threadSeq) || 0),
         value: safeClone(value),
       });
       if (threadId) keyByMethodThreadId.set(methodThreadKey(method, threadId), key);

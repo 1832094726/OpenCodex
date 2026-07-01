@@ -3222,6 +3222,8 @@
     if (!snapshotHasValue(snapshot)) return;
     const threadId = diagnosticThreadIdFromValue(snapshot.value) || diagnosticThreadIdFromValue(ipcArgs);
     if (!threadId) return;
+    const threadSeq = Math.max(0, Number(snapshot.threadSeq) || 0);
+    if (threadSeq > 0) rememberAppHostThreadSeq(threadId, threadSeq);
     // ack 只回传快照水位，不回传 value，避免把会话正文作为诊断状态再传一遍。
     sendGatewayControlPayload(
       {
@@ -3231,6 +3233,7 @@
         method,
         source: typeof snapshot.source === "string" ? snapshot.source : "",
         threadId,
+        threadSeq: Math.max(0, Number(snapshot.threadSeq) || 0),
       },
       "fast-sync-snapshot-ack-send-failed"
     );

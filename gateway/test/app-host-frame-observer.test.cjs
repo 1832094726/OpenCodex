@@ -287,6 +287,7 @@ test("thread state records per-client snapshot acknowledgements", () => {
     method: "thread/turns/list",
     source: "gateway-memory",
     threadId: "thread-snapshot",
+    threadSeq: 9,
   });
 
   const snapshot = appHostThreadStateSnapshot(state, "thread-snapshot");
@@ -298,6 +299,7 @@ test("thread state records per-client snapshot acknowledgements", () => {
   assert.equal(snapshot.lastSnapshotAckSource, "gateway-memory");
   assert.equal(snapshot.lastSnapshotAckCapturedAtMs, 1780000001000);
   assert.equal(snapshot.lastSnapshotAckKey, "snapshot-key-other");
+  assert.equal(snapshot.lastSnapshotAckThreadSeq, 9);
 });
 
 test("thread state can list sanitized thread snapshots", () => {
@@ -894,6 +896,100 @@ test("ws hub replays cached app-host thread frames before snapshot nudge reload"
     assert.equal(replay.threadSeq, 1);
     assert.match(replay.data, /turn-new/);
     assert.equal(nudge.replaySent, 1);
+  } finally {
+    if (wsA) wsA.close();
+    if (wsB) wsB.close();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("ws hub advances client thread cursor from gateway snapshot acknowledgements", async () => {
+  const { createWsHub } = require("../runtime/ipc/ws-hub.cjs");
+  const server = http.createServer((req, res) => {
+    res.writeHead(404);
+    res.end();
+  });
+  const relays = [];
+  const hub = createWsHub(server, {
+    createAppHostRelay(details) {
+      const relay = {
+        clientId: details.clientId,
+        close() {},
+        onMessage: details.onMessage,
+        portId: details.portId,
+        postMessage() {},
+      };
+      relays.push(relay);
+      return relay;
+    },
+    isAuthed: () => true,
+  });
+  const address = await listen(server);
+  const wsUrl = `ws://127.0.0.1:${address.port}/ws`;
+  let wsA = null;
+  let wsB = null;
+
+  try {
+    wsA = await connectClient(wsUrl, "client-snapshot-cursor-source");
+    wsB = await connectClient(wsUrl, "client-snapshot-cursor-target");
+    wsA.send(JSON.stringify({
+      clientId: "client-snapshot-cursor-source",
+      portId: "port-snapshot-cursor-source",
+      threadId: "thread-snapshot-cursor",
+      type: "app-host-connect",
+    }));
+    wsB.send(JSON.stringify({
+      clientId: "client-snapshot-cursor-target",
+      portId: "port-snapshot-cursor-target",
+      threadId: "thread-snapshot-cursor",
+      type: "app-host-connect",
+    }));
+    await wsMessage(wsA, (message) => message.type === "app-host-port-connected");
+    await wsMessage(wsB, (message) => message.type === "app-host-port-connected");
+
+    const relayA = relays.find((relay) => relay.clientId === "client-snapshot-cursor-source");
+    assert.ok(relayA);
+    for (let index = 1; index <= 4; index += 1) {
+      relayA.onMessage(JSON.stringify({ id: `rpc-snapshot-cursor-${index}`, method: "thread/read", result: { threadId: "thread-snapshot-cursor", turnId: `turn-${index}` } }));
+      await wsMessage(wsA, (message) => message.type === "app-host-port-message" && message.threadSeq === index);
+    }
+
+    // B 通过 gateway 全量快照补到了 seq4；ack 应把该客户端的 replay cursor 同步到中间层。
+    wsB.send(JSON.stringify({
+      capturedAtMs: Date.now(),
+      clientId: "client-snapshot-cursor-target",
+      key: "snapshot-cursor-key",
+      method: "thread/read",
+      source: "gateway-memory",
+      threadId: "thread-snapshot-cursor",
+      threadSeq: 4,
+      type: "opencodex:fast-sync-snapshot-ack",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    relayA.onMessage(JSON.stringify({ id: "rpc-snapshot-cursor-5", method: "thread/read", result: { threadId: "thread-snapshot-cursor", turnId: "turn-5" } }));
+    await wsMessage(wsA, (message) => message.type === "app-host-port-message" && message.threadSeq === 5);
+
+    const replayPromise = wsMessage(wsB, (message) => message.type === "app-host-port-message" && message.replay === "thread");
+    const nudgePromise = wsMessage(wsB, (message) => message.type === "opencodex:sync-nudge");
+    hub.sendToThread(
+      "thread-snapshot-cursor",
+      {
+        type: "opencodex:sync-nudge",
+        reason: "thread-detail-snapshot",
+        threadId: "thread-snapshot-cursor",
+      },
+      { excludedClientId: "client-snapshot-cursor-source", suppressDiagnostic: true }
+    );
+
+    const replay = await replayPromise;
+    const nudge = await nudgePromise;
+    assert.equal(replay.threadSeq, 5);
+    assert.match(replay.data, /turn-5/);
+    assert.equal(nudge.replaySent, 1);
+
+    const snapshot = hub.snapshotThreads({ threadId: "thread-snapshot-cursor" }).threads[0];
+    assert.equal(snapshot.lastSnapshotAckThreadSeq, 4);
   } finally {
     if (wsA) wsA.close();
     if (wsB) wsB.close();

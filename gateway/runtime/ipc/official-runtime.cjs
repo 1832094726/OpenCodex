@@ -1900,6 +1900,14 @@ function logComputerUseAuthResponse(routeBase, payload) {
   });
 }
 
+function latestAppHostThreadSeqForSnapshot(threadId) {
+  if (!threadId || !wsHub || typeof wsHub.snapshotThreads !== "function") return 0;
+  const snapshot = wsHub.snapshotThreads({ threadId, limit: 1 });
+  const thread = snapshot && Array.isArray(snapshot.threads) ? snapshot.threads[0] : null;
+  // 这里读取 gateway 已观察到的 app-host 下行最高水位，用来给全量快照标记覆盖范围。
+  return Math.max(0, Number(thread && thread.latestKnownThreadSeq) || 0);
+}
+
 function rememberFastSyncSnapshot(channel, _args, requestSummary, responseResult, context = {}) {
   void channel;
   const method = fastSyncMethodFromRequestSummary(requestSummary);
@@ -1907,9 +1915,10 @@ function rememberFastSyncSnapshot(channel, _args, requestSummary, responseResult
   if (!method || !key || !responseResult || responseResult.ok !== true) return;
   const responseValue = responseResult.value;
   const threadId = flowThreadIdFromPayload(responseValue) || flowThreadIdFromPayload(requestSummary);
+  const threadSeq = latestAppHostThreadSeqForSnapshot(threadId);
   // 会话详情只写进程内存，入口列表/配置等轻量读才允许落盘，避免把完整对话持久化到快照目录。
   const cache = isFastSyncCacheableMethod(method) ? fastSyncCache : memoryFastSyncCache;
-  if (!cache.writeSnapshot({ key, method, threadId, value: responseValue })) return;
+  if (!cache.writeSnapshot({ key, method, threadId, threadSeq, value: responseValue })) return;
   recordFlowEvent({
     clientId: context.clientId || "",
     hint: isFastSyncCacheableMethod(method) ? "已写入 gateway 快照" : "已写入 gateway 内存快照",

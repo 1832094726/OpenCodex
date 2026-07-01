@@ -68,6 +68,7 @@ test("gateway thread snapshot hits acknowledge the client cursor", () => {
   const gatewayBody = sourceBetween(source, "async function readGatewayFastSyncSnapshot", "async function invokeFastSyncSnapshot");
   const keyGatewayBody = sourceBetween(source, "async function readGatewayFastSyncSnapshotByKey", "async function invokeFastSyncSnapshot");
   const consumeBody = sourceBetween(source, "function consumeGatewayKeySnapshot", "async function readGatewayHintedSnapshot");
+  const ackBody = sourceBetween(source, "function acknowledgeFastSyncSnapshotHit", "async function readBrowserFastSyncSnapshot");
 
   assert.match(source, /function acknowledgeFastSyncSnapshotHit/);
   assert.match(gatewayBody, /acknowledgeFastSyncSnapshotHit\(method, ipcArgs, snapshot\)/);
@@ -75,6 +76,8 @@ test("gateway thread snapshot hits acknowledge the client cursor", () => {
   assert.match(consumeBody, /acknowledgeFastSyncSnapshotHit\(method, \[\], record\.snapshot\)/);
   assert.match(source, /type: "opencodex:fast-sync-snapshot-ack"/);
   assert.match(source, /FAST_SYNC_PERSISTENT_SNAPSHOT_METHODS\.has\(method\)/);
+  assert.match(ackBody, /threadSeq: Math\.max\(0, Number\(snapshot\.threadSeq\) \|\| 0\)/);
+  assert.match(ackBody, /rememberAppHostThreadSeq\(threadId, threadSeq\)/);
 });
 
 test("gateway snapshots can be preloaded by snapshot key after a replay gap", () => {

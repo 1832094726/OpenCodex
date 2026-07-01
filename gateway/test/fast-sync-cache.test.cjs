@@ -155,6 +155,27 @@ test("memory snapshots keep the latest thread detail key by thread id", () => {
   assert.deepEqual(cache.readSnapshot({ key: "old-key" })?.value, { version: 1 });
 });
 
+test("memory snapshots preserve thread sequence watermarks", () => {
+  const cache = createMemoryFastSyncCache({ maxEntries: 20, ttlMs: 60_000 });
+
+  assert.equal(
+    cache.writeSnapshot({
+      key: "watermark-key",
+      method: "thread/read",
+      threadId: "thread-watermark",
+      threadSeq: 42,
+      value: { id: "thread-watermark" },
+    }),
+    true
+  );
+
+  const byKey = cache.readSnapshot({ key: "watermark-key" });
+  const byThread = cache.readSnapshot({ method: "thread/read", threadId: "thread-watermark" });
+  assert.equal(byKey.threadId, "thread-watermark");
+  assert.equal(byKey.threadSeq, 42);
+  assert.equal(byThread.threadSeq, 42);
+});
+
 test("redacts sensitive fields before writing snapshots", () => {
   const dir = tempDir();
   const cache = createFastSyncCache({ dir, ttlMs: 60_000 });

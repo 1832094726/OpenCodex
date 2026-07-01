@@ -187,6 +187,22 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return Number(appHostThreadSeqByRelayKey.get(appHostThreadCursorKey(clientId, portId, threadId)) || 0);
   }
 
+  function rememberAppHostThreadCursorForClientThread(clientId, threadId, threadSeq) {
+    const seq = Math.max(0, Number(threadSeq) || 0);
+    if (!clientId || !threadId || seq <= 0) return 0;
+    const snapshot = appHostThreadStateSnapshot(appHostFrameState, threadId);
+    const ports = snapshot && Array.isArray(snapshot.activeClientPorts)
+      ? snapshot.activeClientPorts.find((entry) => entry && entry.clientId === clientId)
+      : null;
+    let touched = 0;
+    for (const portId of ports && Array.isArray(ports.portIds) ? ports.portIds : []) {
+      // 快照 ack 证明该客户端已消费到完整状态水位；后续 nudge 只需补更高 threadSeq。
+      rememberAppHostThreadCursor(clientId, portId, threadId, seq);
+      touched += 1;
+    }
+    return touched;
+  }
+
   function appHostDownstreamNextSeq(clientId, portId) {
     const key = appHostRelayKey(clientId, portId);
     const nextSeq = (Number(appHostDownstreamSeqByRelayKey.get(key)) || 0) + 1;
@@ -1259,6 +1275,8 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     const threadId = typeof message.threadId === "string" ? message.threadId.slice(0, 160) : "";
     if (!threadId) return true;
     const method = typeof message.method === "string" ? message.method.slice(0, 80) : "";
+    const threadSeq = Math.max(0, Number(message.threadSeq) || 0);
+    const advancedPortCount = rememberAppHostThreadCursorForClientThread(clientId, threadId, threadSeq);
     const snapshot = recordAppHostThreadSnapshotAck(appHostFrameState, {
       capturedAtMs: message.capturedAtMs,
       clientId,
@@ -1266,14 +1284,17 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       method,
       source: typeof message.source === "string" ? message.source : "",
       threadId,
+      threadSeq,
     });
     recordFlowEvent({
+      advancedPortCount,
       clientId,
       hint: "浏览器已消费 gateway thread 快照，中间层记录客户端水位",
       method,
       scope: "thread",
       stage: "gateway_snapshot_ack",
       threadId,
+      threadSeq,
     });
     if (DEBUG_LOGS) {
       diagnosticLog("ws-hub", "fast_sync_snapshot_ack", {

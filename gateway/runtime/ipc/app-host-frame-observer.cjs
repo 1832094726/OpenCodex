@@ -178,6 +178,7 @@ function ensureThreadState(state, threadId) {
       lastSnapshotAckKey: "",
       lastSnapshotAckMethod: "",
       lastSnapshotAckSource: "",
+      lastSnapshotAckThreadSeq: 0,
       lastThreadReplayAtMs: 0,
       lastThreadReplayCursor: 0,
       lastThreadReplayGap: false,
@@ -376,6 +377,7 @@ function recordAppHostThreadSnapshotAck(state, details = {}) {
   thread.lastSnapshotAckKey = typeof details.key === "string" ? details.key.slice(0, 160) : "";
   thread.lastSnapshotAckMethod = typeof details.method === "string" ? details.method.slice(0, 80) : "";
   thread.lastSnapshotAckSource = typeof details.source === "string" ? details.source.slice(0, 80) : "";
+  thread.lastSnapshotAckThreadSeq = Math.max(0, Number(details.threadSeq) || 0);
   trimMap(thread.clientLastSeenAtMs, state.maxEntries);
   return appHostThreadStateSnapshot(state, threadId);
 }
@@ -417,6 +419,7 @@ function appHostThreadStateSnapshot(state, threadId) {
     lastSnapshotAckKey: thread.lastSnapshotAckKey,
     lastSnapshotAckMethod: thread.lastSnapshotAckMethod,
     lastSnapshotAckSource: thread.lastSnapshotAckSource,
+    lastSnapshotAckThreadSeq: thread.lastSnapshotAckThreadSeq,
     lastThreadReplayAtMs: thread.lastThreadReplayAtMs,
     lastThreadReplayCursor: thread.lastThreadReplayCursor,
     lastThreadReplayGap: thread.lastThreadReplayGap,
