@@ -2298,11 +2298,13 @@
     if (!message || message.replayGap !== true) return null;
     const method = typeof message.method === "string" ? message.method : "";
     const snapshotKey = typeof message.snapshotKey === "string" ? message.snapshotKey : "";
-    if (!method || !snapshotKey) return null;
+    const threadId = typeof message.threadId === "string" ? message.threadId : "";
+    if (!method || !snapshotKey || !threadId) return null;
+    rememberGatewayKeySnapshotHint(method, threadId, snapshotKey);
     // gap 表示增量不能完整补齐；刷新前先确认 gateway 是否已有同会话全量快照可兜底。
     return readGatewayFastSyncSnapshotByKey(method, snapshotKey, {
       requestId: message.requestId || "",
-      threadId: message.threadId || "",
+      threadId,
     });
   }
 
@@ -3055,6 +3057,43 @@
     return `${method || ""}\n${threadId || ""}`;
   }
 
+  function gatewayKeySnapshotHintStorageKey(method, threadId) {
+    return `opencodex:gateway-key-snapshot:${encodeURIComponent(method || "")}:${encodeURIComponent(threadId || "")}`;
+  }
+
+  function rememberGatewayKeySnapshotHint(method, threadId, snapshotKey) {
+    if (!method || !threadId || !snapshotKey) return false;
+    try {
+      // snapshotKey 是 gateway 生成的快照定位符，只短期保存在当前标签页，用来跨 reload 接上中间层全量状态。
+      sessionStorage.setItem(
+        gatewayKeySnapshotHintStorageKey(method, threadId),
+        JSON.stringify({ atMs: Date.now(), snapshotKey })
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function consumeGatewayKeySnapshotHint(method, threadId) {
+    if (!method || !threadId) return "";
+    const storageKey = gatewayKeySnapshotHintStorageKey(method, threadId);
+    try {
+      const raw = sessionStorage.getItem(storageKey);
+      if (!raw) return "";
+      sessionStorage.removeItem(storageKey);
+      const parsed = JSON.parse(raw);
+      const ageMs = Date.now() - Number(parsed && parsed.atMs || 0);
+      if (ageMs > fastSyncTimeoutMs(FAST_SYNC_GATEWAY_KEY_SNAPSHOT_TTL_MS, 5000)) return "";
+      return typeof parsed.snapshotKey === "string" ? parsed.snapshotKey : "";
+    } catch {
+      try {
+        sessionStorage.removeItem(storageKey);
+      } catch {}
+      return "";
+    }
+  }
+
   function rememberGatewayKeySnapshot(method, threadId, snapshot) {
     if (!method || !threadId || !snapshotHasValue(snapshot)) return false;
     // 按 snapshotKey 预读到的是 gateway 内存全量状态；浏览器只短期保存在内存，避免把会话详情落盘。
@@ -3086,6 +3125,20 @@
       threadId: shortThreadId(threadId),
     });
     return fastSyncSnapshotHit(record.snapshot.value);
+  }
+
+  async function readGatewayHintedSnapshot(method, threadId, diagnosticSummary) {
+    const snapshotKey = consumeGatewayKeySnapshotHint(method, threadId);
+    if (!snapshotKey) return null;
+    clientDiagnostic("fast-sync-gateway-key-hint", {
+      ...diagnosticSummary,
+      method,
+      threadId: shortThreadId(threadId),
+    });
+    return readGatewayFastSyncSnapshotByKey(method, snapshotKey, {
+      ...diagnosticSummary,
+      threadId,
+    });
   }
 
   function fastSyncSnapshotHit(value) {
@@ -3334,6 +3387,11 @@
     if (keyedSnapshot && keyedSnapshot.hit) {
       refreshFastSyncSnapshot(channel, ipcArgs, payload, method, diagnosticSummary, "gateway-key-hit");
       return keyedSnapshot;
+    }
+    const hintedSnapshot = await readGatewayHintedSnapshot(method, threadId, diagnosticSummary);
+    if (hintedSnapshot && hintedSnapshot.hit) {
+      refreshFastSyncSnapshot(channel, ipcArgs, payload, method, diagnosticSummary, "gateway-key-hint");
+      return hintedSnapshot;
     }
 
     if (FAST_SYNC_PERSISTENT_SNAPSHOT_METHODS.has(method)) {

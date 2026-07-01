@@ -83,6 +83,7 @@ test("gateway snapshots can be preloaded by snapshot key after a replay gap", ()
   assert.match(refreshBody, /return navigateToRestorableRoute\(route, message\)/);
   assert.match(source, /function preloadGatewaySnapshotFromNudge/);
   assert.match(source, /message\.snapshotKey/);
+  assert.match(source, /rememberGatewayKeySnapshotHint\(method, threadId, snapshotKey\)/);
   assert.match(source, /const gatewayKeySnapshotCache = new Map\(\)/);
   assert.match(source, /function rememberGatewayKeySnapshot/);
   assert.match(source, /function consumeGatewayKeySnapshot/);
@@ -98,8 +99,13 @@ test("preloaded gateway key snapshots are consumed before live thread reads", ()
 
   assert.match(source, /FAST_SYNC_GATEWAY_KEY_SNAPSHOT_TTL_MS/);
   assert.match(source, /fast-sync-gateway-key-consume/);
+  assert.match(source, /function rememberGatewayKeySnapshotHint/);
+  assert.match(source, /function consumeGatewayKeySnapshotHint/);
+  assert.match(source, /fast-sync-gateway-key-hint/);
   assert.match(invokeBody, /const keyedSnapshot = consumeGatewayKeySnapshot\(method, threadId, diagnosticSummary\)/);
   assert.match(invokeBody, /refreshFastSyncSnapshot\(channel, ipcArgs, payload, method, diagnosticSummary, "gateway-key-hit"\)/);
+  assert.match(invokeBody, /const hintedSnapshot = await readGatewayHintedSnapshot\(method, threadId, diagnosticSummary\)/);
+  assert.match(invokeBody, /refreshFastSyncSnapshot\(channel, ipcArgs, payload, method, diagnosticSummary, "gateway-key-hint"\)/);
   assert.match(invokeBody, /return keyedSnapshot/);
 });
 
