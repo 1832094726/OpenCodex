@@ -40,6 +40,22 @@
 - NATS JetStream 适合把 app-host 增量变成持久 event stream，天然有 stream seq、consumer ack 和 redelivery；但引入服务组件较重，适合多机器/长期运行阶段。
 - XState 适合 relay 生命周期和恢复决策状态机，不负责数据同步本身。
 
+### 成熟方案取舍
+
+这里的核心判断是：`threadSeq`、全量快照、增量队列、per-client 水位、gap 判断和 relay 重建都有成熟抽象，但没有一个开源项目能直接理解官方 Codex 的 app-host 私有协议。因此 OpenCodex 应只保留“业务语义适配层”，把底层能力尽量落到成熟机制上。
+
+| 方案 | 适合接管 | 不适合接管 | 当前结论 |
+| --- | --- | --- | --- |
+| Socket.IO connection state recovery | 短断线 missed packets、room、自动重连、连接恢复标记 | 长期离线后的持久事件回放、Codex 快照语义 | 已作为默认传输层；OpenCodex 只在 recovery 失败后补 thread replay/snapshot |
+| Redis Streams | 单机或小集群持久 event log、stream id、consumer group offset、pending/ack | 浏览器直连、app-host MessagePort 生命周期 | 适合做下一阶段正式 `ThreadEventLog` adapter，复杂度低于 JetStream |
+| NATS JetStream | 多进程/多机器 event stream、consumer ack、redelivery、长期 replay | 只跑单机 gateway 时偏重 | 多机部署阶段再引入；保持 `ThreadEventLog` 接口可替换 |
+| SQLite event log | 单机持久化、重启恢复、便于随 OpenCodex 打包 | 多机共享消费、水位竞争 | 比 JSONL 更适合作为近期持久 adapter 候选 |
+| Yjs/Automerge | 协同编辑、CRDT 合并、我们拥有的数据模型 | 官方 app-host RPC 原样回放、工具流状态 | 可借鉴 state vector/update 思路，不直接引入为 thread 同步内核 |
+| Replicache/Electric/PowerSync | 本地优先数据库、pull/push/cookie、可见视图同步 | app-host 私有帧的低层转发 | 如果未来把 thread 列表/消息视图落成本地 DB，再评估 |
+| XState | relay 生命周期、恢复分支、错误状态收敛 | 事件持久化和网络传输 | 适合把 relay 重建和 snapshot repair 决策从散落 if/else 中抽出来 |
+
+近期不要继续扩大自研范围：短断线交给 Socket.IO，单机持久回放优先评估 SQLite/Redis Streams adapter，relay 和 repair 决策再用状态机收敛。OpenCodex 自己只维护 `thread/read`、`thread/turns/list`、app-host port、snapshot ack 这些官方协议和标准同步抽象之间的翻译。
+
 ### 推荐演进顺序
 
 1. 继续用 Socket.IO 做默认传输，补齐 transport recovery 诊断。

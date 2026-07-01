@@ -319,6 +319,33 @@ rtk node --test gateway/test/app-host-frame-observer.test.cjs
 rtk node --test gateway/test/app-host-frame-observer.test.cjs
 ```
 
+### 任务 14：成熟同步机制选型收敛
+
+**文件：**
+- 修改：`docs/MULTI-CLIENT-STATE-SYNC.md`
+- 修改：`docs/superpowers/plans/2026-07-01-multi-client-state-sync.md`
+
+- [x] **步骤 1：明确可复用边界**
+
+把 `threadSeq`、全量快照、增量队列、per-client 水位、gap 判断和 relay 重建映射到成熟同步/消息系统抽象，避免把这些能力继续散落手写。
+
+- [x] **步骤 2：给出近期取舍**
+
+近期决策：
+
+- Socket.IO 继续接管短断线、room、自动重连和 connection recovery。
+- `ThreadEventLog` 保持为 OpenCodex 的事件流适配边界，后续 adapter 优先评估 SQLite event log 或 Redis Streams。
+- NATS JetStream 留给多进程/多机器阶段，不作为当前单机默认依赖。
+- Yjs/Automerge 只借鉴 state vector/update log，不直接承载官方 app-host RPC。
+- relay 生命周期和 snapshot repair 决策后续可用 XState 类状态机收敛。
+
+- [ ] **步骤 3：实现正式持久 adapter**
+
+在 JSONL 验证完成后，基于同一 `ThreadEventLog` 接口实现更成熟的持久 adapter。优先候选：
+
+- SQLite event log：适合单机 OpenCodex，易打包，能覆盖重启恢复。
+- Redis Streams：适合已经有 Redis 的部署，天然 stream id、consumer group 和 ack。
+
 ## 验收标准
 
 - 手机前台恢复时优先使用 Socket.IO，只有 Socket.IO 不可用时才回退 raw `/ws`。
