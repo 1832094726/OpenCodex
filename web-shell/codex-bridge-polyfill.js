@@ -3124,6 +3124,7 @@
       method,
       threadId: shortThreadId(threadId),
     });
+    acknowledgeFastSyncSnapshotHit(method, [], record.snapshot);
     return fastSyncSnapshotHit(record.snapshot.value);
   }
 
@@ -3363,6 +3364,7 @@
         method,
         source: snapshot.source || "gateway",
       });
+      acknowledgeFastSyncSnapshotHit(method, [], snapshot);
       rememberGatewayKeySnapshot(method, diagnosticSummary && diagnosticSummary.threadId, snapshot);
       return fastSyncSnapshotHit(snapshot.value);
     } catch (error) {
