@@ -44,7 +44,7 @@
 
 1. 继续用 Socket.IO 做默认传输，补齐 transport recovery 诊断。
 2. `threadSeq + queue + cursor + gap` 已抽成 `ThreadEventLog` 接口，gateway 默认使用内存实现。
-3. `ws-hub` 支持注入替换 `threadEventLog`，后续可以在不改 Codex 业务适配层的情况下接入 JetStream、SQLite event log 或其它 stream store。
+3. `ws-hub` 支持注入替换 `threadEventLog`，并可通过 opt-in JSONL adapter 做进程重启后的短窗口恢复验证。
 4. 把 snapshot repair 决策抽成状态机，避免浏览器和 gateway 各自散落判断。
 5. 如果未来把 thread 可见状态落成本地数据库，再评估 Replicache/Electric 这类 local-first sync。
 
@@ -71,6 +71,29 @@ log.stats(threadId);
 - `stats`：给诊断接口提供 retained queue 和 latest seq 水位。
 
 当前内存实现适合单机调试和短断线修复；如果要覆盖进程重启、多机部署或更长弱网窗口，可以保持这组接口不变，把实现替换为持久 event stream。
+
+### 持久 Adapter
+
+默认模式仍是内存：
+
+```bash
+OPENCODEX_THREAD_EVENT_LOG_MODE=memory
+```
+
+需要验证进程重启后的 replay 能力时，可以显式启用 JSONL 文件 adapter：
+
+```bash
+OPENCODEX_THREAD_EVENT_LOG_MODE=file
+OPENCODEX_THREAD_EVENT_LOG_FILE=/path/to/thread-event-log.jsonl
+```
+
+未配置 `OPENCODEX_THREAD_EVENT_LOG_FILE` 时，gateway 会写到：
+
+```text
+<RUNTIME_DIR>/cache/thread-event-log.jsonl
+```
+
+注意：JSONL adapter 会保存用于 replay 的 app-host 原始下行帧，里面可能包含会话正文或工具结果，因此默认关闭。它的定位是验证持久 event log 边界和单机恢复能力；正式长期方案应继续评估 SQLite event log、Redis Streams 或 JetStream，并保持同一组 `ThreadEventLog` 方法不变。
 
 ## 当前传输路径
 
@@ -223,6 +246,7 @@ gateway 收到 ack 后：
 - Socket.IO adapter 复用既有 JSON 协议和 `ws-hub` handler。
 - Socket.IO 客户端加入 `client:<clientId>` 和 `thread:<threadId>` room；非 replay thread nudge 通过 room 定向投递，同步保留 raw `/ws` fallback。
 - app-host thread replay queue 与 `threadSeq` 已收敛到可替换的 `ThreadEventLog` 接口。
+- `ThreadEventLog` 提供内存实现和 opt-in JSONL 文件实现；`ws-hub` 可通过环境变量选择文件 adapter。
 - 浏览器 `sessionStorage` 保存每个 thread 的 `lastThreadSeq`。
 - memory snapshot 携带 `threadSeq`。
 - 浏览器 snapshot ack 携带 `threadSeq`。
@@ -234,7 +258,7 @@ gateway 收到 ack 后：
 1. 补齐 Socket.IO recovery 与 OpenCodex repair 的关联诊断：`missedByTransport`、`repairedByThreadReplay`、`repairedBySnapshot`。
 2. 增加浏览器端真实集成测试：Socket.IO 主路径、脚本加载失败回退、握手失败回退。
 3. 在诊断面板展示 per-client watermarks，而不是只在 JSON API 里可见。
-4. 基于 `ThreadEventLog` 接口实现一个持久 adapter：优先评估 SQLite event log，复杂部署再评估 JetStream。
+4. 基于同一 `ThreadEventLog` 接口实现正式持久 adapter：优先 SQLite event log，复杂/多机部署再评估 Redis Streams 或 JetStream。
 
 ## 可执行验证
 

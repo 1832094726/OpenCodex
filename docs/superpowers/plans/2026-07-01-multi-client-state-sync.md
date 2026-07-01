@@ -235,6 +235,59 @@ rtk git diff --check
 
 预期：行为不变，但后续可以把内存实现替换为 JetStream、SQLite event log 或其它成熟 stream store。
 
+### 任务 12：Opt-in 持久 ThreadEventLog Adapter
+
+**文件：**
+- 修改：`gateway/runtime/core/thread-event-log.cjs`
+- 修改：`gateway/runtime/ipc/ws-hub.cjs`
+- 修改：`gateway/test/thread-event-log.test.cjs`
+- 修改：`gateway/test/app-host-frame-observer.test.cjs`
+- 修改：`docs/MULTI-CLIENT-STATE-SYNC.md`
+
+- [x] **步骤 1：新增失败测试**
+
+覆盖：
+
+- 文件 adapter 能从 JSONL 恢复 retained events；
+- 文件 adapter 能恢复每个 `clientId + portId + threadId` 的 cursor；
+- 恢复后 `threadSeq` 继续单调递增；
+- 配置工厂只有在 `mode=file` 时才写文件；
+- `ws-hub` 通过 `OPENCODEX_THREAD_EVENT_LOG_MODE=file` 确实写入 event log。
+
+- [x] **步骤 2：实现 JSONL adapter**
+
+新增：
+
+```js
+createFileThreadEventLog({ filePath, maxEntries, ttlMs });
+createConfiguredThreadEventLog({ mode, filePath, maxEntries, ttlMs });
+```
+
+默认仍走内存实现；文件 adapter 是 opt-in，因为它会保存用于 replay 的 app-host 原始下行帧。
+
+- [x] **步骤 3：接入 ws-hub**
+
+`ws-hub` 默认使用：
+
+```js
+createConfiguredThreadEventLog({
+  filePath: process.env.OPENCODEX_THREAD_EVENT_LOG_FILE || path.join(RUNTIME_DIR, "cache", "thread-event-log.jsonl"),
+  maxEntries,
+  ttlMs,
+});
+```
+
+当 `OPENCODEX_THREAD_EVENT_LOG_MODE=file` 时启用 JSONL 持久 adapter。
+
+- [x] **步骤 4：验证**
+
+```bash
+rtk node --test gateway/test/thread-event-log.test.cjs
+rtk node --test gateway/test/app-host-frame-observer.test.cjs
+```
+
+下一步不是继续扩大 JSONL，而是用同一接口评估 SQLite event log、Redis Streams 或 JetStream。
+
 ## 验收标准
 
 - 手机前台恢复时优先使用 Socket.IO，只有 Socket.IO 不可用时才回退 raw `/ws`。

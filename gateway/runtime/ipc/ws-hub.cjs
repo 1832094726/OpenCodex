@@ -11,7 +11,7 @@ const fs = require("fs");
 const path = require("path");
 const { diagnosticLog, diagnosticWarn, shortId } = require("../core/diagnostics.cjs");
 const { recordFlowEvent } = require("../core/flow-monitor.cjs");
-const { createThreadEventLog } = require("../core/thread-event-log.cjs");
+const { createConfiguredThreadEventLog } = require("../core/thread-event-log.cjs");
 const { DEBUG_LOGS, RUNTIME_DIR, ensureDir } = require("../core/config.cjs");
 const { resolveOpenCodexI18n } = require("../../../shared/i18n/index.cjs");
 const {
@@ -148,7 +148,8 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   const appHostDownstreamFramesByRelayKey = new Map();
   const appHostDownstreamSeqByRelayKey = new Map();
   // threadEventLog 是同步抽象边界：默认用内存实现，测试或未来持久化 stream 可直接注入替换。
-  const appHostThreadEventLog = threadEventLog || createThreadEventLog({
+  const appHostThreadEventLog = threadEventLog || createConfiguredThreadEventLog({
+    filePath: process.env.OPENCODEX_THREAD_EVENT_LOG_FILE || path.join(RUNTIME_DIR, "cache", "thread-event-log.jsonl"),
     maxEntries: APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES,
     ttlMs: APP_HOST_DOWNSTREAM_REPLAY_TTL_MS,
   });

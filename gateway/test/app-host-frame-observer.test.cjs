@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 const test = require("node:test");
 const { once } = require("node:events");
 const { WebSocket } = require("ws");
@@ -406,7 +407,8 @@ test("app-host thread replay keeps cross-client state separate from per-port seq
   const polyfillSource = fs.readFileSync(path.join(repoRoot, "web-shell", "codex-bridge-polyfill.js"), "utf8");
 
   // Gateway 通过 thread 事件日志索引官方下行帧，给新客户端接同一会话时补缺失增量。
-  assert.match(wsHubSource, /createThreadEventLog/);
+  assert.match(wsHubSource, /createConfiguredThreadEventLog/);
+  assert.match(wsHubSource, /OPENCODEX_THREAD_EVENT_LOG_FILE/);
   assert.match(wsHubSource, /appHostThreadEventLog\.append/);
   assert.match(wsHubSource, /appHostThreadEventLog\.readAfter/);
   assert.match(wsHubSource, /function flushAppHostThreadReplay/);
@@ -614,6 +616,74 @@ test("ws hub can use an injected thread event log for app-host thread replay", a
     if (wsA) wsA.close();
     if (wsB) wsB.close();
     await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("ws hub can persist app-host thread replay events through configured file event log", async (t) => {
+  const wsHubPath = path.join(repoRoot, "gateway", "runtime", "ipc", "ws-hub.cjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-ws-thread-log-"));
+  t.after(() => fs.rmSync(dir, { force: true, recursive: true }));
+  const filePath = path.join(dir, "thread-events.jsonl");
+  const oldMode = process.env.OPENCODEX_THREAD_EVENT_LOG_MODE;
+  const oldFile = process.env.OPENCODEX_THREAD_EVENT_LOG_FILE;
+  process.env.OPENCODEX_THREAD_EVENT_LOG_MODE = "file";
+  process.env.OPENCODEX_THREAD_EVENT_LOG_FILE = filePath;
+  delete require.cache[require.resolve(wsHubPath)];
+  const { createWsHub } = require(wsHubPath);
+  const server = http.createServer((req, res) => {
+    res.writeHead(404);
+    res.end();
+  });
+  const relays = [];
+  createWsHub(server, {
+    createAppHostRelay(details) {
+      const relay = {
+        clientId: details.clientId,
+        close() {},
+        onMessage: details.onMessage,
+        portId: details.portId,
+        postMessage() {},
+      };
+      relays.push(relay);
+      return relay;
+    },
+    isAuthed: () => true,
+  });
+  const address = await listen(server);
+  const wsUrl = `ws://127.0.0.1:${address.port}/ws`;
+  let ws = null;
+
+  try {
+    ws = await connectClient(wsUrl, "client-file-log");
+    ws.send(JSON.stringify({
+      clientId: "client-file-log",
+      portId: "port-file-log",
+      threadId: "thread-file-log",
+      type: "app-host-connect",
+    }));
+    await wsMessage(ws, (message) => message.type === "app-host-port-connected");
+    const relay = relays.find((entry) => entry.clientId === "client-file-log");
+    assert.ok(relay);
+
+    relay.onMessage(JSON.stringify({ id: "rpc-file-log", method: "thread/read", result: { threadId: "thread-file-log", turnId: "turn-file-log" } }));
+    await wsMessage(ws, (message) => message.type === "app-host-port-message" && message.threadSeq === 1);
+
+    const lines = fs.readFileSync(filePath, "utf8").trim().split(/\r?\n/);
+    assert.ok(lines.some((line) => line.includes('"type":"event"') && line.includes("thread-file-log")));
+  } finally {
+    if (ws) ws.close();
+    await new Promise((resolve) => server.close(resolve));
+    if (oldMode == null) {
+      delete process.env.OPENCODEX_THREAD_EVENT_LOG_MODE;
+    } else {
+      process.env.OPENCODEX_THREAD_EVENT_LOG_MODE = oldMode;
+    }
+    if (oldFile == null) {
+      delete process.env.OPENCODEX_THREAD_EVENT_LOG_FILE;
+    } else {
+      process.env.OPENCODEX_THREAD_EVENT_LOG_FILE = oldFile;
+    }
+    delete require.cache[require.resolve(wsHubPath)];
   }
 });
 
