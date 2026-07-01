@@ -142,6 +142,7 @@ function createAppHostFrameState(options = {}) {
     maxEntries,
     portByClientId: new Map(),
     rpcByPortKey: new Map(),
+    threadStatesById: new Map(),
   };
 }
 
@@ -156,12 +157,71 @@ function portKey(clientId, portId) {
   return `${clientId || ""}\n${portId || ""}`;
 }
 
+function ensureThreadState(state, threadId) {
+  if (!state || !threadId) return null;
+  let thread = state.threadStatesById.get(threadId);
+  if (!thread) {
+    thread = {
+      clientLastSeenAtMs: new Map(),
+      conversationId: "",
+      downstreamFrameCount: 0,
+      frameCount: 0,
+      lastDirection: "",
+      lastFrameAtMs: 0,
+      lastMethod: "",
+      lastRequestId: "",
+      lastThreadReplayAtMs: 0,
+      lastThreadReplayQueued: 0,
+      lastThreadReplaySent: 0,
+      lastTurnId: "",
+      portLastSeenAtMs: new Map(),
+      sessionId: "",
+      threadId,
+      threadReplayCount: 0,
+      upstreamFrameCount: 0,
+    };
+    state.threadStatesById.set(threadId, thread);
+  }
+  trimMap(state.threadStatesById, state.maxEntries);
+  return thread;
+}
+
+function rememberThreadParticipant(thread, clientId, portId, nowMs) {
+  // thread 状态只保存路由身份和时间戳，正文内容仍由 summarize 阶段统一脱敏。
+  if (!thread) return;
+  if (clientId) thread.clientLastSeenAtMs.set(clientId, nowMs);
+  if (portId) thread.portLastSeenAtMs.set(portId, nowMs);
+}
+
+function rememberThreadFrame(state, summary, context, nowMs) {
+  if (!state || !summary || !summary.threadId) return null;
+  const thread = ensureThreadState(state, summary.threadId);
+  rememberThreadParticipant(thread, context.clientId || "", context.portId || "", nowMs);
+  thread.conversationId ||= summary.conversationId;
+  thread.sessionId ||= summary.sessionId;
+  if (summary.conversationId) thread.conversationId = summary.conversationId;
+  if (summary.sessionId) thread.sessionId = summary.sessionId;
+  thread.frameCount += 1;
+  if (context.direction === "official-to-browser") thread.downstreamFrameCount += 1;
+  if (context.direction === "browser-to-official") thread.upstreamFrameCount += 1;
+  thread.lastDirection = context.direction || "";
+  thread.lastFrameAtMs = nowMs;
+  thread.lastMethod = summary.method || thread.lastMethod;
+  thread.lastRequestId = summary.requestId || thread.lastRequestId;
+  thread.lastTurnId = summary.turnId || thread.lastTurnId;
+  trimMap(thread.clientLastSeenAtMs, state.maxEntries);
+  trimMap(thread.portLastSeenAtMs, state.maxEntries);
+  return thread;
+}
+
 function rememberFrame(state, summary, context) {
   if (!state || !summary) return;
+  const nowMs = Date.now();
   const clientId = context.clientId || "";
   const portId = context.portId || "";
   if (clientId && portId) state.portByClientId.set(clientId, portId);
   if (summary.threadId && clientId) state.clientByThreadId.set(summary.threadId, clientId);
+  rememberThreadFrame(state, summary, context, nowMs);
   if (summary.requestId) {
     const entry = {
       clientId,
@@ -173,7 +233,7 @@ function rememberFrame(state, summary, context) {
       sessionId: summary.sessionId,
       threadId: summary.threadId,
       turnId: summary.turnId,
-      updatedAtMs: Date.now(),
+      updatedAtMs: nowMs,
     };
     state.framesByRpcId.set(summary.requestId, entry);
     const key = portKey(clientId, portId);
@@ -184,6 +244,62 @@ function rememberFrame(state, summary, context) {
   }
   trimMap(state.clientByThreadId, state.maxEntries);
   trimMap(state.portByClientId, state.maxEntries);
+}
+
+function rememberAppHostThreadPort(state, details = {}) {
+  const threadId = typeof details.threadId === "string" ? details.threadId : "";
+  const clientId = typeof details.clientId === "string" ? details.clientId : "";
+  const portId = typeof details.portId === "string" ? details.portId : "";
+  if (!state || !threadId) return null;
+  const nowMs = Date.now();
+  const thread = ensureThreadState(state, threadId);
+  rememberThreadParticipant(thread, clientId, portId, nowMs);
+  thread.lastFrameAtMs ||= nowMs;
+  if (clientId) state.clientByThreadId.set(threadId, clientId);
+  if (clientId && portId) state.portByClientId.set(clientId, portId);
+  trimMap(state.clientByThreadId, state.maxEntries);
+  trimMap(state.portByClientId, state.maxEntries);
+  return appHostThreadStateSnapshot(state, threadId);
+}
+
+function recordAppHostThreadReplay(state, details = {}) {
+  const threadId = typeof details.threadId === "string" ? details.threadId : "";
+  if (!state || !threadId) return null;
+  const nowMs = Date.now();
+  const thread = ensureThreadState(state, threadId);
+  rememberThreadParticipant(thread, details.clientId || "", details.portId || "", nowMs);
+  thread.threadReplayCount += 1;
+  thread.lastThreadReplayAtMs = nowMs;
+  thread.lastThreadReplayQueued = Math.max(0, Number(details.queued) || 0);
+  thread.lastThreadReplaySent = Math.max(0, Number(details.sent) || 0);
+  return appHostThreadStateSnapshot(state, threadId);
+}
+
+function appHostThreadStateSnapshot(state, threadId) {
+  if (!state || !threadId || !state.threadStatesById) return null;
+  const thread = state.threadStatesById.get(threadId);
+  if (!thread) return null;
+  return {
+    clientCount: thread.clientLastSeenAtMs.size,
+    clientIds: Array.from(thread.clientLastSeenAtMs.keys()),
+    conversationId: thread.conversationId,
+    downstreamFrameCount: thread.downstreamFrameCount,
+    frameCount: thread.frameCount,
+    lastDirection: thread.lastDirection,
+    lastFrameAtMs: thread.lastFrameAtMs,
+    lastMethod: thread.lastMethod,
+    lastRequestId: thread.lastRequestId,
+    lastThreadReplayAtMs: thread.lastThreadReplayAtMs,
+    lastThreadReplayQueued: thread.lastThreadReplayQueued,
+    lastThreadReplaySent: thread.lastThreadReplaySent,
+    lastTurnId: thread.lastTurnId,
+    portCount: thread.portLastSeenAtMs.size,
+    portIds: Array.from(thread.portLastSeenAtMs.keys()),
+    sessionId: thread.sessionId,
+    threadId: thread.threadId,
+    threadReplayCount: thread.threadReplayCount,
+    upstreamFrameCount: thread.upstreamFrameCount,
+  };
 }
 
 function observeAppHostFrame(context = {}) {
@@ -238,7 +354,10 @@ function appHostStateContext(state, clientId, portId) {
 
 module.exports = {
   appHostStateContext,
+  appHostThreadStateSnapshot,
   createAppHostFrameState,
   observeAppHostFrame,
+  recordAppHostThreadReplay,
+  rememberAppHostThreadPort,
   summarizeAppHostFrame,
 };

@@ -5,8 +5,11 @@ const test = require("node:test");
 
 const {
   appHostStateContext,
+  appHostThreadStateSnapshot,
   createAppHostFrameState,
   observeAppHostFrame,
+  recordAppHostThreadReplay,
+  rememberAppHostThreadPort,
   summarizeAppHostFrame,
 } = require("../runtime/ipc/app-host-frame-observer.cjs");
 
@@ -75,6 +78,85 @@ test("summarizeAppHostFrame tolerates non-json frames", () => {
   assert.equal(summary.method, "");
   assert.equal(summary.requestId, "");
   assert.equal(summary.bytes, Buffer.byteLength("not-json", "utf-8"));
+});
+
+test("thread state tracks multiple clients without storing message bodies", () => {
+  const state = createAppHostFrameState({ maxEntries: 20 });
+
+  observeAppHostFrame({
+    clientId: "client-thread-a",
+    data: JSON.stringify({
+      id: "rpc-thread-a",
+      method: "thread/read",
+      params: {
+        prompt: "不能落状态",
+        threadId: "thread-shared",
+        turnId: "turn-a",
+      },
+    }),
+    direction: "browser-to-official",
+    flow: false,
+    log: false,
+    portId: "port-thread-a",
+    state,
+  });
+  observeAppHostFrame({
+    clientId: "client-thread-b",
+    data: JSON.stringify({
+      id: "rpc-thread-b",
+      method: "thread/turns/list",
+      params: {
+        content: "也不能落状态",
+        threadId: "thread-shared",
+        turnId: "turn-b",
+      },
+    }),
+    direction: "official-to-browser",
+    flow: false,
+    log: false,
+    portId: "port-thread-b",
+    state,
+  });
+
+  const snapshot = appHostThreadStateSnapshot(state, "thread-shared");
+  assert.equal(snapshot.threadId, "thread-shared");
+  assert.equal(snapshot.clientCount, 2);
+  assert.deepEqual(snapshot.clientIds.sort(), ["client-thread-a", "client-thread-b"]);
+  assert.equal(snapshot.portCount, 2);
+  assert.equal(snapshot.frameCount, 2);
+  assert.equal(snapshot.upstreamFrameCount, 1);
+  assert.equal(snapshot.downstreamFrameCount, 1);
+  assert.equal(snapshot.lastMethod, "thread/turns/list");
+  assert.equal(snapshot.lastTurnId, "turn-b");
+  assert.equal(JSON.stringify(snapshot).includes("不能落状态"), false);
+  assert.equal(JSON.stringify(snapshot).includes("也不能落状态"), false);
+});
+
+test("thread state records connect and replay diagnostics per thread", () => {
+  const state = createAppHostFrameState({ maxEntries: 20 });
+
+  rememberAppHostThreadPort(state, {
+    clientId: "client-connect",
+    portId: "port-connect",
+    threadId: "thread-connect",
+  });
+  recordAppHostThreadReplay(state, {
+    clientId: "client-connect",
+    portId: "port-connect",
+    queued: 3,
+    sent: 2,
+    threadId: "thread-connect",
+  });
+
+  const connected = appHostThreadStateSnapshot(state, "thread-connect");
+  const missing = appHostThreadStateSnapshot(state, "thread-other");
+  assert.equal(connected.clientCount, 1);
+  assert.deepEqual(connected.clientIds, ["client-connect"]);
+  assert.equal(connected.portCount, 1);
+  assert.equal(connected.threadReplayCount, 1);
+  assert.equal(connected.lastThreadReplayQueued, 3);
+  assert.equal(connected.lastThreadReplaySent, 2);
+  assert.equal(missing, null);
 });
 
 test("app-host downstream replay protocol is wired on gateway and browser sides", () => {

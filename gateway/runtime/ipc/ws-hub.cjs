@@ -13,6 +13,8 @@ const {
   appHostStateContext,
   createAppHostFrameState,
   observeAppHostFrame,
+  recordAppHostThreadReplay,
+  rememberAppHostThreadPort,
 } = require("./app-host-frame-observer.cjs");
 
 // 下面这些阈值只服务于 OPENCODEX_DEBUG_WS=1 的链路排障；默认运行不会采样慢 WS 发送。
@@ -256,8 +258,11 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       }
       sent += 1;
     }
+    const threadState = recordAppHostThreadReplay(appHostFrameState, { clientId, portId, queued: queue.length, sent, threadId });
     diagnosticLog("ws-hub", "app_host_thread_replay_flushed", {
       clientId: shortId(clientId),
+      knownClients: threadState ? threadState.clientCount : 0,
+      knownPorts: threadState ? threadState.portCount : 0,
       portId: shortId(portId),
       queued: queue.length,
       sent,
@@ -1203,6 +1208,10 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
         portId: shortId(portId),
       });
       return true;
+    }
+    if (routeThreadId) {
+      // connect 帧先把“哪个客户端正在看哪个 thread”落到中间态；即使官方还没回包，也能用于重连诊断。
+      rememberAppHostThreadPort(appHostFrameState, { clientId, portId, threadId: routeThreadId });
     }
     if (typeof createAppHostRelay !== "function") {
       diagnosticWarn("ws-hub", "app_host_connect_unavailable", {
