@@ -63,6 +63,16 @@ test("fast sync snapshot diagnostics are wired in the polyfill", () => {
   }
 });
 
+test("thread detail sync nudge refreshes only the matching route", () => {
+  const source = readPolyfillSource();
+  const syncBody = sourceBetween(source, "function scheduleCrossClientSyncRefresh", "function waitForGatewayWsReady");
+
+  assert.match(source, /function refreshCurrentThreadRouteFromSnapshotNudge/);
+  assert.match(syncBody, /message\.reason === "thread-detail-snapshot"/);
+  assert.match(syncBody, /currentRouteThreadId\(\) !== message\.threadId/);
+  assert.match(syncBody, /refreshCurrentThreadRouteFromSnapshotNudge\(message\)/);
+});
+
 test("fast sync snapshot reads have short miss timeouts", () => {
   const source = readPolyfillSource();
   // 弱网下冷缓存 miss 不能长期卡住真实 IPC，浏览器本地和 gateway 快照读取都要有短超时。

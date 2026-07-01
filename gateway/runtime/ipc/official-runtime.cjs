@@ -34,6 +34,7 @@ const {
   cacheKeyForSnapshot,
   createFastSyncCache,
   isFastSyncCacheableMethod,
+  isFastSyncMemoryCacheableMethod,
   isFastSyncSnapshotMethod,
   memoryFastSyncCache,
   valueFromFastSyncFetchResponsePayload,
@@ -56,7 +57,9 @@ const requestContext = new AsyncLocalStorage();
 const requestRoutes = new Map();
 // requestRouteSummaries 保存 requestId 对应的入站摘要，让出站 fetch-response 日志也能带上原始 URL。
 const requestRouteSummaries = new Map();
+const threadSnapshotNudgeAtMsByThreadId = new Map();
 const APP_SERVER_READ_ONLY_CACHE_TTL_MS = Number(process.env.OPENCODEX_APP_SERVER_READ_ONLY_CACHE_TTL_MS || 5 * 60 * 1000);
+const THREAD_SNAPSHOT_NUDGE_MIN_INTERVAL_MS = Number(process.env.OPENCODEX_THREAD_SNAPSHOT_NUDGE_MIN_INTERVAL_MS || 30 * 1000);
 // 首屏辅助读允许走短 TTL 只读缓存；会话详情和发送链路仍保持官方实时 IPC。
 const APP_SERVER_READ_ONLY_METHODS = new Set([
   "app/list",
@@ -1237,6 +1240,7 @@ function incomingIpcDiagnosticSummary(channel, payload) {
       // 某些 JSON-RPC 包装会把 app-server 方法藏在 params.method，这里也归一化到 method。
       if (!summary.method) summary.method = message.params.method;
     }
+    summary.threadId = flowThreadIdFromPayload(message);
   }
   return summary;
 }
@@ -1905,14 +1909,39 @@ function rememberFastSyncSnapshot(channel, _args, requestSummary, responseResult
   // 会话详情只写进程内存，入口列表/配置等轻量读才允许落盘，避免把完整对话持久化到快照目录。
   const cache = isFastSyncCacheableMethod(method) ? fastSyncCache : memoryFastSyncCache;
   if (!cache.writeSnapshot({ key, method, value: responseValue })) return;
+  const threadId = flowThreadIdFromPayload(responseValue) || flowThreadIdFromPayload(requestSummary);
   recordFlowEvent({
     clientId: context.clientId || "",
     hint: isFastSyncCacheableMethod(method) ? "已写入 gateway 快照" : "已写入 gateway 内存快照",
     method,
     scope: "thread",
     stage: "gateway_snapshot_store",
-    threadId: flowThreadIdFromPayload(responseValue) || flowThreadIdFromPayload(requestSummary),
+    threadId,
   });
+  notifyOtherClientsForThreadSnapshot(context.clientId || "", method, threadId, requestSummary);
+}
+
+function notifyOtherClientsForThreadSnapshot(sourceClientId, method, threadId, requestSummary) {
+  if (!sourceClientId || !threadId || !wsHub || typeof wsHub.broadcastExcept !== "function") return false;
+  if (!isFastSyncMemoryCacheableMethod(method)) return false;
+  const nowMs = Date.now();
+  const lastAtMs = Number(threadSnapshotNudgeAtMsByThreadId.get(threadId) || 0);
+  if (lastAtMs > 0 && nowMs - lastAtMs < THREAD_SNAPSHOT_NUDGE_MIN_INTERVAL_MS) return false;
+  threadSnapshotNudgeAtMsByThreadId.set(threadId, nowMs);
+  wsHub.broadcastExcept(
+    sourceClientId,
+    {
+      type: "opencodex:sync-nudge",
+      sourceClientId,
+      reason: "thread-detail-snapshot",
+      method,
+      requestId: (requestSummary && requestSummary.requestId) || "",
+      threadId,
+      at: nowMs,
+    },
+    { suppressDiagnostic: true }
+  );
+  return true;
 }
 
 function outgoingIpcDiagnosticSummary(channel, args, requestSummary = null) {

@@ -486,6 +486,12 @@
     return `${text.slice(0, 8)}...${text.slice(-4)}`;
   }
 
+  function shortThreadId(value) {
+    const text = typeof value === "string" ? value : "";
+    if (text.length <= 18) return text;
+    return `${text.slice(0, 10)}...${text.slice(-4)}`;
+  }
+
   function redactDiagnosticUrl(value) {
     const text = String(value || "");
     try {
@@ -2246,8 +2252,33 @@
     return tag === "input" || tag === "textarea" || active.isContentEditable === true;
   }
 
+  function refreshCurrentThreadRouteFromSnapshotNudge(message) {
+    const route = currentRestorableRoute();
+    if (!route || document.visibilityState !== "visible" || hasEditableFocus()) return false;
+    clientDiagnostic("thread-detail-snapshot-route-refresh", {
+      reason: message && message.reason ? String(message.reason) : "",
+      threadId: shortThreadId((message && message.threadId) || ""),
+    });
+    try {
+      if (route === `${location.pathname || "/"}${location.search || ""}${location.hash || ""}`) {
+        location.reload();
+      } else {
+        location.href = route;
+      }
+      return true;
+    } catch (error) {
+      clientDiagnostic("thread-detail-snapshot-route-refresh-failed", {
+        error: error instanceof Error ? error.message : String(error),
+        threadId: shortThreadId((message && message.threadId) || ""),
+      });
+      return false;
+    }
+  }
+
   function scheduleCrossClientSyncRefresh(message) {
     if (!message || message.sourceClientId === clientId) return;
+    const isThreadDetailSnapshot = message.reason === "thread-detail-snapshot" && typeof message.threadId === "string" && message.threadId;
+    if (isThreadDetailSnapshot && currentRouteThreadId() !== message.threadId) return;
     const nowMs = Date.now();
     const minIntervalMs = document.visibilityState === "visible" ? 8000 : 2500;
     if (nowMs - lastCrossClientSyncAtMs < minIntervalMs) return;
@@ -2264,6 +2295,7 @@
       try {
         w.dispatchEvent(new CustomEvent("opencodex:sync-refresh", { detail: message }));
       } catch {}
+      if (isThreadDetailSnapshot) refreshCurrentThreadRouteFromSnapshotNudge(message);
     }, 800);
   }
 

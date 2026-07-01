@@ -96,3 +96,14 @@ test("thread detail fast-sync snapshots stay memory-only", () => {
   assert.match(fastSyncBody, /isFastSyncCacheableMethod\(method\) \? fastSyncCache : memoryFastSyncCache/);
   assert.match(fastSyncBody, /gateway 内存快照/);
 });
+
+test("thread detail snapshots notify other clients for the same thread", () => {
+  const fastSyncBody = officialRuntimeFunctionSource("rememberFastSyncSnapshot", "outgoingIpcDiagnosticSummary");
+  const notifyBody = officialRuntimeFunctionSource("notifyOtherClientsForThreadSnapshot", "outgoingIpcDiagnosticSummary");
+
+  assert.match(source, /function notifyOtherClientsForThreadSnapshot/);
+  assert.match(fastSyncBody, /notifyOtherClientsForThreadSnapshot\(context\.clientId \|\| "", method, threadId, requestSummary\)/);
+  assert.match(notifyBody, /reason: "thread-detail-snapshot"/);
+  assert.match(notifyBody, /threadId/);
+  assert.match(notifyBody, /broadcastExcept/);
+});
