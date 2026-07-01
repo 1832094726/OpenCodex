@@ -87,9 +87,18 @@ test("thread detail nudge skips hard reload when app-host replay was delivered",
   const source = readPolyfillSource();
   const refreshBody = sourceBetween(source, "function refreshCurrentThreadRouteFromSnapshotNudge", "function scheduleCrossClientSyncRefresh");
 
-  assert.match(refreshBody, /Number\(message && message\.replaySent \|\| 0\) > 0/);
+  assert.match(refreshBody, /Number\(message && message\.replaySent \|\| 0\) > 0 && message\.replayGap !== true/);
   assert.match(refreshBody, /thread-detail-snapshot-replay-applied/);
   assert.match(refreshBody, /return true/);
+});
+
+test("thread detail nudge keeps refresh fallback when app-host replay has a gap", () => {
+  const source = readPolyfillSource();
+  const refreshBody = sourceBetween(source, "function refreshCurrentThreadRouteFromSnapshotNudge", "function scheduleCrossClientSyncRefresh");
+  const appHostBody = sourceBetween(source, "function handleAppHostGatewayMessage", "function installAppHostMessagePortBridge");
+
+  assert.match(refreshBody, /message\.replayGap !== true/);
+  assert.match(appHostBody, /app-host-thread-replay-gap/);
 });
 
 test("fast sync snapshot reads have short miss timeouts", () => {

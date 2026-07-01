@@ -2257,7 +2257,7 @@
   function refreshCurrentThreadRouteFromSnapshotNudge(message) {
     const route = currentRestorableRoute();
     if (!route || document.visibilityState !== "visible" || hasEditableFocus()) return false;
-    if (Number(message && message.replaySent || 0) > 0) {
+    if (Number(message && message.replaySent || 0) > 0 && message.replayGap !== true) {
       clientDiagnostic("thread-detail-snapshot-replay-applied", {
         replaySent: Number(message && message.replaySent || 0),
         threadId: shortThreadId((message && message.threadId) || ""),
@@ -2602,6 +2602,14 @@
     const serverSeq = Number(message.seq || 0);
     const threadId = typeof message.threadId === "string" ? message.threadId.slice(0, 160) : "";
     const threadSeq = Number(message.threadSeq || 0);
+    if (message.replay === "thread" && message.replayGap === true) {
+      // gateway 已发现本页游标早于回放队列最老帧；先应用可用帧，再依赖快照/刷新补齐缺口。
+      clientDiagnostic("app-host-thread-replay-gap", {
+        portId,
+        threadId: shortThreadId(threadId),
+        threadSeq,
+      });
+    }
     if (message.replay === "thread" && threadId && Number.isFinite(threadSeq) && threadSeq > 0 && threadSeq <= rememberedAppHostThreadSeq(threadId)) {
       clientDiagnostic("app-host-duplicate-thread-frame", {
         lastThreadSeq: rememberedAppHostThreadSeq(threadId),

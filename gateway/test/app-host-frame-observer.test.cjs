@@ -57,6 +57,36 @@ function wsMessage(ws, predicate, timeoutMs = 1000) {
   });
 }
 
+function wsMessages(ws, predicate, count, timeoutMs = 1000) {
+  return new Promise((resolve, reject) => {
+    const messages = [];
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timed out waiting for websocket messages"));
+    }, timeoutMs);
+    const cleanup = () => {
+      clearTimeout(timer);
+      ws.off("message", onMessage);
+      ws.off("error", onError);
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onMessage = (raw) => {
+      const message = JSON.parse(String(raw));
+      if (predicate && !predicate(message)) return;
+      messages.push(message);
+      if (messages.length >= count) {
+        cleanup();
+        resolve(messages);
+      }
+    };
+    ws.on("message", onMessage);
+    ws.on("error", onError);
+  });
+}
+
 async function connectClient(url, clientId) {
   const ws = new WebSocket(url);
   await once(ws, "open");
@@ -341,7 +371,7 @@ test("app-host thread replay keeps cross-client state separate from per-port seq
   assert.match(wsHubSource, /appHostDownstreamThreadSeqByThreadId/);
   assert.match(wsHubSource, /threadSeq = appHostThreadNextSeq\(threadId\)/);
   assert.match(wsHubSource, /payload\.threadSeq = frame\.threadSeq/);
-  assert.match(wsHubSource, /appHostPortMessagePayload\(portId, entry\.data, entry, \{ replay: "thread" \}\)/);
+  assert.match(wsHubSource, /appHostPortMessagePayload\(portId, entry\.data, entry, \{ replay: "thread", replayGap \}\)/);
   assert.doesNotMatch(wsHubSource, /type: "app-host-port-message", portId, data: entry\.data, replay: "thread", seq/);
 
   // 浏览器 connect 帧携带当前路由 threadId 和 threadSeq 游标，gateway 只补同 thread 缺失增量。
@@ -417,6 +447,107 @@ test("ws hub replays only app-host thread frames after the client thread cursor"
     if (wsA) wsA.close();
     if (wsB) wsB.close();
     await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("ws hub marks app-host thread replay gaps when a client cursor is older than the retained queue", async () => {
+  const wsHubPath = path.join(repoRoot, "gateway", "runtime", "ipc", "ws-hub.cjs");
+  const oldMaxMessages = process.env.OPENCODEX_APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES;
+  process.env.OPENCODEX_APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES = "2";
+  delete require.cache[require.resolve(wsHubPath)];
+  const { createWsHub } = require(wsHubPath);
+  const server = http.createServer((req, res) => {
+    res.writeHead(404);
+    res.end();
+  });
+  const relays = [];
+  const hub = createWsHub(server, {
+    createAppHostRelay(details) {
+      const relay = {
+        clientId: details.clientId,
+        close() {},
+        onMessage: details.onMessage,
+        portId: details.portId,
+        postMessage() {},
+      };
+      relays.push(relay);
+      return relay;
+    },
+    isAuthed: () => true,
+  });
+  const address = await listen(server);
+  const wsUrl = `ws://127.0.0.1:${address.port}/ws`;
+  let wsA = null;
+  let wsB = null;
+
+  try {
+    wsA = await connectClient(wsUrl, "client-thread-gap-a");
+    wsA.send(JSON.stringify({
+      clientId: "client-thread-gap-a",
+      portId: "port-thread-gap-a",
+      threadId: "thread-gap",
+      type: "app-host-connect",
+    }));
+    await wsMessage(wsA, (message) => message.type === "app-host-port-connected");
+    const relayA = relays.find((relay) => relay.clientId === "client-thread-gap-a");
+    assert.ok(relayA);
+
+    // 队列最多保留两条；发送四条后，threadSeq=2 之前的增量已经无法完整补齐。
+    for (let index = 1; index <= 4; index += 1) {
+      relayA.onMessage(JSON.stringify({ id: `rpc-gap-${index}`, method: "thread/read", result: { threadId: "thread-gap", turnId: `turn-${index}` } }));
+      await wsMessage(wsA, (message) => message.type === "app-host-port-message" && message.threadSeq === index);
+    }
+
+    wsB = await connectClient(wsUrl, "client-thread-gap-b");
+    const replayMessagesPromise = wsMessages(wsB, (message) => message.type === "app-host-port-message" && message.replay === "thread", 2);
+    wsB.send(JSON.stringify({
+      clientId: "client-thread-gap-b",
+      lastThreadSeq: 1,
+      portId: "port-thread-gap-b",
+      threadId: "thread-gap",
+      type: "app-host-connect",
+    }));
+    const [replay, secondReplay] = await replayMessagesPromise;
+    assert.equal(replay.replayGap, true);
+    assert.equal(replay.threadSeq, 3);
+    assert.equal(secondReplay.replayGap, true);
+    assert.equal(secondReplay.threadSeq, 4);
+
+    const snapshot = hub.snapshotThreads({ threadId: "thread-gap" }).threads[0];
+    assert.equal(snapshot.oldestThreadSeq, 3);
+    assert.equal(snapshot.latestThreadSeq, 4);
+    assert.equal(snapshot.lastThreadReplayGap, true);
+
+    relayA.onMessage(JSON.stringify({ id: "rpc-gap-5", method: "thread/read", result: { threadId: "thread-gap", turnId: "turn-5" } }));
+    await wsMessage(wsA, (message) => message.type === "app-host-port-message" && message.threadSeq === 5);
+    const nudgeReplayPromise = wsMessage(wsB, (message) => message.type === "app-host-port-message" && message.replay === "thread");
+    const nudgePromise = wsMessage(wsB, (message) => message.type === "opencodex:sync-nudge");
+    hub.sendToThread(
+      "thread-gap",
+      {
+        type: "opencodex:sync-nudge",
+        reason: "thread-detail-snapshot",
+        threadId: "thread-gap",
+      },
+      { excludedClientId: "client-thread-gap-a", suppressDiagnostic: true }
+    );
+
+    const nudgeReplay = await nudgeReplayPromise;
+    const nudge = await nudgePromise;
+    assert.equal(nudgeReplay.threadSeq, 5);
+    assert.equal(nudgeReplay.replayGap, false);
+    assert.equal(nudge.replaySent, 1);
+    assert.equal(nudge.replayGap, false);
+  } finally {
+    if (wsA) wsA.close();
+    if (wsB) wsB.close();
+    await new Promise((resolve) => server.close(resolve));
+    if (oldMaxMessages == null) {
+      delete process.env.OPENCODEX_APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES;
+    } else {
+      process.env.OPENCODEX_APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES = oldMaxMessages;
+    }
+    delete require.cache[require.resolve(wsHubPath)];
   }
 });
 

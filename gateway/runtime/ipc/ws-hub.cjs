@@ -144,6 +144,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   const appHostDownstreamFramesByThreadId = new Map();
   const appHostDownstreamSeqByRelayKey = new Map();
   const appHostDownstreamThreadSeqByThreadId = new Map();
+  const appHostThreadSeqByRelayKey = new Map();
   const appHostFrameState = createAppHostFrameState();
   let lastAuthRejectLogAtMs = 0;
   let suppressedAuthRejectCount = 0;
@@ -164,6 +165,26 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
 
   function appHostRelayKey(clientId, portId) {
     return `${clientId || ""}\n${portId || ""}`;
+  }
+
+  function appHostThreadCursorKey(clientId, portId, threadId) {
+    return `${clientId || ""}\n${portId || ""}\n${threadId || ""}`;
+  }
+
+  function rememberAppHostThreadCursor(clientId, portId, threadId, threadSeq) {
+    const seq = Number(threadSeq);
+    if (!clientId || !portId || !threadId || !Number.isFinite(seq) || seq <= 0) return 0;
+    const key = appHostThreadCursorKey(clientId, portId, threadId);
+    const current = Number(appHostThreadSeqByRelayKey.get(key) || 0);
+    if (seq <= current) return current;
+    // gateway 侧游标只表示“已投递给该浏览器端口”，真正收到仍以浏览器重连上报的 lastThreadSeq 为准。
+    appHostThreadSeqByRelayKey.set(key, seq);
+    return seq;
+  }
+
+  function rememberedAppHostThreadCursor(clientId, portId, threadId) {
+    if (!clientId || !portId || !threadId) return 0;
+    return Number(appHostThreadSeqByRelayKey.get(appHostThreadCursorKey(clientId, portId, threadId)) || 0);
   }
 
   function appHostDownstreamNextSeq(clientId, portId) {
@@ -293,25 +314,36 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   }
 
   function flushAppHostThreadReplay(ws, clientId, portId, threadId, afterThreadSeq = 0) {
-    if (!threadId || !ws || ws.readyState !== ws.OPEN) return 0;
+    if (!threadId || !ws || ws.readyState !== ws.OPEN) return { gap: false, queued: 0, sent: 0 };
     const cursor = Number(afterThreadSeq);
-    const queue = pruneAppHostThreadFrames(threadId).filter((entry) => {
+    const allThreadFrames = pruneAppHostThreadFrames(threadId);
+    const oldestThreadSeq = allThreadFrames.reduce((oldest, entry) => {
+      const seq = Number(entry && entry.threadSeq) || 0;
+      if (seq <= 0) return oldest;
+      return oldest === 0 || seq < oldest ? seq : oldest;
+    }, 0);
+    const replayGap = Number.isFinite(cursor) && cursor > 0 && oldestThreadSeq > 0 && oldestThreadSeq > cursor + 1;
+    const queue = allThreadFrames.filter((entry) => {
       if (entry.sourceClientId === clientId && entry.sourcePortId === portId) return false;
       return !Number.isFinite(cursor) || cursor <= 0 || Number(entry.threadSeq || 0) > cursor;
     });
-    if (!queue.length) return 0;
+    if (!queue.length) return { gap: replayGap, queued: 0, sent: 0 };
     let sent = 0;
+    let latestSentThreadSeq = 0;
     for (const entry of queue) {
       // 跨客户端补发不带 per-port seq，避免影响当前端口 live 增量；threadSeq 单独用于去重和断点续传。
-      if (!safeSend(ws, appHostPortMessagePayload(portId, entry.data, entry, { replay: "thread" }), { suppressDiagnostic: true, route: "app_host_thread_replay" })) {
+      if (!safeSend(ws, appHostPortMessagePayload(portId, entry.data, entry, { replay: "thread", replayGap }), { suppressDiagnostic: true, route: "app_host_thread_replay" })) {
         break;
       }
+      latestSentThreadSeq = Math.max(latestSentThreadSeq, Number(entry.threadSeq) || 0);
       sent += 1;
     }
-    const threadState = recordAppHostThreadReplay(appHostFrameState, { clientId, portId, queued: queue.length, sent, threadId });
+    if (latestSentThreadSeq > 0) rememberAppHostThreadCursor(clientId, portId, threadId, latestSentThreadSeq);
+    const threadState = recordAppHostThreadReplay(appHostFrameState, { clientId, gap: replayGap, portId, queued: queue.length, sent, threadId });
     diagnosticLog("ws-hub", "app_host_thread_replay_flushed", {
       afterThreadSeq: Number.isFinite(cursor) && cursor > 0 ? cursor : 0,
       clientId: shortId(clientId),
+      gap: replayGap,
       knownClients: threadState ? threadState.clientCount : 0,
       knownPorts: threadState ? threadState.portCount : 0,
       portId: shortId(portId),
@@ -321,12 +353,15 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     });
     recordFlowEvent({
       clientId,
-      hint: `app-host 已按 thread 补发 ${sent}/${queue.length} 条旧客户端增量帧`,
+      hint: replayGap
+        ? `app-host thread 回放存在缺口，已先补发 ${sent}/${queue.length} 条可用增量帧`
+        : `app-host 已按 thread 补发 ${sent}/${queue.length} 条旧客户端增量帧`,
+      level: replayGap ? "warn" : "info",
       scope: "relay",
       stage: sent === queue.length ? "thread_replay_flushed" : "thread_replay_partial",
       threadId,
     });
-    return sent;
+    return { gap: replayGap, queued: queue.length, sent };
   }
 
   function observeAppHostPortFrame(ws, direction, portId, data) {
@@ -1091,6 +1126,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     let sent = 0;
     for (const targetClientId of activeClientIds) {
       if (!targetClientId || targetClientId === excludedClientId) continue;
+      let replayGap = false;
       let replaySent = 0;
       if (shouldReplayBeforeNudge) {
         const socket = clientsById.get(targetClientId);
@@ -1098,10 +1134,13 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
         const portIds = clientPorts && Array.isArray(clientPorts.portIds) ? clientPorts.portIds : [];
         for (const portId of portIds) {
           // nudge 前先把 gateway 已缓存的同 thread app-host 增量补给目标端口，浏览器按 threadSeq 自行去重。
-          replaySent += flushAppHostThreadReplay(socket, targetClientId, portId, threadId);
+          const lastThreadSeq = rememberedAppHostThreadCursor(targetClientId, portId, threadId);
+          const replay = flushAppHostThreadReplay(socket, targetClientId, portId, threadId, lastThreadSeq);
+          replaySent += replay.sent;
+          replayGap = replayGap || replay.gap;
         }
       }
-      const targetPayload = shouldReplayBeforeNudge ? { ...payload, replaySent } : payload;
+      const targetPayload = shouldReplayBeforeNudge ? { ...payload, replayGap, replaySent } : payload;
       if (sendTo(targetClientId, targetPayload, { ...options, route: "send_to_thread" })) sent += 1;
     }
     recordAppHostThreadNudge(appHostFrameState, {
@@ -1326,7 +1365,9 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
         const frameSummary = observeAppHostPortFrame(ws, "official-to-browser", portId, data);
         maybeHandleAppHostReadOnlyResponse(ws, portId, relay, data);
         const frame = rememberAppHostDownstreamFrame(clientId, portId, data, frameSummary && frameSummary.raw);
-        safeSend(ws, appHostPortMessagePayload(portId, data, frame), { suppressDiagnostic: true });
+        if (safeSend(ws, appHostPortMessagePayload(portId, data, frame), { suppressDiagnostic: true })) {
+          rememberAppHostThreadCursor(clientId, portId, frame.threadId, frame.threadSeq);
+        }
       },
     });
     relays.set(portId, relay);
@@ -1353,6 +1394,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     if (routeThreadId) {
       // connect 帧先把“哪个客户端正在看哪个 thread”落到中间态；即使官方还没回包，也能用于重连诊断。
       rememberAppHostThreadPort(appHostFrameState, { clientId, portId, threadId: routeThreadId });
+      rememberAppHostThreadCursor(clientId, portId, routeThreadId, lastThreadSeq);
     }
     if (typeof createAppHostRelay !== "function") {
       diagnosticWarn("ws-hub", "app_host_connect_unavailable", {
@@ -1404,7 +1446,9 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
           const frameSummary = observeAppHostPortFrame(ws, "official-to-browser", portId, data);
           maybeHandleAppHostReadOnlyResponse(ws, portId, relay, data);
           const frame = rememberAppHostDownstreamFrame(clientId, portId, data, frameSummary && frameSummary.raw);
-          safeSend(ws, appHostPortMessagePayload(portId, data, frame), { suppressDiagnostic: true });
+          if (safeSend(ws, appHostPortMessagePayload(portId, data, frame), { suppressDiagnostic: true })) {
+            rememberAppHostThreadCursor(clientId, portId, frame.threadId, frame.threadSeq);
+          }
         },
       });
       relays.set(portId, relay);

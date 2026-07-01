@@ -179,6 +179,7 @@ function ensureThreadState(state, threadId) {
       lastSnapshotAckMethod: "",
       lastSnapshotAckSource: "",
       lastThreadReplayAtMs: 0,
+      lastThreadReplayGap: false,
       lastThreadReplayQueued: 0,
       lastThreadReplaySent: 0,
       lastTurnId: "",
@@ -308,6 +309,7 @@ function recordAppHostThreadReplay(state, details = {}) {
   rememberThreadParticipant(thread, details.clientId || "", details.portId || "", nowMs);
   thread.threadReplayCount += 1;
   thread.lastThreadReplayAtMs = nowMs;
+  thread.lastThreadReplayGap = details.gap === true;
   thread.lastThreadReplayQueued = Math.max(0, Number(details.queued) || 0);
   thread.lastThreadReplaySent = Math.max(0, Number(details.sent) || 0);
   return appHostThreadStateSnapshot(state, threadId);
@@ -386,6 +388,7 @@ function appHostThreadStateSnapshot(state, threadId) {
     lastSnapshotAckMethod: thread.lastSnapshotAckMethod,
     lastSnapshotAckSource: thread.lastSnapshotAckSource,
     lastThreadReplayAtMs: thread.lastThreadReplayAtMs,
+    lastThreadReplayGap: thread.lastThreadReplayGap,
     lastThreadReplayQueued: thread.lastThreadReplayQueued,
     lastThreadReplaySent: thread.lastThreadReplaySent,
     lastTurnId: thread.lastTurnId,
