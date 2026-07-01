@@ -577,6 +577,91 @@ test("ws hub marks app-host thread replay gaps when a client cursor is older tha
   }
 });
 
+test("ws hub marks replay gap when retained thread frames have expired", async () => {
+  const wsHubPath = path.join(repoRoot, "gateway", "runtime", "ipc", "ws-hub.cjs");
+  const oldTtlMs = process.env.OPENCODEX_APP_HOST_DOWNSTREAM_REPLAY_TTL_MS;
+  process.env.OPENCODEX_APP_HOST_DOWNSTREAM_REPLAY_TTL_MS = "1";
+  delete require.cache[require.resolve(wsHubPath)];
+  const { createWsHub } = require(wsHubPath);
+  const server = http.createServer((req, res) => {
+    res.writeHead(404);
+    res.end();
+  });
+  const relays = [];
+  const hub = createWsHub(server, {
+    createAppHostRelay(details) {
+      const relay = {
+        clientId: details.clientId,
+        close() {},
+        onMessage: details.onMessage,
+        portId: details.portId,
+        postMessage() {},
+      };
+      relays.push(relay);
+      return relay;
+    },
+    isAuthed: () => true,
+  });
+  const address = await listen(server);
+  const wsUrl = `ws://127.0.0.1:${address.port}/ws`;
+  let wsA = null;
+  let wsB = null;
+
+  try {
+    wsA = await connectClient(wsUrl, "client-thread-expired-a");
+    wsA.send(JSON.stringify({
+      clientId: "client-thread-expired-a",
+      portId: "port-thread-expired-a",
+      threadId: "thread-expired",
+      type: "app-host-connect",
+    }));
+    await wsMessage(wsA, (message) => message.type === "app-host-port-connected");
+    const relayA = relays.find((relay) => relay.clientId === "client-thread-expired-a");
+    assert.ok(relayA);
+
+    relayA.onMessage(JSON.stringify({ id: "rpc-expired-1", method: "thread/read", result: { threadId: "thread-expired", turnId: "turn-1" } }));
+    await wsMessage(wsA, (message) => message.type === "app-host-port-message" && message.threadSeq === 1);
+    relayA.onMessage(JSON.stringify({ id: "rpc-expired-2", method: "thread/read", result: { threadId: "thread-expired", turnId: "turn-2" } }));
+    await wsMessage(wsA, (message) => message.type === "app-host-port-message" && message.threadSeq === 2);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    wsB = await connectClient(wsUrl, "client-thread-expired-b");
+    wsB.send(JSON.stringify({
+      clientId: "client-thread-expired-b",
+      lastThreadSeq: 1,
+      portId: "port-thread-expired-b",
+      threadId: "thread-expired",
+      type: "app-host-connect",
+    }));
+    await wsMessage(wsB, (message) => message.type === "app-host-port-connected");
+
+    const nudgePromise = wsMessage(wsB, (message) => message.type === "opencodex:sync-nudge");
+    hub.sendToThread(
+      "thread-expired",
+      {
+        type: "opencodex:sync-nudge",
+        reason: "thread-detail-snapshot",
+        threadId: "thread-expired",
+      },
+      { excludedClientId: "client-thread-expired-a", suppressDiagnostic: true }
+    );
+
+    const nudge = await nudgePromise;
+    assert.equal(nudge.replaySent, 0);
+    assert.equal(nudge.replayGap, true);
+  } finally {
+    if (wsA) wsA.close();
+    if (wsB) wsB.close();
+    await new Promise((resolve) => server.close(resolve));
+    if (oldTtlMs == null) {
+      delete process.env.OPENCODEX_APP_HOST_DOWNSTREAM_REPLAY_TTL_MS;
+    } else {
+      process.env.OPENCODEX_APP_HOST_DOWNSTREAM_REPLAY_TTL_MS = oldTtlMs;
+    }
+    delete require.cache[require.resolve(wsHubPath)];
+  }
+});
+
 test("ws lifecycle marks app-host thread clients inactive on disconnect", () => {
   const wsHubSource = fs.readFileSync(path.join(repoRoot, "gateway", "runtime", "ipc", "ws-hub.cjs"), "utf8");
 

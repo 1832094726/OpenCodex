@@ -322,12 +322,21 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       if (seq <= 0) return oldest;
       return oldest === 0 || seq < oldest ? seq : oldest;
     }, 0);
-    const replayGap = Number.isFinite(cursor) && cursor > 0 && oldestThreadSeq > 0 && oldestThreadSeq > cursor + 1;
+    const latestKnownThreadSeq = Number(appHostDownstreamThreadSeqByThreadId.get(threadId) || 0);
+    // 队列可能被 TTL/容量清空；只看 oldestThreadSeq 会把“已经丢完了”的旧会话误判成无缺口。
+    const replayGap =
+      Number.isFinite(cursor) &&
+      cursor > 0 &&
+      latestKnownThreadSeq > cursor &&
+      (oldestThreadSeq === 0 || oldestThreadSeq > cursor + 1);
     const queue = allThreadFrames.filter((entry) => {
       if (entry.sourceClientId === clientId && entry.sourcePortId === portId) return false;
       return !Number.isFinite(cursor) || cursor <= 0 || Number(entry.threadSeq || 0) > cursor;
     });
-    if (!queue.length) return { gap: replayGap, queued: 0, sent: 0 };
+    if (!queue.length) {
+      if (replayGap) recordAppHostThreadReplay(appHostFrameState, { clientId, gap: true, portId, queued: 0, sent: 0, threadId });
+      return { gap: replayGap, queued: 0, sent: 0 };
+    }
     let sent = 0;
     let latestSentThreadSeq = 0;
     for (const entry of queue) {
