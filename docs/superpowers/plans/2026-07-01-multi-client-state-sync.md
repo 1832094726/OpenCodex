@@ -36,6 +36,7 @@ docs/MULTI-CLIENT-STATE-SYNC.md
 - [x] Socket.IO server 已和 raw `/ws` 并行挂载。
 - [x] 浏览器默认使用 Socket.IO client，Socket.IO 无法加载或握手失败时回退 raw `/ws`。
 - [x] Socket.IO 和 raw `/ws` 共用同一套 gateway JSON payload。
+- [x] Socket.IO 客户端按 `client:<clientId>` 和 `thread:<threadId>` 加入 room，非 replay thread nudge 走 room 定向投递。
 
 ## 当前协议
 
@@ -133,11 +134,11 @@ rtk git diff --check
 - 修改：`gateway/runtime/ipc/ws-hub.cjs`
 - 修改：`gateway/test/app-host-frame-observer.test.cjs`
 
-- [ ] **步骤 1：新增 room 路由测试**
+- [x] **步骤 1：新增 room 路由测试**
 
 证明同一个 thread 下的 active Socket.IO 客户端可以通过 thread room 定向投递，同时 raw `/ws` fallback 仍然走当前内存 active client list。
 
-- [ ] **步骤 2：实现 room join**
+- [x] **步骤 2：实现 room join**
 
 处理 `app-host-connect` 时，Socket.IO 客户端应加入：
 
@@ -148,7 +149,7 @@ thread:<threadId>
 
 raw `/ws` 客户端继续使用既有的 `clientsById` 和 `activeClientPorts` 路径。
 
-- [ ] **步骤 3：验证**
+- [x] **步骤 3：验证**
 
 ```bash
 rtk node --test gateway/test/app-host-frame-observer.test.cjs

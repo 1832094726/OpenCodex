@@ -13,7 +13,7 @@
 
 | 层级 | 负责内容 | 不负责内容 |
 | --- | --- | --- |
-| Socket.IO | 连接生命周期、ping/pong、自动重连、短断线包恢复、未来的 client/thread room | 理解 `thread/read`、app-host MessagePort、快照语义 |
+| Socket.IO | 连接生命周期、ping/pong、自动重连、短断线包恢复、client/thread room 定向投递 | 理解 `thread/read`、app-host MessagePort、快照语义 |
 | raw `/ws` 回退 | Socket.IO 脚本或握手失败时兜底 | 长期主路径优化 |
 | OpenCodex gateway | `threadSeq`、全量快照、增量队列、per-client 水位、gap 判断、relay 重建 | 替代官方 Codex runtime |
 | 浏览器 polyfill | 优先连接 Socket.IO、保存本标签页 thread 游标、消费快照并 ack | 跨标签页共享私有状态 |
@@ -197,6 +197,7 @@ gateway 收到 ack 后：
 - Socket.IO server 与 raw `/ws` 并行。
 - 浏览器默认优先 Socket.IO client，失败回退 raw `/ws`。
 - Socket.IO adapter 复用既有 JSON 协议和 `ws-hub` handler。
+- Socket.IO 客户端加入 `client:<clientId>` 和 `thread:<threadId>` room；非 replay thread nudge 通过 room 定向投递，同步保留 raw `/ws` fallback。
 - app-host thread replay queue 与 `threadSeq`。
 - 浏览器 `sessionStorage` 保存每个 thread 的 `lastThreadSeq`。
 - memory snapshot 携带 `threadSeq`。
@@ -206,11 +207,11 @@ gateway 收到 ack 后：
 
 ## 下一步
 
-1. 使用 Socket.IO room 替代手写 `clientsById` 的一部分定向投递。
-2. 给 Socket.IO recovery 增加诊断字段：`transport`、`recovered`、`socketId`、`missedByTransport`、`repairedByThreadReplay`。
+1. 增加端到端弱网恢复脚本：高延迟、随机断线、乱序 reconnect、多客户端同 thread。
+2. 补齐 Socket.IO recovery 与 OpenCodex repair 的关联诊断：`missedByTransport`、`repairedByThreadReplay`、`repairedBySnapshot`。
 3. 增加浏览器端真实集成测试：Socket.IO 主路径、脚本加载失败回退、握手失败回退。
 4. 在诊断面板展示 per-client watermarks，而不是只在 JSON API 里可见。
-5. 增加长连接压测脚本：高延迟、随机断线、乱序 reconnect、多客户端同 thread。
+5. 评估更长窗口的持久 event log：SQLite event log、JetStream 或其它 stream store。
 
 ## 验收标准
 

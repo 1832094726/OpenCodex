@@ -850,6 +850,90 @@ test("socket.io transport accepts the existing gateway json protocol", async () 
   }
 });
 
+test("socket.io thread rooms target active thread clients while raw websocket remains a fallback", async () => {
+  const { createWsHub } = require("../runtime/ipc/ws-hub.cjs");
+  const server = http.createServer((req, res) => {
+    res.writeHead(404);
+    res.end();
+  });
+  const hub = createWsHub(server, {
+    createAppHostRelay() {
+      return {
+        close() {},
+        postMessage() {},
+      };
+    },
+    isAuthed: () => true,
+  });
+  const address = await listen(server);
+  const socketIoUrl = `http://127.0.0.1:${address.port}`;
+  const wsUrl = `ws://127.0.0.1:${address.port}/ws`;
+  const socketA = createSocketIoClient(socketIoUrl, {
+    path: "/socket.io",
+    reconnection: false,
+    transports: ["websocket"],
+  });
+  const socketB = createSocketIoClient(socketIoUrl, {
+    path: "/socket.io",
+    reconnection: false,
+    transports: ["websocket"],
+  });
+  let rawClient = null;
+
+  async function socketIoJsonMessage(socket, predicate) {
+    while (true) {
+      const [raw] = await once(socket, "message");
+      const message = JSON.parse(String(raw));
+      if (!predicate || predicate(message)) return message;
+    }
+  }
+
+  async function helloSocketIo(socket, clientId) {
+    await once(socket, "connect");
+    socket.emit("message", { type: "hello", clientId });
+    return socketIoJsonMessage(socket, (message) => message.type === "hello-ack" && message.clientId === clientId);
+  }
+
+  async function connectSocketIoAppHost(socket, clientId, portId, threadId) {
+    socket.emit("message", { type: "app-host-connect", clientId, portId, threadId });
+    return socketIoJsonMessage(socket, (message) => message.type === "app-host-port-connected" && message.portId === portId);
+  }
+
+  try {
+    await Promise.all([
+      helloSocketIo(socketA, "client-room-a"),
+      helloSocketIo(socketB, "client-room-b"),
+    ]);
+    await Promise.all([
+      connectSocketIoAppHost(socketA, "client-room-a", "port-room-a", "thread-room"),
+      connectSocketIoAppHost(socketB, "client-room-b", "port-room-b", "thread-room"),
+    ]);
+
+    rawClient = await connectClient(wsUrl, "client-room-raw");
+    rawClient.send(JSON.stringify({
+      type: "app-host-connect",
+      clientId: "client-room-raw",
+      portId: "port-room-raw",
+      threadId: "thread-room",
+    }));
+    await wsMessage(rawClient, (message) => message.type === "app-host-port-connected" && message.portId === "port-room-raw");
+
+    const socketAMessage = socketIoJsonMessage(socketA, (message) => message.type === "room-nudge");
+    const socketBMessage = socketIoJsonMessage(socketB, (message) => message.type === "room-nudge");
+    const rawMessage = wsMessage(rawClient, (message) => message.type === "room-nudge");
+
+    assert.equal(hub.sendToThread("thread-room", { type: "room-nudge", value: 1 }, { suppressDiagnostic: true }), 3);
+    assert.deepEqual(await socketAMessage, { type: "room-nudge", value: 1 });
+    assert.deepEqual(await socketBMessage, { type: "room-nudge", value: 1 });
+    assert.deepEqual(await rawMessage, { type: "room-nudge", value: 1 });
+  } finally {
+    socketA.close();
+    socketB.close();
+    if (rawClient) rawClient.close();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("ws hub records fast sync snapshot acknowledgements per app-host thread", async () => {
   const { createWsHub } = require("../runtime/ipc/ws-hub.cjs");
   const server = http.createServer((req, res) => {

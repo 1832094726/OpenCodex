@@ -154,8 +154,9 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   const appHostFrameState = createAppHostFrameState();
   let lastAuthRejectLogAtMs = 0;
   let suppressedAuthRejectCount = 0;
+  let socketIoTransport = null;
   const appHostTraffic = new Map();
-  attachSocketIoTransport();
+  socketIoTransport = attachSocketIoTransport();
 
   function socketRemoteAddress(socket) {
     return (socket && socket.__codexRemoteAddress) || "";
@@ -175,6 +176,49 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     };
   }
 
+  function socketIoSocket(ws) {
+    return ws && ws.__codexSocketIoSocket && typeof ws.__codexSocketIoSocket.join === "function"
+      ? ws.__codexSocketIoSocket
+      : null;
+  }
+
+  function socketIoClientRoom(clientId) {
+    return `client:${clientId || ""}`;
+  }
+
+  function socketIoThreadRoom(threadId) {
+    return `thread:${threadId || ""}`;
+  }
+
+  function joinSocketIoRoom(ws, room) {
+    const socket = socketIoSocket(ws);
+    if (!socket || !room) return false;
+    socket.join(room);
+    return true;
+  }
+
+  function joinSocketIoClientRoom(ws, clientId) {
+    return joinSocketIoRoom(ws, socketIoClientRoom(clientId));
+  }
+
+  function joinSocketIoThreadRoom(ws, portId, threadId) {
+    const socket = socketIoSocket(ws);
+    if (!socket || !portId || !threadId) return false;
+    if (!ws.__codexSocketIoThreadRoomByPortId) ws.__codexSocketIoThreadRoomByPortId = new Map();
+    const room = socketIoThreadRoom(threadId);
+    const previousRoom = ws.__codexSocketIoThreadRoomByPortId.get(portId) || "";
+    if (previousRoom && previousRoom !== room) {
+      const stillUsed = [...ws.__codexSocketIoThreadRoomByPortId.entries()].some(
+        ([entryPortId, entryRoom]) => entryPortId !== portId && entryRoom === previousRoom
+      );
+      // 同一页面端口切换 thread 时退出旧 room，避免旧会话 nudge 命中已经离开的页面。
+      if (!stillUsed && typeof socket.leave === "function") socket.leave(previousRoom);
+    }
+    ws.__codexSocketIoThreadRoomByPortId.set(portId, room);
+    socket.join(room);
+    return true;
+  }
+
   function socketIoWsLike(socket) {
     const ws = {
       CLOSED: 3,
@@ -183,6 +227,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       readyState: 1,
       __codexRemoteAddress: socket && socket.handshake ? socket.handshake.address || "" : "",
       __codexRecovered: socket ? socket.recovered === true : false,
+      __codexSocketIoSocket: socket || null,
       __codexSocketIoId: socket ? socket.id : "",
       __codexTransport: "socket.io",
       close() {
@@ -1154,18 +1199,43 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     const excludedClientId = options.excludedClientId || "";
     const shouldReplayBeforeNudge = payload && payload.reason === "thread-detail-snapshot";
     let sent = 0;
+    if (!shouldReplayBeforeNudge) {
+      const socketIoTargets = activeClientIds.filter((targetClientId) => {
+        if (!targetClientId || targetClientId === excludedClientId) return false;
+        const socket = clientsById.get(targetClientId);
+        return socket && socket.readyState === socket.OPEN && !!socketIoSocket(socket);
+      });
+      if (socketIoTargets.length > 0) {
+        try {
+          const { message } = stringifyForWs(payload);
+          const room = socketIoThreadRoom(threadId);
+          let emitter = socketIoTransport.to(room);
+          if (excludedClientId && typeof emitter.except === "function") emitter = emitter.except(socketIoClientRoom(excludedClientId));
+          // 非 replay nudge 对同一 thread 的 Socket.IO 客户端是同一份 payload，交给成熟 room 广播能力处理。
+          emitter.emit("message", message);
+          sent += socketIoTargets.length;
+        } catch (error) {
+          diagnosticWarn("ws-hub", "send_to_thread_room_failed", {
+            clientCount: socketIoTargets.length,
+            error: error instanceof Error ? error.message : String(error),
+            threadId: shortId(threadId),
+          });
+        }
+      }
+    }
     for (const targetClientId of activeClientIds) {
       if (!targetClientId || targetClientId === excludedClientId) continue;
+      const targetSocket = clientsById.get(targetClientId);
+      if (!shouldReplayBeforeNudge && targetSocket && socketIoSocket(targetSocket)) continue;
       let replayGap = false;
       let replaySent = 0;
       if (shouldReplayBeforeNudge) {
-        const socket = clientsById.get(targetClientId);
         const clientPorts = activeClientPorts.find((entry) => entry && entry.clientId === targetClientId);
         const portIds = clientPorts && Array.isArray(clientPorts.portIds) ? clientPorts.portIds : [];
         for (const portId of portIds) {
           // nudge 前先把 gateway 已缓存的同 thread app-host 增量补给目标端口，浏览器按 threadSeq 自行去重。
           const lastThreadSeq = rememberedAppHostThreadCursor(targetClientId, portId, threadId);
-          const replay = flushAppHostThreadReplay(socket, targetClientId, portId, threadId, lastThreadSeq);
+          const replay = flushAppHostThreadReplay(targetSocket, targetClientId, portId, threadId, lastThreadSeq);
           replaySent += replay.sent;
           replayGap = replayGap || replay.gap;
         }
@@ -1472,6 +1542,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       // connect 帧先把“哪个客户端正在看哪个 thread”落到中间态；即使官方还没回包，也能用于重连诊断。
       rememberAppHostThreadPort(appHostFrameState, { clientId, portId, threadId: routeThreadId });
       rememberAppHostThreadCursor(clientId, portId, routeThreadId, lastThreadSeq);
+      joinSocketIoThreadRoom(ws, portId, routeThreadId);
     }
     if (typeof createAppHostRelay !== "function") {
       diagnosticWarn("ws-hub", "app_host_connect_unavailable", {
@@ -1713,6 +1784,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     // 后来重复 hello 时直接覆盖映射，保证同一 clientId 指向最新连接。
     ws.__codexWebClientId = clientId;
     clientsById.set(clientId, ws);
+    joinSocketIoClientRoom(ws, clientId);
     flushPendingTargetMessages(ws, clientId);
     flushOrphanTargetResponses(ws, clientId);
     recordFlowEvent({
