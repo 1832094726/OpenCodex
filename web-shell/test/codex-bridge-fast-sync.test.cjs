@@ -87,7 +87,7 @@ test("gateway snapshots can be preloaded by snapshot key after a replay gap", ()
 
   assert.match(refreshBody, /preloadGatewaySnapshotFromNudge\(message\)/);
   assert.match(refreshBody, /preload\.catch\(\(\) => \{\}\)/);
-  assert.match(refreshBody, /return navigateToRestorableRoute\(route, message\)/);
+  assert.match(refreshBody, /return navigateToRestorableRoute\(decision\.route, message\)/);
   assert.match(source, /function preloadGatewaySnapshotFromNudge/);
   assert.match(source, /message\.snapshotKey/);
   assert.match(source, /rememberGatewayKeySnapshotHint\(method, threadId, snapshotKey\)/);
@@ -159,9 +159,10 @@ test("thread detail sync nudge refreshes only the matching route", () => {
 
 test("thread detail nudge skips hard reload when app-host replay was delivered", () => {
   const source = readPolyfillSource();
+  const decisionBody = sourceBetween(source, "function threadSnapshotNudgeDecision", "function refreshCurrentThreadRouteFromSnapshotNudge");
   const refreshBody = sourceBetween(source, "function refreshCurrentThreadRouteFromSnapshotNudge", "function scheduleCrossClientSyncRefresh");
 
-  assert.match(refreshBody, /Number\(message && message\.replaySent \|\| 0\) > 0 && message\.replayGap !== true/);
+  assert.match(decisionBody, /Number\(message && message\.replaySent \|\| 0\) > 0 && message\.replayGap !== true/);
   assert.match(refreshBody, /thread-detail-snapshot-replay-applied/);
   assert.match(refreshBody, /return true/);
 });
@@ -173,6 +174,22 @@ test("thread detail nudge keeps refresh fallback when app-host replay has a gap"
 
   assert.match(refreshBody, /message\.replayGap !== true/);
   assert.match(appHostBody, /app-host-thread-replay-gap/);
+});
+
+test("thread detail nudge uses an explicit repair decision state", () => {
+  const source = readPolyfillSource();
+  const decisionBody = sourceBetween(source, "function threadSnapshotNudgeDecision", "function refreshCurrentThreadRouteFromSnapshotNudge");
+  const refreshBody = sourceBetween(source, "function refreshCurrentThreadRouteFromSnapshotNudge", "function scheduleCrossClientSyncRefresh");
+
+  assert.match(source, /function threadSnapshotNudgeDecision/);
+  assert.match(decisionBody, /action: "incremental-replay"/);
+  assert.match(decisionBody, /action: "snapshot-preload"/);
+  assert.match(decisionBody, /action: "route-refresh"/);
+  assert.match(decisionBody, /action: "ignored"/);
+  assert.match(refreshBody, /const decision = threadSnapshotNudgeDecision\(message\)/);
+  assert.match(refreshBody, /thread-detail-snapshot-decision/);
+  assert.match(refreshBody, /decision\.action === "incremental-replay"/);
+  assert.match(refreshBody, /decision\.action === "snapshot-preload"/);
 });
 
 test("fast sync snapshot reads have short miss timeouts", () => {

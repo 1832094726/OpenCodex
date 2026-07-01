@@ -2256,25 +2256,44 @@
     return tag === "input" || tag === "textarea" || active.isContentEditable === true;
   }
 
-  function refreshCurrentThreadRouteFromSnapshotNudge(message) {
+  function threadSnapshotNudgeDecision(message) {
     const route = currentRestorableRoute();
-    if (!route || document.visibilityState !== "visible" || hasEditableFocus()) return false;
+    const threadId = (message && message.threadId) || "";
+    if (!route) return { action: "ignored", reason: "no-route", route: "", threadId };
+    if (document.visibilityState !== "visible") return { action: "ignored", reason: "hidden", route, threadId };
+    if (hasEditableFocus()) return { action: "ignored", reason: "editing", route, threadId };
     if (Number(message && message.replaySent || 0) > 0 && message.replayGap !== true) {
+      return { action: "incremental-replay", reason: "replay-complete", replaySent: Number(message && message.replaySent || 0), route, threadId };
+    }
+    if (message && message.replayGap === true) return { action: "snapshot-preload", reason: "replay-gap", route, threadId };
+    return { action: "route-refresh", reason: "snapshot-nudge", route, threadId };
+  }
+
+  function refreshCurrentThreadRouteFromSnapshotNudge(message) {
+    const decision = threadSnapshotNudgeDecision(message);
+    clientDiagnostic("thread-detail-snapshot-decision", {
+      action: decision.action,
+      reason: decision.reason,
+      replaySent: Number(decision.replaySent || 0),
+      threadId: shortThreadId(decision.threadId || ""),
+    });
+    if (decision.action === "ignored") return false;
+    if (decision.action === "incremental-replay") {
       clientDiagnostic("thread-detail-snapshot-replay-applied", {
-        replaySent: Number(message && message.replaySent || 0),
-        threadId: shortThreadId((message && message.threadId) || ""),
+        replaySent: Number(decision.replaySent || 0),
+        threadId: shortThreadId(decision.threadId || ""),
       });
       return true;
     }
     clientDiagnostic("thread-detail-snapshot-route-refresh", {
       reason: message && message.reason ? String(message.reason) : "",
-      threadId: shortThreadId((message && message.threadId) || ""),
+      threadId: shortThreadId(decision.threadId || ""),
     });
-    const preload = preloadGatewaySnapshotFromNudge(message);
+    const preload = decision.action === "snapshot-preload" ? preloadGatewaySnapshotFromNudge(message) : null;
     if (preload) {
       preload.catch(() => {});
     }
-    return navigateToRestorableRoute(route, message);
+    return navigateToRestorableRoute(decision.route, message);
   }
 
   function navigateToRestorableRoute(route, message) {
