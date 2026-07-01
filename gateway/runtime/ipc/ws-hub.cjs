@@ -1211,11 +1211,26 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return sent;
   }
 
+  function appHostThreadClientWatermarks(thread) {
+    const activeClientPorts = Array.isArray(thread && thread.activeClientPorts) ? thread.activeClientPorts : [];
+    return activeClientPorts.map((entry) => {
+      const portIds = Array.isArray(entry && entry.portIds) ? entry.portIds : [];
+      const cursors = portIds.map((portId) => rememberedAppHostThreadCursor(entry.clientId, portId, thread.threadId));
+      return {
+        clientId: entry.clientId,
+        portIds,
+        snapshotAckThreadSeq: entry.clientId === thread.lastSnapshotAckClientId ? Number(thread.lastSnapshotAckThreadSeq || 0) : 0,
+        threadCursor: Math.max(0, ...cursors),
+      };
+    });
+  }
+
   function snapshotThreads(options = {}) {
     const snapshot = listAppHostThreadStateSnapshots(appHostFrameState, options);
     const threads = snapshot.threads.map((thread) => ({
       ...thread,
       ...appHostThreadReplayStats(thread.threadId),
+      clientWatermarks: appHostThreadClientWatermarks(thread),
     }));
     return {
       ok: true,

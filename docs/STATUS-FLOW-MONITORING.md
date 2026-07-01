@@ -218,3 +218,13 @@ GET /api/diagnostics/flow?clientId=...&threadId=...
 - 提交后没有回复：看 `turn/start` 是否成功，成功后是否进入 `waiting_for_events` 或 stream 阶段。
 - 手机后台回来失败：看 WS 是否重新 `hello-ack`，relay 是否补建并 flush。
 - 域名打不开：看 `/api/health`、WS 握手和 Tailscale Serve，不进入 thread 状态机。
+
+## 多客户端水位诊断
+
+`GET /api/diagnostics/threads?threadId=<id>` 会返回 `clientWatermarks`，用于判断同一会话下每个客户端到底追到哪里：
+
+- `threadCursor`：gateway 已认为该客户端端口消费到的 app-host `threadSeq`。
+- `snapshotAckThreadSeq`：该客户端最近一次消费 gateway 全量快照的水位。
+- `latestKnownThreadSeq`：gateway 当前观察到的 thread 最新下行水位。
+
+排查规则：如果 `latestKnownThreadSeq > threadCursor` 且 replay 队列连续，gateway 只补增量；如果队列不连续，浏览器应读取 gateway memory snapshot 并发送 snapshot ack。

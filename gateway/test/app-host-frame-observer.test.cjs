@@ -990,6 +990,13 @@ test("ws hub advances client thread cursor from gateway snapshot acknowledgement
 
     const snapshot = hub.snapshotThreads({ threadId: "thread-snapshot-cursor" }).threads[0];
     assert.equal(snapshot.lastSnapshotAckThreadSeq, 4);
+    assert.ok(Array.isArray(snapshot.clientWatermarks));
+    assert.deepEqual(snapshot.clientWatermarks.find((entry) => entry.clientId === "client-snapshot-cursor-target"), {
+      clientId: "client-snapshot-cursor-target",
+      portIds: ["port-snapshot-cursor-target"],
+      snapshotAckThreadSeq: 4,
+      threadCursor: 5,
+    });
   } finally {
     if (wsA) wsA.close();
     if (wsB) wsB.close();
