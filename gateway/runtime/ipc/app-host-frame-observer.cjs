@@ -179,7 +179,10 @@ function ensureThreadState(state, threadId) {
       lastSnapshotAckMethod: "",
       lastSnapshotAckSource: "",
       lastThreadReplayAtMs: 0,
+      lastThreadReplayCursor: 0,
       lastThreadReplayGap: false,
+      lastThreadReplayLatestKnownSeq: 0,
+      lastThreadReplayOldestSeq: 0,
       lastThreadReplayQueued: 0,
       lastThreadReplaySent: 0,
       lastTurnId: "",
@@ -333,7 +336,10 @@ function recordAppHostThreadReplay(state, details = {}) {
   rememberThreadParticipant(thread, details.clientId || "", details.portId || "", nowMs);
   thread.threadReplayCount += 1;
   thread.lastThreadReplayAtMs = nowMs;
+  thread.lastThreadReplayCursor = Math.max(0, Number(details.cursor) || 0);
   thread.lastThreadReplayGap = details.gap === true;
+  thread.lastThreadReplayLatestKnownSeq = Math.max(0, Number(details.latestKnownThreadSeq) || 0);
+  thread.lastThreadReplayOldestSeq = Math.max(0, Number(details.oldestThreadSeq) || 0);
   thread.lastThreadReplayQueued = Math.max(0, Number(details.queued) || 0);
   thread.lastThreadReplaySent = Math.max(0, Number(details.sent) || 0);
   return appHostThreadStateSnapshot(state, threadId);
@@ -412,7 +418,10 @@ function appHostThreadStateSnapshot(state, threadId) {
     lastSnapshotAckMethod: thread.lastSnapshotAckMethod,
     lastSnapshotAckSource: thread.lastSnapshotAckSource,
     lastThreadReplayAtMs: thread.lastThreadReplayAtMs,
+    lastThreadReplayCursor: thread.lastThreadReplayCursor,
     lastThreadReplayGap: thread.lastThreadReplayGap,
+    lastThreadReplayLatestKnownSeq: thread.lastThreadReplayLatestKnownSeq,
+    lastThreadReplayOldestSeq: thread.lastThreadReplayOldestSeq,
     lastThreadReplayQueued: thread.lastThreadReplayQueued,
     lastThreadReplaySent: thread.lastThreadReplaySent,
     lastTurnId: thread.lastTurnId,

@@ -222,6 +222,10 @@ test("thread state records connect and replay diagnostics per thread", () => {
   });
   recordAppHostThreadReplay(state, {
     clientId: "client-connect",
+    cursor: 4,
+    gap: true,
+    latestKnownThreadSeq: 8,
+    oldestThreadSeq: 6,
     portId: "port-connect",
     queued: 3,
     sent: 2,
@@ -236,6 +240,10 @@ test("thread state records connect and replay diagnostics per thread", () => {
   assert.equal(connected.threadReplayCount, 1);
   assert.equal(connected.lastThreadReplayQueued, 3);
   assert.equal(connected.lastThreadReplaySent, 2);
+  assert.equal(connected.lastThreadReplayCursor, 4);
+  assert.equal(connected.lastThreadReplayLatestKnownSeq, 8);
+  assert.equal(connected.lastThreadReplayOldestSeq, 6);
+  assert.equal(connected.lastThreadReplayGap, true);
   assert.equal(missing, null);
 });
 
@@ -649,6 +657,14 @@ test("ws hub marks replay gap when retained thread frames have expired", async (
     const nudge = await nudgePromise;
     assert.equal(nudge.replaySent, 0);
     assert.equal(nudge.replayGap, true);
+    const snapshot = hub.snapshotThreads({ threadId: "thread-expired" }).threads[0];
+    assert.equal(snapshot.cachedThreadFrameCount, 0);
+    assert.equal(snapshot.latestKnownThreadSeq, 2);
+    assert.equal(snapshot.latestThreadSeq, 0);
+    assert.equal(snapshot.lastThreadReplayCursor, 1);
+    assert.equal(snapshot.lastThreadReplayLatestKnownSeq, 2);
+    assert.equal(snapshot.lastThreadReplayOldestSeq, 0);
+    assert.equal(snapshot.lastThreadReplayGap, true);
   } finally {
     if (wsA) wsA.close();
     if (wsB) wsB.close();

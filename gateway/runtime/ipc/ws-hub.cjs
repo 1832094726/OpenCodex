@@ -268,6 +268,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   function appHostThreadReplayStats(threadId) {
     // 只暴露回放队列水位，避免把 app-host 帧正文带进诊断接口。
     const queue = pruneAppHostThreadFrames(threadId);
+    const latestKnownThreadSeq = Number(appHostDownstreamThreadSeqByThreadId.get(threadId) || 0);
     let oldestThreadSeq = 0;
     let latestThreadSeq = 0;
     let latestThreadFrameAtMs = 0;
@@ -279,6 +280,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     }
     return {
       cachedThreadFrameCount: queue.length,
+      latestKnownThreadSeq,
       latestThreadFrameAtMs,
       latestThreadSeq,
       oldestThreadSeq,
@@ -334,7 +336,19 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       return !Number.isFinite(cursor) || cursor <= 0 || Number(entry.threadSeq || 0) > cursor;
     });
     if (!queue.length) {
-      if (replayGap) recordAppHostThreadReplay(appHostFrameState, { clientId, gap: true, portId, queued: 0, sent: 0, threadId });
+      if (replayGap) {
+        recordAppHostThreadReplay(appHostFrameState, {
+          clientId,
+          cursor: Number.isFinite(cursor) && cursor > 0 ? cursor : 0,
+          gap: true,
+          latestKnownThreadSeq,
+          oldestThreadSeq,
+          portId,
+          queued: 0,
+          sent: 0,
+          threadId,
+        });
+      }
       return { gap: replayGap, queued: 0, sent: 0 };
     }
     let sent = 0;
@@ -348,7 +362,17 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       sent += 1;
     }
     if (latestSentThreadSeq > 0) rememberAppHostThreadCursor(clientId, portId, threadId, latestSentThreadSeq);
-    const threadState = recordAppHostThreadReplay(appHostFrameState, { clientId, gap: replayGap, portId, queued: queue.length, sent, threadId });
+    const threadState = recordAppHostThreadReplay(appHostFrameState, {
+      clientId,
+      cursor: Number.isFinite(cursor) && cursor > 0 ? cursor : 0,
+      gap: replayGap,
+      latestKnownThreadSeq,
+      oldestThreadSeq,
+      portId,
+      queued: queue.length,
+      sent,
+      threadId,
+    });
     diagnosticLog("ws-hub", "app_host_thread_replay_flushed", {
       afterThreadSeq: Number.isFinite(cursor) && cursor > 0 ? cursor : 0,
       clientId: shortId(clientId),
