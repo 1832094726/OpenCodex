@@ -172,6 +172,12 @@ function ensureThreadState(state, threadId) {
       lastFrameAtMs: 0,
       lastMethod: "",
       lastRequestId: "",
+      lastSnapshotAckAtMs: 0,
+      lastSnapshotAckCapturedAtMs: 0,
+      lastSnapshotAckClientId: "",
+      lastSnapshotAckKey: "",
+      lastSnapshotAckMethod: "",
+      lastSnapshotAckSource: "",
       lastThreadReplayAtMs: 0,
       lastThreadReplayQueued: 0,
       lastThreadReplaySent: 0,
@@ -184,6 +190,8 @@ function ensureThreadState(state, threadId) {
       portClientIdByPortId: new Map(),
       portLastSeenAtMs: new Map(),
       sessionId: "",
+      snapshotAckClientIds: new Set(),
+      snapshotAckCount: 0,
       threadId,
       threadReplayCount: 0,
       upstreamFrameCount: 0,
@@ -318,6 +326,28 @@ function recordAppHostThreadNudge(state, details = {}) {
   return appHostThreadStateSnapshot(state, threadId);
 }
 
+function recordAppHostThreadSnapshotAck(state, details = {}) {
+  const threadId = typeof details.threadId === "string" ? details.threadId : "";
+  if (!state || !threadId) return null;
+  const nowMs = Date.now();
+  const thread = ensureThreadState(state, threadId);
+  const clientId = typeof details.clientId === "string" ? details.clientId : "";
+  if (clientId) {
+    thread.clientLastSeenAtMs.set(clientId, nowMs);
+    thread.activeClientIds.add(clientId);
+    thread.snapshotAckClientIds.add(clientId);
+  }
+  thread.snapshotAckCount += 1;
+  thread.lastSnapshotAckAtMs = nowMs;
+  thread.lastSnapshotAckCapturedAtMs = Math.max(0, Number(details.capturedAtMs) || 0);
+  thread.lastSnapshotAckClientId = clientId;
+  thread.lastSnapshotAckKey = typeof details.key === "string" ? details.key.slice(0, 160) : "";
+  thread.lastSnapshotAckMethod = typeof details.method === "string" ? details.method.slice(0, 80) : "";
+  thread.lastSnapshotAckSource = typeof details.source === "string" ? details.source.slice(0, 80) : "";
+  trimMap(thread.clientLastSeenAtMs, state.maxEntries);
+  return appHostThreadStateSnapshot(state, threadId);
+}
+
 function appHostThreadStateSnapshot(state, threadId) {
   if (!state || !threadId || !state.threadStatesById) return null;
   const thread = state.threadStatesById.get(threadId);
@@ -340,6 +370,12 @@ function appHostThreadStateSnapshot(state, threadId) {
     lastNudgeReason: thread.lastNudgeReason,
     lastNudgeSent: thread.lastNudgeSent,
     lastRequestId: thread.lastRequestId,
+    lastSnapshotAckAtMs: thread.lastSnapshotAckAtMs,
+    lastSnapshotAckCapturedAtMs: thread.lastSnapshotAckCapturedAtMs,
+    lastSnapshotAckClientId: thread.lastSnapshotAckClientId,
+    lastSnapshotAckKey: thread.lastSnapshotAckKey,
+    lastSnapshotAckMethod: thread.lastSnapshotAckMethod,
+    lastSnapshotAckSource: thread.lastSnapshotAckSource,
     lastThreadReplayAtMs: thread.lastThreadReplayAtMs,
     lastThreadReplayQueued: thread.lastThreadReplayQueued,
     lastThreadReplaySent: thread.lastThreadReplaySent,
@@ -347,6 +383,9 @@ function appHostThreadStateSnapshot(state, threadId) {
     portCount: thread.portLastSeenAtMs.size,
     portIds: Array.from(thread.portLastSeenAtMs.keys()),
     sessionId: thread.sessionId,
+    snapshotAckClientCount: thread.snapshotAckClientIds.size,
+    snapshotAckClientIds: Array.from(thread.snapshotAckClientIds.keys()),
+    snapshotAckCount: thread.snapshotAckCount,
     threadId: thread.threadId,
     nudgeCount: thread.nudgeCount,
     threadReplayCount: thread.threadReplayCount,
@@ -432,6 +471,7 @@ module.exports = {
   observeAppHostFrame,
   recordAppHostThreadNudge,
   recordAppHostThreadReplay,
+  recordAppHostThreadSnapshotAck,
   rememberAppHostThreadPort,
   summarizeAppHostFrame,
 };

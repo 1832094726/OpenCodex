@@ -18,6 +18,7 @@ const {
   observeAppHostFrame,
   recordAppHostThreadNudge,
   recordAppHostThreadReplay,
+  recordAppHostThreadSnapshotAck,
   rememberAppHostThreadPort,
 } = require("./app-host-frame-observer.cjs");
 
@@ -1140,6 +1141,40 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return true;
   }
 
+  function handleFastSyncSnapshotAckMessage(ws, message) {
+    if (!message || message.type !== "opencodex:fast-sync-snapshot-ack") return false;
+    const clientId = normalizedWsClientId(ws, message);
+    if (!clientId || ws.__codexWebClientId !== clientId) return true;
+    const threadId = typeof message.threadId === "string" ? message.threadId.slice(0, 160) : "";
+    if (!threadId) return true;
+    const method = typeof message.method === "string" ? message.method.slice(0, 80) : "";
+    const snapshot = recordAppHostThreadSnapshotAck(appHostFrameState, {
+      capturedAtMs: message.capturedAtMs,
+      clientId,
+      key: typeof message.key === "string" ? message.key : "",
+      method,
+      source: typeof message.source === "string" ? message.source : "",
+      threadId,
+    });
+    recordFlowEvent({
+      clientId,
+      hint: "浏览器已消费 gateway thread 快照，中间层记录客户端水位",
+      method,
+      scope: "thread",
+      stage: "gateway_snapshot_ack",
+      threadId,
+    });
+    if (DEBUG_LOGS) {
+      diagnosticLog("ws-hub", "fast_sync_snapshot_ack", {
+        clientId: shortId(clientId),
+        method,
+        snapshotAckCount: snapshot ? snapshot.snapshotAckCount : 0,
+        threadId: shortId(threadId),
+      });
+    }
+    return true;
+  }
+
   function validAppHostPortId(value) {
     // portId 只作为本页多条 MessagePort 的路由键，限制长度即可，不引入额外协议含义。
     return typeof value === "string" && value.length > 0 && value.length <= 160;
@@ -1502,6 +1537,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       // 通知 click/close 只从已认证 WS 回传；hub 不理解官方通知语义，直接交回 runtime 的 fake Notification。
       return typeof handleNotificationEvent === "function" ? handleNotificationEvent(message, ws, req) : true;
     }
+    if (handleFastSyncSnapshotAckMessage(ws, message)) return true;
     if (handleClientDiagnosticMessage(ws, message)) return true;
     if (message.type === "app-host-connect") return handleAppHostConnect(ws, req, message);
     if (message.type === "app-host-port-message") return handleAppHostPortMessage(ws, message);

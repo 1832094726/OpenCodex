@@ -3081,6 +3081,25 @@
       });
   }
 
+  function acknowledgeFastSyncSnapshotHit(method, ipcArgs, snapshot) {
+    if (!method || FAST_SYNC_PERSISTENT_SNAPSHOT_METHODS.has(method)) return;
+    if (!snapshotHasValue(snapshot)) return;
+    const threadId = diagnosticThreadIdFromValue(snapshot.value) || diagnosticThreadIdFromValue(ipcArgs);
+    if (!threadId) return;
+    // ack 只回传快照水位，不回传 value，避免把会话正文作为诊断状态再传一遍。
+    sendGatewayControlPayload(
+      {
+        type: "opencodex:fast-sync-snapshot-ack",
+        capturedAtMs: Number(snapshot.capturedAtMs || 0),
+        key: typeof snapshot.key === "string" ? snapshot.key : "",
+        method,
+        source: typeof snapshot.source === "string" ? snapshot.source : "",
+        threadId,
+      },
+      "fast-sync-snapshot-ack-send-failed"
+    );
+  }
+
   async function readBrowserFastSyncSnapshot(method, ipcArgs, diagnosticSummary) {
     const store = fastSyncStore();
     if (!store || typeof store.readSnapshot !== "function") return null;
@@ -3152,6 +3171,7 @@
         method,
         source: snapshot.source || "gateway",
       });
+      acknowledgeFastSyncSnapshotHit(method, ipcArgs, snapshot);
       writeFastSyncBrowserSnapshot(method, ipcArgs, snapshot.value, diagnosticSummary, "gateway-hit");
       return fastSyncSnapshotHit(snapshot.value);
     } catch (error) {

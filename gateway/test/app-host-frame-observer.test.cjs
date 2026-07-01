@@ -14,6 +14,7 @@ const {
   observeAppHostFrame,
   recordAppHostThreadNudge,
   recordAppHostThreadReplay,
+  recordAppHostThreadSnapshotAck,
   rememberAppHostThreadPort,
   summarizeAppHostFrame,
 } = require("../runtime/ipc/app-host-frame-observer.cjs");
@@ -230,6 +231,37 @@ test("thread state records snapshot nudge diagnostics", () => {
   assert.equal(snapshot.lastNudgeExcludedClientId, "client-nudge-source");
 });
 
+test("thread state records per-client snapshot acknowledgements", () => {
+  const state = createAppHostFrameState({ maxEntries: 20 });
+
+  recordAppHostThreadSnapshotAck(state, {
+    capturedAtMs: 1780000000000,
+    clientId: "client-snapshot-a",
+    key: "snapshot-key-secret-lengthy",
+    method: "thread/read",
+    source: "gateway-memory",
+    threadId: "thread-snapshot",
+  });
+  recordAppHostThreadSnapshotAck(state, {
+    capturedAtMs: 1780000001000,
+    clientId: "client-snapshot-b",
+    key: "snapshot-key-other",
+    method: "thread/turns/list",
+    source: "gateway-memory",
+    threadId: "thread-snapshot",
+  });
+
+  const snapshot = appHostThreadStateSnapshot(state, "thread-snapshot");
+  assert.equal(snapshot.snapshotAckCount, 2);
+  assert.equal(snapshot.snapshotAckClientCount, 2);
+  assert.deepEqual(snapshot.snapshotAckClientIds.sort(), ["client-snapshot-a", "client-snapshot-b"]);
+  assert.equal(snapshot.lastSnapshotAckClientId, "client-snapshot-b");
+  assert.equal(snapshot.lastSnapshotAckMethod, "thread/turns/list");
+  assert.equal(snapshot.lastSnapshotAckSource, "gateway-memory");
+  assert.equal(snapshot.lastSnapshotAckCapturedAtMs, 1780000001000);
+  assert.equal(snapshot.lastSnapshotAckKey, "snapshot-key-other");
+});
+
 test("thread state can list sanitized thread snapshots", () => {
   const state = createAppHostFrameState({ maxEntries: 20 });
 
@@ -404,4 +436,45 @@ test("ws hub can target active clients for a single app-host thread", () => {
   assert.match(wsHubSource, /function snapshotThreads/);
   assert.match(wsHubSource, /activeClientIds/);
   assert.match(wsHubSource, /return \{ broadcast, broadcastExcept, clients, closeAllAppHostRelays, hasClient, sendTo, sendToThread, snapshotThreads \}/);
+});
+
+test("ws hub records fast sync snapshot acknowledgements per app-host thread", async () => {
+  const { createWsHub } = require("../runtime/ipc/ws-hub.cjs");
+  const server = http.createServer((req, res) => {
+    res.writeHead(404);
+    res.end();
+  });
+  const hub = createWsHub(server, {
+    createAppHostRelay() {
+      throw new Error("not used");
+    },
+    isAuthed: () => true,
+  });
+  const address = await listen(server);
+  const wsUrl = `ws://127.0.0.1:${address.port}/ws`;
+  let ws = null;
+
+  try {
+    ws = await connectClient(wsUrl, "client-snapshot-ws");
+    ws.send(JSON.stringify({
+      capturedAtMs: 1780000002000,
+      clientId: "client-snapshot-ws",
+      key: "snapshot-key-ws",
+      method: "thread/read",
+      source: "gateway-memory",
+      threadId: "thread-snapshot-ws",
+      type: "opencodex:fast-sync-snapshot-ack",
+    }));
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const snapshot = hub.snapshotThreads({ threadId: "thread-snapshot-ws" });
+    assert.equal(snapshot.threads.length, 1);
+    assert.equal(snapshot.threads[0].snapshotAckCount, 1);
+    assert.equal(snapshot.threads[0].lastSnapshotAckClientId, "client-snapshot-ws");
+    assert.equal(snapshot.threads[0].lastSnapshotAckMethod, "thread/read");
+    assert.equal(snapshot.threads[0].lastSnapshotAckSource, "gateway-memory");
+  } finally {
+    if (ws) ws.close();
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

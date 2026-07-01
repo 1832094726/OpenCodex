@@ -63,6 +63,16 @@ test("fast sync snapshot diagnostics are wired in the polyfill", () => {
   }
 });
 
+test("gateway thread snapshot hits acknowledge the client cursor", () => {
+  const source = readPolyfillSource();
+  const gatewayBody = sourceBetween(source, "async function readGatewayFastSyncSnapshot", "async function invokeFastSyncSnapshot");
+
+  assert.match(source, /function acknowledgeFastSyncSnapshotHit/);
+  assert.match(gatewayBody, /acknowledgeFastSyncSnapshotHit\(method, ipcArgs, snapshot\)/);
+  assert.match(source, /type: "opencodex:fast-sync-snapshot-ack"/);
+  assert.match(source, /FAST_SYNC_PERSISTENT_SNAPSHOT_METHODS\.has\(method\)/);
+});
+
 test("thread detail sync nudge refreshes only the matching route", () => {
   const source = readPolyfillSource();
   const syncBody = sourceBetween(source, "function scheduleCrossClientSyncRefresh", "function waitForGatewayWsReady");
