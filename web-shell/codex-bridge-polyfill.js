@@ -2291,11 +2291,16 @@
 
   function appHostWsPayload(state, payload) {
     // 所有 app-host 控制帧都带 clientId + portId，gateway 据此绑定到正确浏览器页面。
-    return {
+    const result = {
       clientId,
       portId: state.portId,
       ...payload,
     };
+    if (payload && payload.type === "app-host-connect") {
+      // connect 帧带回浏览器已收到的官方下行游标，gateway 只补缺失增量。
+      result.lastServerSeq = Number(state.lastServerSeq || 0);
+    }
+    return result;
   }
 
   function sendAppHostWsPayload(payload) {
@@ -2508,6 +2513,15 @@
       return true;
     }
     const data = Object.prototype.hasOwnProperty.call(message, "data") ? message.data : undefined;
+    const serverSeq = Number(message.seq || 0);
+    if (Number.isFinite(serverSeq) && serverSeq > 0 && serverSeq <= Number(state.lastServerSeq || 0)) {
+      clientDiagnostic("app-host-duplicate-server-frame", {
+        lastServerSeq: state.lastServerSeq,
+        portId,
+        seq: serverSeq,
+      });
+      return true;
+    }
     if (!(data === null || typeof data === "string")) {
       // 官方 app-host 当前只传字符串 JSON-RPC；其它类型保持拒绝，避免破坏 renderer 侧协议假设。
       clientDiagnostic("app-host-non-string-message", {
@@ -2519,6 +2533,7 @@
     handleTokenUsageAppHostData(data);
     try {
       state.port.postMessage(data);
+      if (Number.isFinite(serverSeq) && serverSeq > 0) state.lastServerSeq = serverSeq;
       if (data === null) closeAppHostRelay(state, "official_closed", false);
     } catch (error) {
       clientDiagnostic("app-host-port-post-failed", {
@@ -2550,6 +2565,7 @@
         closed: false,
         connected: false,
         flushing: false,
+        lastServerSeq: 0,
         pending: [],
         port,
         portId: appHostPortId(),

@@ -37,6 +37,8 @@ const APP_HOST_MISSING_RELAY_BUFFER_TTL_MS = Number(process.env.OPENCODEX_APP_HO
 const APP_HOST_MISSING_RELAY_BUFFER_MAX_MESSAGES = Number(process.env.OPENCODEX_APP_HOST_MISSING_RELAY_BUFFER_MAX_MESSAGES || 100);
 const APP_HOST_FRAME_OBSERVER_ENABLED = process.env.OPENCODEX_APP_HOST_FRAME_OBSERVER !== "0";
 const APP_HOST_FRAME_LOG_MODE = process.env.OPENCODEX_APP_HOST_FRAME_LOG || "routed";
+const APP_HOST_DOWNSTREAM_REPLAY_TTL_MS = Number(process.env.OPENCODEX_APP_HOST_DOWNSTREAM_REPLAY_TTL_MS || 2 * 60 * 1000);
+const APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES = Number(process.env.OPENCODEX_APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES || 500);
 // 插件列表会随安装/启用即时变化，转发层不缓存 plugin/list，避免管理页显示旧状态。
 const APP_HOST_READ_ONLY_METHODS = new Set(["app/list", "mcpServerStatus/list"]);
 const appHostReadOnlyCache = new Map();
@@ -131,6 +133,8 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   const pendingTargetMessagesByClientId = new Map();
   const pendingOrphanTargetResponses = [];
   const pendingAppHostMessagesByRelayKey = new Map();
+  const appHostDownstreamFramesByRelayKey = new Map();
+  const appHostDownstreamSeqByRelayKey = new Map();
   const appHostFrameState = createAppHostFrameState();
   let lastAuthRejectLogAtMs = 0;
   let suppressedAuthRejectCount = 0;
@@ -151,6 +155,73 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
 
   function appHostRelayKey(clientId, portId) {
     return `${clientId || ""}\n${portId || ""}`;
+  }
+
+  function appHostDownstreamNextSeq(clientId, portId) {
+    const key = appHostRelayKey(clientId, portId);
+    const nextSeq = (Number(appHostDownstreamSeqByRelayKey.get(key)) || 0) + 1;
+    appHostDownstreamSeqByRelayKey.set(key, nextSeq);
+    return nextSeq;
+  }
+
+  function pruneAppHostDownstreamFrames(clientId, portId, nowMs = Date.now()) {
+    const key = appHostRelayKey(clientId, portId);
+    const queue = appHostDownstreamFramesByRelayKey.get(key);
+    if (!queue) return [];
+    const fresh = queue.filter((entry) => entry && nowMs - entry.atMs <= APP_HOST_DOWNSTREAM_REPLAY_TTL_MS);
+    if (fresh.length === 0) {
+      appHostDownstreamFramesByRelayKey.delete(key);
+      return [];
+    }
+    if (fresh.length !== queue.length) appHostDownstreamFramesByRelayKey.set(key, fresh);
+    return fresh;
+  }
+
+  function rememberAppHostDownstreamFrame(clientId, portId, data) {
+    const seq = appHostDownstreamNextSeq(clientId, portId);
+    if (
+      !clientId ||
+      !portId ||
+      typeof data !== "string" ||
+      APP_HOST_DOWNSTREAM_REPLAY_TTL_MS <= 0 ||
+      APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES <= 0
+    ) {
+      return seq;
+    }
+    const key = appHostRelayKey(clientId, portId);
+    const queue = pruneAppHostDownstreamFrames(clientId, portId);
+    queue.push({ atMs: Date.now(), data, seq });
+    while (queue.length > APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES) queue.shift();
+    appHostDownstreamFramesByRelayKey.set(key, queue);
+    return seq;
+  }
+
+  function flushAppHostDownstreamReplay(ws, clientId, portId, afterSeq) {
+    const cursor = Number(afterSeq);
+    if (!Number.isFinite(cursor) || cursor <= 0) return 0;
+    const queue = pruneAppHostDownstreamFrames(clientId, portId).filter((entry) => entry.seq > cursor);
+    if (!queue.length) return 0;
+    let sent = 0;
+    for (const entry of queue) {
+      if (!safeSend(ws, { type: "app-host-port-message", portId, data: entry.data, seq: entry.seq }, { suppressDiagnostic: true, route: "app_host_downstream_replay" })) {
+        break;
+      }
+      sent += 1;
+    }
+    diagnosticLog("ws-hub", "app_host_downstream_replay_flushed", {
+      afterSeq: cursor,
+      clientId: shortId(clientId),
+      portId: shortId(portId),
+      queued: queue.length,
+      sent,
+    });
+    recordFlowEvent({
+      clientId,
+      hint: `app-host 已按游标补发 ${sent}/${queue.length} 条官方下行帧`,
+      scope: "relay",
+      stage: sent === queue.length ? "downstream_replay_flushed" : "downstream_replay_partial",
+    });
+    return sent;
   }
 
   function observeAppHostPortFrame(ws, direction, portId, data) {
@@ -1060,7 +1131,8 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       onMessage(data) {
         observeAppHostPortFrame(ws, "official-to-browser", portId, data);
         maybeHandleAppHostReadOnlyResponse(ws, portId, relay, data);
-        safeSend(ws, { type: "app-host-port-message", portId, data }, { suppressDiagnostic: true });
+        const seq = rememberAppHostDownstreamFrame(clientId, portId, data);
+        safeSend(ws, { type: "app-host-port-message", portId, data, seq }, { suppressDiagnostic: true });
       },
     });
     relays.set(portId, relay);
@@ -1073,6 +1145,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     // 浏览器发起 connect 后，gateway 才创建 Electron MessageChannelMain 并交给官方 listener。
     const clientId = normalizedWsClientId(ws, message);
     const portId = message && typeof message.portId === "string" ? message.portId : "";
+    const lastServerSeq = Number(message && message.lastServerSeq);
     if (!clientId || ws.__codexWebClientId !== clientId || !validAppHostPortId(portId)) {
       diagnosticWarn("ws-hub", "app_host_connect_rejected", {
         clientId: shortId(clientId),
@@ -1130,11 +1203,13 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
         onMessage(data) {
           observeAppHostPortFrame(ws, "official-to-browser", portId, data);
           maybeHandleAppHostReadOnlyResponse(ws, portId, relay, data);
-          safeSend(ws, { type: "app-host-port-message", portId, data }, { suppressDiagnostic: true });
+          const seq = rememberAppHostDownstreamFrame(clientId, portId, data);
+          safeSend(ws, { type: "app-host-port-message", portId, data, seq }, { suppressDiagnostic: true });
         },
       });
       relays.set(portId, relay);
       safeSend(ws, { type: "app-host-port-connected", portId }, { suppressDiagnostic: true });
+      flushAppHostDownstreamReplay(ws, clientId, portId, lastServerSeq);
       flushPendingAppHostMessages(ws, clientId, portId, relay);
       if (DEBUG_LOGS) {
         // app-host 端口连接/关闭是前端组件生命周期的一部分，默认只保留失败日志。
