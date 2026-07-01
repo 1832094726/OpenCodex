@@ -8,7 +8,7 @@ OpenCodex 采用域名隔离：Mac 域名只表示 Mac gateway，Win 域名只�
 
 状态面板必须回答四个问题：
 
-- 当前连接是否可用：浏览器在线、WebSocket 已连、gateway 健康、官方 runtime 可响应。
+- 当前连接是否可用：浏览器在线、gateway transport 已连、gateway 健康、官方 runtime 可响应。
 - 历史记录是否拉完：`thread/read`、`thread/resume`、`thread/turns/list` 是否成功，耗时多少。
 - 消息是否发出：用户点发送后是否进入 `turn/start`，是否拿到成功回包。
 - 后续为什么没动：stream 是否开始、是否断连、是否后端仍在跑、是否页面刷新没有重新订阅。
@@ -20,7 +20,7 @@ OpenCodex 采用域名隔离：Mac 域名只表示 Mac gateway，Win 域名只�
 | 状态 | 触发事件 | 成功下一步 | 异常提示 |
 | --- | --- | --- | --- |
 | `booting` | 页面加载 polyfill | `ws_connecting` | 页面脚本未加载 |
-| `ws_connecting` | 创建 `/ws` | `ws_ready` | WebSocket 连接中断 |
+| `ws_connecting` | 优先创建 Socket.IO，失败回退 `/ws` | `ws_ready` | gateway transport 连接中断 |
 | `ws_ready` | 收到 `hello-ack` | `runtime_checking` | gateway 未确认 clientId |
 | `runtime_checking` | `account/read` 或 `config/read` 成功 | `ready` | 官方 runtime 无响应 |
 | `ready` | 页面可操作 | 等待对话操作 | 无 |
@@ -216,7 +216,7 @@ GET /api/diagnostics/flow?clientId=...&threadId=...
 - 历史空白：看 `thread/turns/list` 是否成功、返回是否慢。
 - 点发送后消息消失：看是否进入 `turn/start`，以及是否有 `app_host_message_missing_relay`。
 - 提交后没有回复：看 `turn/start` 是否成功，成功后是否进入 `waiting_for_events` 或 stream 阶段。
-- 手机后台回来失败：看 WS 是否重新 `hello-ack`，relay 是否补建并 flush。
+- 手机后台回来失败：看 transport 是否重新 `hello-ack`，relay 是否补建并 flush。
 - 域名打不开：看 `/api/health`、WS 握手和 Tailscale Serve，不进入 thread 状态机。
 
 ## 多客户端水位诊断
@@ -239,13 +239,3 @@ OpenCodex 优先复用成熟传输层。当前 gateway 同时支持：
 - `/ws`：raw WebSocket 兼容入口，保留给旧浏览器 polyfill 和回退路径。
 
 传输层只负责“消息可靠送达”；Codex 私有状态仍由 OpenCodex 管：`threadSeq`、快照水位、app-host MessagePort relay、缺口检测和脱敏诊断。短断线优先让 Socket.IO 恢复包，恢复不了再走 OpenCodex 的 thread replay 或 snapshot repair。
-
-## 多客户端水位诊断
-
-`GET /api/diagnostics/threads?threadId=<id>` 会返回 `clientWatermarks`，用于判断同一会话下每个客户端到底追到哪里：
-
-- `threadCursor`：gateway 已认为该客户端端口消费到的 app-host `threadSeq`。
-- `snapshotAckThreadSeq`：该客户端最近一次消费 gateway 全量快照的水位。
-- `latestKnownThreadSeq`：gateway 当前观察到的 thread 最新下行水位。
-
-排查规则：如果 `latestKnownThreadSeq > threadCursor` 且 replay 队列连续，gateway 只补增量；如果队列不连续，浏览器应读取 gateway memory snapshot 并发送 snapshot ack。

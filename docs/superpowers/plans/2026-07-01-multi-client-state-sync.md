@@ -1,102 +1,63 @@
-# Multi Client State Sync Implementation Plan
+# 多端客户端状态同步实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **给 agentic workers：** REQUIRED SUB-SKILL：使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans` 按任务执行。本计划使用 checkbox（`- [ ]`）追踪步骤。
 
-**Goal:** Make desktop, phone, and additional browser clients enter the same Codex conversation smoothly by letting the OpenCodex gateway maintain thread snapshots, incremental app-host frames, and per-client watermarks.
+**目标：** 让电脑、手机和其它浏览器客户端都能流畅进入同一个 Codex 会话，由 OpenCodex gateway 维护 thread 快照、app-host 增量帧和每个客户端自己的同步水位。
 
-**Architecture:** The gateway becomes a lightweight state coordinator, not a raw remote-desktop tunnel. Official runtime responses write memory-only full-state snapshots with a `threadSeq` watermark, app-host downstream frames form a bounded per-thread incremental log, and every browser client owns its own snapshot ack watermark plus app-host replay cursor. Reconnect first tries continuous incremental replay; when retained frames are incomplete, the browser falls back to the gateway memory snapshot and acks that snapshot so later nudges only send newer increments.
+**架构：** Socket.IO 已成为浏览器默认传输层，raw `/ws` 保留为回退路径。gateway 仍然是 Codex 私有状态协调器：它保存带 `threadSeq` 的进程内全量快照，保留 app-host thread 增量队列，维护 per-client 游标，并在增量不连续时让浏览器走快照修复。
 
-**Tech Stack:** Node.js CommonJS gateway modules, Electron official runtime IPC interception, browser JavaScript polyfill in `web-shell/codex-bridge-polyfill.js`, in-memory fast-sync snapshots, WebSocket app-host bridge, Node built-in test runner.
+**技术栈：** Node.js CommonJS gateway 模块、Socket.IO、raw `ws` fallback、Electron 官方 runtime IPC 拦截、浏览器 polyfill、进程内 fast-sync snapshot、Node 内置 test runner。
 
 ---
 
-## Why This Exists
+## 架构参考
 
-The official Codex desktop app runs renderer UI and runtime locally, so `thread/read`, `thread/turns/list`, app-host MessagePort events, and model/tool status travel on a stable local IPC path. OpenCodex moves the renderer into remote browsers and phones, so WebSocket loss, high latency, reloads, and multiple clients can drop incremental app-host events. If the gateway only forwards bytes, clients either show blank history until a new message arrives, or reload too much full state.
+权威架构说明和排障手册在：
 
-The fix is to keep protocol state in the gateway:
-
-- Full-state snapshots answer "what does this thread look like up to seq N?"
-- Incremental app-host frames answer "what changed after seq N?"
-- Per-client cursors answer "what has this specific browser/phone already consumed?"
-- Gap detection answers "can I replay increments, or must I force snapshot repair?"
-
-## Current Completed Work
-
-- [x] Gateway observes app-host frames and stores sanitized thread state in `gateway/runtime/ipc/app-host-frame-observer.cjs`.
-- [x] Gateway assigns per-thread `threadSeq` to official-to-browser app-host frames in `gateway/runtime/ipc/ws-hub.cjs`.
-- [x] Browser stores `lastThreadSeq` per thread in `sessionStorage` and reports it on `app-host-connect`.
-- [x] Gateway replays retained per-thread frames on reconnect and marks `replayGap` when a client cursor is older than the retained queue.
-- [x] Gateway exposes memory snapshots for `thread/read` and `thread/turns/list`.
-- [x] Memory snapshots include the `threadSeq` watermark they cover.
-- [x] Browser includes `threadSeq` in `opencodex:fast-sync-snapshot-ack`.
-- [x] Snapshot ack advances active gateway replay cursors for that client.
-- [x] Diagnostics expose `clientWatermarks`.
-- [x] Browser exposes repair decisions so we can tell whether it chose replay or snapshot fallback.
-
-## Remaining Gap
-
-`lastSnapshotAckThreadSeq` is still a thread-level "last ack wins" diagnostic. With two clients, client A can ack seq 2 after client B acked seq 4, and diagnostics will incorrectly make B look like it has no snapshot watermark. Multi-client state must keep snapshot ack watermarks per client.
-
-The transport layer is also still too hand-rolled. Raw `ws` works, but OpenCodex currently owns reconnect backoff, hello routing, missed-message buffering, targeted delivery, and some replay behavior directly in `ws-hub.cjs`. Future work should prefer a mature transport framework for connection lifecycle and packet recovery, while keeping only Codex-specific state translation in OpenCodex.
-
-## Mature Transport Direction
-
-Preferred direction: use Socket.IO as the browser default transport while keeping the existing `/ws` endpoint as a compatibility fallback.
-
-- Socket.IO handles connection lifecycle, ping/pong, reconnect, rooms, event acks, and connection state recovery.
-- OpenCodex keeps the Codex-specific protocol: `threadSeq`, memory snapshot watermarks, app-host MessagePort relay, and sanitized diagnostics.
-- Raw `/ws` remains as a compatibility fallback when the Socket.IO client script or handshake fails.
-
-### Why Not CRDT or Local-first DB Here
-
-Yjs, Automerge, Replicache, ElectricSQL, and PowerSync are mature, but they expect us to own the application data model. OpenCodex is proxying the official Codex renderer/runtime protocol, where important state arrives as app-host RPC frames and official thread snapshots. The reusable part is transport reliability, not the whole state model.
-
-### Socket.IO Migration Plan
-
-1. Add Socket.IO server dependency and mount it on the same HTTP server.
-2. Normalize raw WS sockets and Socket.IO sockets behind a small JSON transport adapter.
-3. Load `/socket.io/socket.io.js` in the browser and prefer Socket.IO for gateway messages.
-4. Keep existing message payloads unchanged: `hello`, `ipc-invoke`, `app-host-connect`, `app-host-port-message`, `opencodex:fast-sync-snapshot-ack`, and diagnostics.
-5. Use Socket.IO rooms for `clientId` and eventually `threadId`.
-6. Enable connection state recovery so short mobile disconnects can receive missed packets from Socket.IO before falling back to OpenCodex `threadSeq` replay.
-7. Keep OpenCodex replay/snapshot repair as the authoritative semantic fallback, because Socket.IO packet recovery cannot reconstruct official state after retention gaps or process restarts.
-
-## Target Protocol
-
-### App-host Incremental Frame
-
-```json
-{
-  "type": "app-host-port-message",
-  "portId": "port-b",
-  "data": "{\"id\":\"rpc\",\"result\":{}}",
-  "threadId": "thread-1",
-  "threadSeq": 42,
-  "replay": "thread",
-  "replayGap": false
-}
+```text
+docs/MULTI-CLIENT-STATE-SYNC.md
 ```
 
-Browser applies the frame to the official renderer MessagePort, then records `threadSeq=42` for that thread.
+协议字段、恢复流程、诊断口径和验收标准都以该文档为准。
 
-### Fast-sync Snapshot
+## 已完成
 
-```json
-{
-  "capturedAtMs": 1780000000000,
-  "key": "snapshot-key",
-  "method": "thread/read",
-  "source": "gateway-memory",
-  "threadId": "thread-1",
-  "threadSeq": 42,
-  "value": { "id": "thread-1" }
-}
+- [x] gateway 观察 app-host 帧，并在 `gateway/runtime/ipc/app-host-frame-observer.cjs` 保存脱敏 thread 状态。
+- [x] gateway 在 `gateway/runtime/ipc/ws-hub.cjs` 给官方到浏览器的 app-host 帧分配 per-thread `threadSeq`。
+- [x] 浏览器将每个 thread 的 `lastThreadSeq` 保存到 `sessionStorage`，并在 `app-host-connect` 时上报。
+- [x] gateway 在重连时补发保留的 per-thread 增量帧，并在客户端游标早于保留队列时标记 `replayGap`。
+- [x] gateway 为 `thread/read` 和 `thread/turns/list` 暴露进程内快照。
+- [x] memory snapshot 携带自身覆盖到的 `threadSeq` 水位。
+- [x] 浏览器在 `opencodex:fast-sync-snapshot-ack` 中携带 `threadSeq`。
+- [x] snapshot ack 会推进该客户端 active gateway replay cursor。
+- [x] gateway 记录 `snapshotAckThreadSeqByClientId`，一个客户端的 ack 不会覆盖另一个客户端的诊断状态。
+- [x] 诊断接口暴露 `clientWatermarks`。
+- [x] 浏览器暴露修复决策，可以区分增量 replay、快照 preload、route refresh 和 ignored。
+- [x] Socket.IO server 已和 raw `/ws` 并行挂载。
+- [x] 浏览器默认使用 Socket.IO client，Socket.IO 无法加载或握手失败时回退 raw `/ws`。
+- [x] Socket.IO 和 raw `/ws` 共用同一套 gateway JSON payload。
+
+## 当前协议
+
+### 浏览器传输
+
+```text
+browser
+  -> /socket.io/socket.io.js
+  -> Socket.IO "message" event，payload 仍是既有 JSON
+  -> gateway 适配器
+  -> ws-hub handler
 ```
 
-`threadSeq` means this full-state snapshot includes all official app-host downstream changes up to that gateway-observed thread sequence.
+回退路径：
 
-### Snapshot Ack
+```text
+browser
+  -> new WebSocket("/ws")
+  -> ws-hub handler
+```
+
+### 快照 ack
 
 ```json
 {
@@ -111,224 +72,182 @@ Browser applies the frame to the official renderer MessagePort, then records `th
 }
 ```
 
-Gateway uses this ack in two places:
+gateway 使用该 ack 做两件事：
 
-- Advance all active app-host ports for `client-b` on `thread-1` to seq 42.
-- Store `snapshotAckThreadSeqByClientId["client-b"] = 42` for diagnostics and future repair decisions.
+- 将该客户端在该 thread 下的 active app-host ports 推进到 `threadSeq`。
+- 写入 `snapshotAckThreadSeqByClientId[clientId] = threadSeq`。
 
-### Diagnostics Shape
+## 后续任务
 
-```json
-{
-  "threadId": "thread-1",
-  "latestKnownThreadSeq": 45,
-  "snapshotAckThreadSeqByClientId": {
-    "client-a": 2,
-    "client-b": 42
-  },
-  "clientWatermarks": [
-    {
-      "clientId": "client-a",
-      "portIds": ["port-a"],
-      "snapshotAckThreadSeq": 2,
-      "threadCursor": 45
-    },
-    {
-      "clientId": "client-b",
-      "portIds": ["port-b"],
-      "snapshotAckThreadSeq": 42,
-      "threadCursor": 45
-    }
-  ]
-}
-```
+现在缺的不是基础状态存储，而是观测、硬化和真实弱网验证。
 
-## File Map
+### 任务 8：Socket.IO 恢复诊断
 
-- Modify `gateway/runtime/ipc/app-host-frame-observer.cjs`
-  - Add `snapshotAckThreadSeqByClientId: Map`.
-  - Write per-client snapshot ack seq on every ack.
-  - Project the map as a JSON-safe object in `appHostThreadStateSnapshot()`.
-- Modify `gateway/runtime/ipc/ws-hub.cjs`
-  - Read `snapshotAckThreadSeqByClientId` when building `clientWatermarks`.
-  - Stop deriving client snapshot watermark from the thread-level `lastSnapshotAckClientId`.
-- Modify `gateway/test/app-host-frame-observer.test.cjs`
-  - Add observer-level assertions for per-client ack seqs.
-  - Extend WebSocket replay test so A and B ack different seqs and diagnostics keep both.
-- Modify `docs/STATUS-FLOW-MONITORING.md`
-  - Document per-client ack watermarks after implementation.
+**文件：**
+- 修改：`gateway/runtime/ipc/ws-hub.cjs`
+- 修改：`gateway/test/app-host-frame-observer.test.cjs`
+- 修改：`web-shell/codex-bridge-polyfill.js`
+- 修改：`web-shell/test/codex-bridge-fast-sync.test.cjs`
+- 修改：`docs/STATUS-FLOW-MONITORING.md`
 
----
+- [ ] **步骤 1：新增失败测试**
 
-### Task 7: Per-client Snapshot Ack Watermarks
-
-**Files:**
-- Modify: `gateway/runtime/ipc/app-host-frame-observer.cjs`
-- Modify: `gateway/runtime/ipc/ws-hub.cjs`
-- Modify: `gateway/test/app-host-frame-observer.test.cjs`
-- Modify: `docs/STATUS-FLOW-MONITORING.md`
-
-- [ ] **Step 1: Write the failing observer test**
-
-Update `thread state records per-client snapshot acknowledgements` in `gateway/test/app-host-frame-observer.test.cjs` so client A acks seq 4 and client B acks seq 9:
+增加断言，要求 Socket.IO 连接事件记录：
 
 ```js
-recordAppHostThreadSnapshotAck(state, {
-  capturedAtMs: 1780000000000,
-  clientId: "client-snapshot-a",
-  key: "snapshot-key-secret-lengthy",
-  method: "thread/read",
-  source: "gateway-memory",
-  threadId: "thread-snapshot",
-  threadSeq: 4,
-});
-
-recordAppHostThreadSnapshotAck(state, {
-  capturedAtMs: 1780000001000,
-  clientId: "client-snapshot-b",
-  key: "snapshot-key-other",
-  method: "thread/turns/list",
-  source: "gateway-memory",
-  threadId: "thread-snapshot",
-  threadSeq: 9,
-});
-
-assert.deepEqual(snapshot.snapshotAckThreadSeqByClientId, {
-  "client-snapshot-a": 4,
-  "client-snapshot-b": 9,
-});
+transport: "socket.io"
+recovered: true | false
 ```
 
-- [ ] **Step 2: Write the failing multi-client hub test**
-
-Extend `ws hub advances client thread cursor from gateway snapshot acknowledgements`:
+浏览器诊断需要包含实际选中的传输层：
 
 ```js
-wsA.send(JSON.stringify({
-  capturedAtMs: Date.now(),
-  clientId: "client-snapshot-cursor-source",
-  key: "snapshot-cursor-source-key",
-  method: "thread/read",
-  source: "gateway-memory",
-  threadId: "thread-snapshot-cursor",
-  threadSeq: 2,
-  type: "opencodex:fast-sync-snapshot-ack",
-}));
-await new Promise((resolve) => setTimeout(resolve, 10));
-
-assert.deepEqual(snapshot.snapshotAckThreadSeqByClientId, {
-  "client-snapshot-cursor-target": 4,
-  "client-snapshot-cursor-source": 2,
-});
-assert.deepEqual(snapshot.clientWatermarks.find((entry) => entry.clientId === "client-snapshot-cursor-target"), {
-  clientId: "client-snapshot-cursor-target",
-  portIds: ["port-snapshot-cursor-target"],
-  snapshotAckThreadSeq: 4,
-  threadCursor: 5,
-});
-assert.deepEqual(snapshot.clientWatermarks.find((entry) => entry.clientId === "client-snapshot-cursor-source"), {
-  clientId: "client-snapshot-cursor-source",
-  portIds: ["port-snapshot-cursor-source"],
-  snapshotAckThreadSeq: 2,
-  threadCursor: 5,
+clientDiagnostic("ws-transport-selected", {
+  transport: "socket.io"
 });
 ```
 
-- [ ] **Step 3: Verify the tests fail**
+- [ ] **步骤 2：实现传输诊断**
+
+在 flow event 和相关 thread diagnostics 中暴露：
+
+- `transport`
+- `socketId`
+- `recovered`
+- `fallbackTransport`
+
+- [ ] **步骤 3：验证**
 
 ```bash
 rtk node --test gateway/test/app-host-frame-observer.test.cjs
-```
-
-Expected: FAIL because `snapshotAckThreadSeqByClientId` does not exist and `clientWatermarks` still use the last thread-level ack.
-
-- [ ] **Step 4: Implement observer storage**
-
-In `ensureThreadState()` add:
-
-```js
-snapshotAckThreadSeqByClientId: new Map(),
-```
-
-In `recordAppHostThreadSnapshotAck()` add:
-
-```js
-const snapshotAckThreadSeq = Math.max(0, Number(details.threadSeq) || 0);
-if (clientId) {
-  // 每个浏览器/手机客户端都有自己的快照水位，不能用 thread 级最后一次 ack 覆盖。
-  thread.snapshotAckThreadSeqByClientId.set(clientId, snapshotAckThreadSeq);
-}
-thread.lastSnapshotAckThreadSeq = snapshotAckThreadSeq;
-trimMap(thread.snapshotAckThreadSeqByClientId, state.maxEntries);
-```
-
-In `appHostThreadStateSnapshot()` add:
-
-```js
-snapshotAckThreadSeqByClientId: Object.fromEntries(thread.snapshotAckThreadSeqByClientId.entries()),
-```
-
-- [ ] **Step 5: Implement diagnostics projection**
-
-In `appHostThreadClientWatermarks()` in `gateway/runtime/ipc/ws-hub.cjs`, replace the last-ack comparison with per-client lookup:
-
-```js
-const snapshotAckThreadSeqByClientId =
-  thread && thread.snapshotAckThreadSeqByClientId && typeof thread.snapshotAckThreadSeqByClientId === "object"
-    ? thread.snapshotAckThreadSeqByClientId
-    : {};
-
-return activeClientPorts.map((entry) => {
-  const portIds = Array.isArray(entry && entry.portIds) ? entry.portIds : [];
-  const cursors = portIds.map((portId) => rememberedAppHostThreadCursor(entry.clientId, portId, thread.threadId));
-  return {
-    clientId: entry.clientId,
-    portIds,
-    snapshotAckThreadSeq: Math.max(0, Number(snapshotAckThreadSeqByClientId[entry.clientId]) || 0),
-    threadCursor: Math.max(0, ...cursors),
-  };
-});
-```
-
-- [ ] **Step 6: Document the diagnostic rule**
-
-Add to `docs/STATUS-FLOW-MONITORING.md`:
-
-```md
-`snapshotAckThreadSeqByClientId` 是按客户端保存的全量快照消费水位；`lastSnapshotAckThreadSeq` 只表示最近一次 ack 事件，不能用于判断其它客户端是否落后。
-```
-
-- [ ] **Step 7: Verify and commit**
-
-```bash
-rtk node --test gateway/test/app-host-frame-observer.test.cjs
-rtk node -c gateway/runtime/ipc/app-host-frame-observer.cjs
-rtk node -c gateway/runtime/ipc/ws-hub.cjs
+rtk node --test web-shell/test/codex-bridge-fast-sync.test.cjs
 rtk pnpm test
 rtk git diff --check
-rtk git add docs/superpowers/plans/2026-07-01-multi-client-state-sync.md docs/STATUS-FLOW-MONITORING.md gateway/runtime/ipc/app-host-frame-observer.cjs gateway/runtime/ipc/ws-hub.cjs gateway/test/app-host-frame-observer.test.cjs
-rtk git commit -m "feat(runtime): track snapshot ack watermarks per client"
 ```
 
-Expected: targeted test, syntax checks, full suite, and whitespace check pass.
+预期：全部通过。
 
-## Self Review
+### 任务 9：Thread Room 路由
 
-Spec coverage:
+**文件：**
+- 修改：`gateway/runtime/ipc/ws-hub.cjs`
+- 修改：`gateway/test/app-host-frame-observer.test.cjs`
 
-- Multi-client smooth access is covered by replay cursors, snapshot acks, and per-client diagnostics.
-- Gateway-maintained full-state is covered by memory snapshots and snapshot ack protocol.
-- Missing-content repair is covered by `replayGap`, browser snapshot fallback, and ack-based cursor advancement.
-- Different client state management is covered by `snapshotAckThreadSeqByClientId` and `clientWatermarks`.
+- [ ] **步骤 1：新增 room 路由测试**
 
-Placeholder scan:
+证明同一个 thread 下的 active Socket.IO 客户端可以通过 thread room 定向投递，同时 raw `/ws` fallback 仍然走当前内存 active client list。
 
-- No task uses TBD/TODO placeholders.
-- Code-changing steps include exact files, snippets, commands, and expected outcomes.
+- [ ] **步骤 2：实现 room join**
 
-Type consistency:
+处理 `app-host-connect` 时，Socket.IO 客户端应加入：
 
-- `threadSeq` is the single watermark field across cache, snapshot HTTP response, browser ack, gateway ack handler, diagnostics, and tests.
-- `lastSnapshotAckThreadSeq` is event-level diagnostic state.
-- `snapshotAckThreadSeqByClientId` is per-client diagnostic and repair state.
-- `clientWatermarks[].threadCursor` is derived from gateway replay cursor state and does not duplicate frame bodies.
+```text
+client:<clientId>
+thread:<threadId>
+```
+
+raw `/ws` 客户端继续使用既有的 `clientsById` 和 `activeClientPorts` 路径。
+
+- [ ] **步骤 3：验证**
+
+```bash
+rtk node --test gateway/test/app-host-frame-observer.test.cjs
+rtk pnpm test
+rtk git diff --check
+```
+
+### 任务 10：端到端弱网恢复脚本
+
+**文件：**
+- 新建：`scripts/test-multi-client-recovery.cjs`
+- 修改：`package.json`
+- 修改：`docs/MULTI-CLIENT-STATE-SYNC.md`
+
+- [ ] **步骤 1：创建脚本化测试脚本**
+
+测试脚本需要模拟：
+
+- 两个客户端打开同一个 thread；
+- 一个客户端收到 app-host frames；
+- 另一个客户端断开并重连；
+- 保留队列连续时只补 replay；
+- replay gap 后走 snapshot ack。
+
+- [ ] **步骤 2：新增 npm script**
+
+```json
+"test:multi-client-recovery": "node scripts/test-multi-client-recovery.cjs"
+```
+
+- [ ] **步骤 3：验证**
+
+```bash
+rtk pnpm run test:multi-client-recovery
+rtk pnpm test
+```
+
+### 任务 11：抽象 ThreadEventLog
+
+**文件：**
+- 新建：`gateway/runtime/core/thread-event-log.cjs`
+- 新建：`gateway/test/thread-event-log.test.cjs`
+- 修改：`gateway/runtime/ipc/ws-hub.cjs`
+- 修改：`docs/MULTI-CLIENT-STATE-SYNC.md`
+
+- [ ] **步骤 1：新增失败测试**
+
+测试一个内存 `ThreadEventLog` 需要覆盖：
+
+- append event 后分配递增 `threadSeq`；
+- 按 `afterSeq` 读取增量；
+- 返回 `oldestSeq`、`latestSeq`、`gap`；
+- 为每个 `clientId + portId + threadId` 保存 cursor；
+- ack snapshot 后推进对应 client 的 cursor。
+
+- [ ] **步骤 2：实现内存 ThreadEventLog**
+
+接口先按最小能力设计：
+
+```js
+const log = createThreadEventLog({ maxEntries, ttlMs });
+log.append(threadId, event);
+log.readAfter(threadId, afterSeq);
+log.rememberCursor(clientId, portId, threadId, seq);
+log.cursor(clientId, portId, threadId);
+log.ackSnapshot(clientId, threadId, seq, activePortIds);
+log.stats(threadId);
+```
+
+- [ ] **步骤 3：让 ws-hub 使用接口**
+
+把当前散落在 `appHostDownstreamFramesByThreadId`、`appHostDownstreamThreadSeqByThreadId`、`appHostThreadSeqByRelayKey` 的逻辑收拢到 `ThreadEventLog`。
+
+- [ ] **步骤 4：验证**
+
+```bash
+rtk node --test gateway/test/thread-event-log.test.cjs
+rtk node --test gateway/test/app-host-frame-observer.test.cjs
+rtk pnpm test
+rtk git diff --check
+```
+
+预期：行为不变，但后续可以把内存实现替换为 JetStream、SQLite event log 或其它成熟 stream store。
+
+## 验收标准
+
+- 手机前台恢复时优先使用 Socket.IO，只有 Socket.IO 不可用时才回退 raw `/ws`。
+- 两个客户端打开同一个 thread 时，各自拥有独立的 `threadCursor` 和 `snapshotAckThreadSeq`。
+- 重连且保留队列连续时，只发送缺失增量。
+- 重连且保留队列不连续时，触发 gateway snapshot preload 和 snapshot ack。
+- 诊断信息能解释客户端是被 Socket.IO recovery、app-host replay，还是 memory snapshot repair 修复的。
+
+## 验证命令
+
+每个实现批次后运行：
+
+```bash
+rtk node --test gateway/test/app-host-frame-observer.test.cjs
+rtk node --test web-shell/test/codex-bridge-fast-sync.test.cjs
+rtk pnpm test
+rtk git diff --check
+```
