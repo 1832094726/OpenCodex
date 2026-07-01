@@ -39,10 +39,22 @@ test("codex runtime watcher refreshes hidden official app-server on config chang
 
 test("hidden official runtime refresh closes app-host relays and reloads hidden webContents", () => {
   const refreshBody = officialRuntimeFunctionSource("refreshHiddenOfficialRuntime", "codexRuntimeWatchPathFromFilename");
+  const fatalBody = officialRuntimeFunctionSource("shouldSuppressExpectedAppServerFatal", "isCrossClientSyncCandidate");
   assert.match(refreshBody, /closeAllAppHostRelays\("official_runtime_refresh"\)/);
-  assert.match(refreshBody, /terminateTrackedAppServerChildren\(reason\)/);
+  assert.match(refreshBody, /childrenBeforeReload\s*=\s*Array\.from\(appServerSpawnHook\.activeChildren\)/);
+  assert.match(refreshBody, /scheduleTrackedAppServerChildrenTermination\(reason,\s*childrenBeforeReload\)/);
   assert.match(refreshBody, /reloadHiddenOfficialRuntime\(reason\)/);
+  assert.ok(
+    refreshBody.indexOf("reloadHiddenOfficialRuntime(reason)") <
+      refreshBody.indexOf("scheduleTrackedAppServerChildrenTermination(reason, childrenBeforeReload)"),
+    "hidden runtime should reload before the old app-server process is terminated"
+  );
   assert.match(source, /webContents\.reloadIgnoringCache\(\)/);
+  assert.match(source, /expectedTerminations/);
+  assert.match(fatalBody, /codex-app-server-fatal-error/);
+  assert.match(fatalBody, /signal=SIGTERM\|SIGTERM/);
+  assert.match(fatalBody, /isExpectedAppServerTerminationRecent\(\)/);
+  assert.match(fatalBody, /expected_app_server_fatal_suppressed/);
   // 只读列表缓存应穿过 hidden runtime refresh，避免配置变更后重新冷扫历史会话列表。
   assert.doesNotMatch(refreshBody, /appServerReadOnlyCache\.clear\(\)/);
 });

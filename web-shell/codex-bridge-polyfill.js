@@ -2663,6 +2663,19 @@
     return result;
   }
 
+  function normalizeActiveThreadChangePayload(payload) {
+    if (!payload || typeof payload !== "object") return;
+    if (payload.type !== "remote-hosted-pip-active-thread-changed") return;
+    if (typeof payload.conversationId === "string" && payload.conversationId) return;
+    const threadId = currentRouteThreadId();
+    if (!threadId) return;
+    // 官方 Web 壳在深链冷开时偶尔上报 null；这里用地址栏 threadId 补齐当前活跃会话。
+    payload.conversationId = threadId;
+    clientDiagnostic("active-thread-change-route-filled", {
+      threadId: shortThreadId(threadId),
+    });
+  }
+
   function sendAppHostWsPayload(payload) {
     // app-host 比普通 IPC 更早启动；WS 未 open 或 hello 未完成时不能直接发送，否则 gateway 无法建立路由。
     if (!ws || ws.readyState !== w.WebSocket.OPEN || !wsReady) return false;
@@ -3788,6 +3801,7 @@
   async function invokeGateway(channel, args) {
     const ipcArgs = Array.isArray(args) ? args : [args];
     const payload = payloadFromIpcArgs(ipcArgs);
+    normalizeActiveThreadChangePayload(payload);
     const diagnosticSummary = ipcDiagnosticSummary(channel, payload);
     normalizeStatsigBootstrapRequest(payload);
     // log-message 占首屏 IPC 约 25%，且是 fire-and-forget，本地拦截直接省掉全部网络开销。

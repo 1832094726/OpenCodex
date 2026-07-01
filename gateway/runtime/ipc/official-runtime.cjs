@@ -134,6 +134,7 @@ const appServerSpawnHook = {
   replacementBinaryPath: null,
   lastError: null,
   activeChildren: new Set(),
+  expectedTerminations: new Map(),
   lastChildPid: null,
   lastChildExit: null,
   restartCount: 0,
@@ -362,12 +363,17 @@ function trackHiddenAppServerChild(child, launcher) {
 
   function rememberExit(event, code, signal, error) {
     appServerSpawnHook.activeChildren.delete(child);
+    const pid = typeof child.pid === "number" ? child.pid : null;
+    const expected = pid != null ? appServerSpawnHook.expectedTerminations.get(pid) : null;
+    if (pid != null) appServerSpawnHook.expectedTerminations.delete(pid);
     appServerSpawnHook.lastChildExit = {
       at: new Date().toISOString(),
       code: code == null ? null : code,
       event,
+      expected: !!expected,
       error: error instanceof Error ? error.message : error ? String(error) : "",
-      pid: typeof child.pid === "number" ? child.pid : null,
+      pid,
+      reason: expected && typeof expected.reason === "string" ? expected.reason : null,
       signal: signal || null,
     };
   }
@@ -510,13 +516,16 @@ function appServerSpawnHookStatus() {
   };
 }
 
-function terminateTrackedAppServerChildren(reason) {
-  const children = Array.from(appServerSpawnHook.activeChildren);
+function terminateTrackedAppServerChildren(reason, children = Array.from(appServerSpawnHook.activeChildren)) {
   const terminatedPids = [];
   for (const child of children) {
     if (!child || child.killed) continue;
     const pid = typeof child.pid === "number" ? child.pid : null;
     if (pid != null) terminatedPids.push(pid);
+    if (pid != null) {
+      // 这是 OpenCodex 主动刷新 hidden runtime 时的旧 app-server 清理，不能按异常退出展示给用户。
+      appServerSpawnHook.expectedTerminations.set(pid, { at: Date.now(), reason });
+    }
     try {
       child.kill("SIGTERM");
     } catch (error) {
@@ -536,6 +545,18 @@ function terminateTrackedAppServerChildren(reason) {
     if (killTimer && typeof killTimer.unref === "function") killTimer.unref();
   }
   return terminatedPids;
+}
+
+function scheduleTrackedAppServerChildrenTermination(reason, children) {
+  if (!children.length) return [];
+  const pids = children
+    .map((child) => (child && typeof child.pid === "number" ? child.pid : null))
+    .filter((pid) => pid != null);
+  const timer = setTimeout(() => {
+    terminateTrackedAppServerChildren(reason, children);
+  }, 1200);
+  if (timer && typeof timer.unref === "function") timer.unref();
+  return pids;
 }
 
 function reloadHiddenOfficialRuntime(reason) {
@@ -564,12 +585,13 @@ function refreshHiddenOfficialRuntime(reason, changedPath) {
   appServerSpawnHook.lastRestartAt = new Date().toISOString();
   appServerSpawnHook.lastRestartReason = reason;
   appServerSpawnHook.lastRestartChangedPath = changedPath || null;
+  const childrenBeforeReload = Array.from(appServerSpawnHook.activeChildren);
   // 只读缓存不含账号/配置；刷新隐藏 runtime 时保留它，避免线程列表冷扫再次阻塞首屏和进会话。
   const closedRelays = wsHub && typeof wsHub.closeAllAppHostRelays === "function"
     ? wsHub.closeAllAppHostRelays("official_runtime_refresh")
     : 0;
-  const terminatedPids = terminateTrackedAppServerChildren(reason);
   const hiddenReloaded = reloadHiddenOfficialRuntime(reason);
+  const terminatedPids = scheduleTrackedAppServerChildrenTermination(reason, childrenBeforeReload);
   appServerSpawnHook.lastRestartClosedRelays = closedRelays;
   appServerSpawnHook.lastRestartTerminatedPids = terminatedPids;
   diagnosticLog("official-runtime", "hidden_runtime_refresh_requested", {
@@ -1989,6 +2011,32 @@ function shouldSuppressRoutineRouteDiagnostic(summary) {
   return summary && summary.type === "fetch-response" && isConnectorLogoUrl(summary.url);
 }
 
+function isExpectedAppServerTerminationRecent(nowMs = Date.now()) {
+  const lastRestartAt = Date.parse(appServerSpawnHook.lastRestartAt || "");
+  if (!Number.isFinite(lastRestartAt) || nowMs - lastRestartAt > 15_000) return false;
+  if (appServerSpawnHook.expectedTerminations.size > 0) return true;
+  const lastExit = appServerSpawnHook.lastChildExit;
+  if (lastExit && lastExit.expected && lastExit.signal === "SIGTERM") return true;
+  return Array.isArray(appServerSpawnHook.lastRestartTerminatedPids) && appServerSpawnHook.lastRestartTerminatedPids.length > 0;
+}
+
+function shouldSuppressExpectedAppServerFatal(channel, args) {
+  if (channel !== MESSAGE_FOR_VIEW_CHANNEL) return false;
+  const payload = payloadFromArgs(args);
+  if (!payload || typeof payload !== "object" || payload.type !== "codex-app-server-fatal-error") return false;
+  const errorMessage = typeof payload.errorMessage === "string" ? payload.errorMessage : "";
+  if (!/signal=SIGTERM|SIGTERM/i.test(errorMessage)) return false;
+  if (!isExpectedAppServerTerminationRecent()) return false;
+  // 官方 AppServerConnection 不知道这次 SIGTERM 是 OpenCodex 主动换 hidden runtime；这里吞掉伪 fatal。
+  diagnosticLog("official-runtime", "expected_app_server_fatal_suppressed", {
+    activeExpectedTerminations: appServerSpawnHook.expectedTerminations.size,
+    lastChildExit: appServerSpawnHook.lastChildExit,
+    lastRestartReason: appServerSpawnHook.lastRestartReason,
+    lastRestartTerminatedPids: appServerSpawnHook.lastRestartTerminatedPids,
+  });
+  return true;
+}
+
 function isCrossClientSyncCandidate(summary, payload) {
   if (!summary || !payload || typeof payload !== "object") return false;
   const type = String(payload.type || summary.type || "");
@@ -2078,6 +2126,7 @@ function routeOfficialWebContentsSend(channel, args) {
    * gateway 需要把这些 webContents.send 拦下来，并转换成浏览器 WebSocket 消息。
    */
   const payload = payloadFromArgs(args);
+  if (shouldSuppressExpectedAppServerFatal(channel, args)) return true;
   if (!wsHub) {
     diagnosticWarn("official-ipc-route", "before_ws_ready", outgoingIpcDiagnosticSummary(channel, args));
     logUnknownIpc("webcontents-send-before-ws-ready", {
