@@ -235,7 +235,7 @@ GET /api/diagnostics/flow?clientId=...&threadId=...
 
 OpenCodex 优先复用成熟传输层。当前 gateway 同时支持：
 
-- `/socket.io`：Socket.IO 传输，负责连接生命周期、ping/pong、重连、ack/room 能力以及 connection state recovery。
+- `/socket.io`：默认前端传输。浏览器先加载 `/socket.io/socket.io.js`，用 Socket.IO 负责连接生命周期、ping/pong、重连、ack/room 能力以及 connection state recovery。
 - `/ws`：raw WebSocket 兼容入口，保留给旧浏览器 polyfill 和回退路径。
 
 传输层只负责“消息可靠送达”；Codex 私有状态仍由 OpenCodex 管：`threadSeq`、快照水位、app-host MessagePort relay、缺口检测和脱敏诊断。短断线优先让 Socket.IO 恢复包，恢复不了再走 OpenCodex 的 thread replay 或 snapshot repair。

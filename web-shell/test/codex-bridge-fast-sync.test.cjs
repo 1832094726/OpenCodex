@@ -317,3 +317,30 @@ test("mobile foreground resume still forces a fresh websocket", () => {
   assert.match(source, /MOBILE_WS_RESUME_RECONNECT_AFTER_MS/);
   assert.match(source, /ensureGatewayWebSocket\(reason,\s*\{\s*force:\s*shouldRefreshMobileSocket\s*\}\)/);
 });
+
+test("gateway transport prefers Socket.IO client with raw websocket fallback", () => {
+  const source = readPolyfillSource();
+  const connectBody = sourceBetween(source, "function connect()", "/** WebSocket 断开后的指数退避重连。 */");
+
+  assert.match(source, /gatewaySocketIoUrl: location\.origin/);
+  assert.match(source, /gatewaySocketIoScriptUrl: location\.origin \+ "\/socket\.io\/socket\.io\.js"/);
+  assert.match(source, /function loadSocketIoClientScript/);
+  assert.match(source, /function createSocketIoGatewaySocket/);
+  assert.match(source, /function createRawGatewayWebSocket/);
+  assert.match(connectBody, /openGatewaySocket\(\)\.then/);
+  assert.match(source, /createSocketIoGatewaySocket\(ioFactory\)/);
+  assert.match(source, /return createRawGatewayWebSocket\(\)/);
+});
+
+test("socket.io gateway adapter preserves the existing websocket-shaped contract", () => {
+  const source = readPolyfillSource();
+  const adapterBody = sourceBetween(source, "function createSocketIoGatewaySocket", "function createRawGatewayWebSocket");
+
+  assert.match(adapterBody, /readyState: w\.WebSocket\.CONNECTING/);
+  assert.match(adapterBody, /socket\.emit\("message", data\)/);
+  assert.match(adapterBody, /socket\.on\("message"/);
+  assert.match(adapterBody, /emitGatewaySocketEvent\(adapter, "message", \{ data \}\)/);
+  assert.match(adapterBody, /socket\.on\("connect"/);
+  assert.match(adapterBody, /socket\.on\("disconnect"/);
+  assert.match(adapterBody, /addEventListener\(type, handler\)/);
+});

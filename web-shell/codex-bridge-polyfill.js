@@ -5,6 +5,8 @@
   const cfg = (w.__CODEX_WEB_CONFIG__ =
     w.__CODEX_WEB_CONFIG__ || {
       gatewayBaseUrl: location.origin,
+      gatewaySocketIoScriptUrl: location.origin + "/socket.io/socket.io.js",
+      gatewaySocketIoUrl: location.origin,
       gatewayWsUrl: location.origin.replace(/^http/, "ws") + "/ws",
     });
   // 语言只信任 gateway 启动配置；浏览器侧不自行读配置或按平台猜测。
@@ -143,6 +145,131 @@
       const separator = rawUrl.includes("?") ? "&" : "?";
       return `${rawUrl}${separator}token=${encodeURIComponent(token)}`;
     }
+  }
+
+  function gatewaySocketIoUrl() {
+    return cfg.gatewaySocketIoUrl || location.origin;
+  }
+
+  function gatewaySocketIoScriptUrl() {
+    return cfg.gatewaySocketIoScriptUrl || location.origin + "/socket.io/socket.io.js";
+  }
+
+  function gatewaySocketIoQuery() {
+    const token = gatewayAuthToken();
+    return token ? { token } : {};
+  }
+
+  function shouldPreferSocketIoTransport() {
+    return cfg.gatewayTransport !== "websocket" && cfg.gatewaySocketIo !== false;
+  }
+
+  function loadSocketIoClientScript() {
+    if (typeof w.io === "function") return Promise.resolve(w.io);
+    if (socketIoClientScriptPromise) return socketIoClientScriptPromise;
+    socketIoClientScriptPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.async = true;
+      script.src = gatewaySocketIoScriptUrl();
+      script.onload = () => {
+        if (typeof w.io === "function") {
+          resolve(w.io);
+        } else {
+          reject(new Error("Socket.IO client script loaded without window.io"));
+        }
+      };
+      script.onerror = () => reject(new Error("Failed to load Socket.IO client script"));
+      (document.head || document.documentElement).appendChild(script);
+    });
+    return socketIoClientScriptPromise;
+  }
+
+  function emitGatewaySocketEvent(adapter, type, event) {
+    const listeners = adapter.__listeners.get(type);
+    if (!listeners) return;
+    for (const handler of [...listeners]) {
+      try {
+        handler(event || { type });
+      } catch (error) {
+        setTimeout(() => {
+          throw error;
+        }, 0);
+      }
+    }
+  }
+
+  function createSocketIoGatewaySocket(ioFactory) {
+    const socket = ioFactory(gatewaySocketIoUrl(), {
+      autoConnect: false,
+      path: "/socket.io",
+      query: gatewaySocketIoQuery(),
+      reconnection: true,
+      transports: ["websocket"],
+    });
+    const adapter = {
+      CLOSED: w.WebSocket.CLOSED,
+      CLOSING: w.WebSocket.CLOSING,
+      CONNECTING: w.WebSocket.CONNECTING,
+      OPEN: w.WebSocket.OPEN,
+      __listeners: new Map(),
+      readyState: w.WebSocket.CONNECTING,
+      transport: "socket.io",
+      addEventListener(type, handler) {
+        if (!this.__listeners.has(type)) this.__listeners.set(type, new Set());
+        this.__listeners.get(type).add(handler);
+      },
+      removeEventListener(type, handler) {
+        const listeners = this.__listeners.get(type);
+        if (listeners) listeners.delete(handler);
+      },
+      send(data) {
+        if (this.readyState !== w.WebSocket.OPEN) throw new Error("Socket.IO gateway socket is not open");
+        socket.emit("message", data);
+      },
+      close() {
+        if (this.readyState === w.WebSocket.CLOSED) return;
+        this.readyState = w.WebSocket.CLOSING;
+        socket.disconnect();
+      },
+      start() {
+        socket.connect();
+      },
+    };
+    socket.on("connect", () => {
+      adapter.readyState = w.WebSocket.OPEN;
+      emitGatewaySocketEvent(adapter, "open", { type: "open" });
+    });
+    socket.on("message", (data) => {
+      emitGatewaySocketEvent(adapter, "message", { data });
+    });
+    socket.on("disconnect", (reason) => {
+      adapter.readyState = w.WebSocket.CLOSED;
+      emitGatewaySocketEvent(adapter, "close", { code: 1006, reason: String(reason || ""), type: "close" });
+    });
+    socket.on("connect_error", (error) => {
+      emitGatewaySocketEvent(adapter, "error", {
+        error,
+        message: error instanceof Error ? error.message : String(error || ""),
+        type: "error",
+      });
+    });
+    return adapter;
+  }
+
+  function createRawGatewayWebSocket() {
+    return new WebSocket(gatewayWebSocketUrl());
+  }
+
+  function openGatewaySocket() {
+    if (!shouldPreferSocketIoTransport()) return Promise.resolve(createRawGatewayWebSocket());
+    return loadSocketIoClientScript()
+      .then((ioFactory) => createSocketIoGatewaySocket(ioFactory))
+      .catch((error) => {
+        clientDiagnostic("socketio-client-fallback", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return createRawGatewayWebSocket();
+      });
   }
 
   function forceGatewayLoginOnNextBoot() {
@@ -459,6 +586,8 @@
   let ws = null;
   let wsReady = false;
   const wsReadyWaiters = new Set();
+  let gatewaySocketOpening = false;
+  let socketIoClientScriptPromise = null;
   let reconnectTimer = null;
   let reconnectDelay = 500;
   const MOBILE_WS_RESUME_RECONNECT_AFTER_MS = 5000;
@@ -4605,17 +4734,27 @@
   /** 建立到 gateway 的 WebSocket，接收 app-server/业务广播事件。 */
   function connect() {
     if (!cfg.gatewayWsUrl || !("WebSocket" in w)) return;
+    if (gatewaySocketOpening) return;
     if (ws && (ws.readyState === w.WebSocket.OPEN || ws.readyState === w.WebSocket.CONNECTING)) return;
+    gatewaySocketOpening = true;
     wsReady = false;
     let socket = null;
     clientDiagnostic("ws-connect-start", {
       wsReady,
       wsState: websocketStateName(ws),
     });
-    try {
-      socket = new WebSocket(gatewayWebSocketUrl());
+    openGatewaySocket().then((openedSocket) => {
+      gatewaySocketOpening = false;
+      socket = openedSocket;
       ws = socket;
-    } catch (error) {
+      clientDiagnostic("ws-transport-selected", {
+        transport: socket && socket.transport ? socket.transport : "websocket",
+        wsState: websocketStateName(socket),
+      });
+      installGatewaySocketEventHandlers(socket);
+      if (typeof socket.start === "function") socket.start();
+    }).catch((error) => {
+      gatewaySocketOpening = false;
       console.warn("[codex-web] failed to open gateway socket", error);
       clientDiagnostic("ws-connect-failed", {
         error: error instanceof Error ? error.message : String(error),
@@ -4623,9 +4762,10 @@
         wsState: websocketStateName(socket),
       });
       scheduleReconnect();
-      return;
-    }
+    });
+  }
 
+  function installGatewaySocketEventHandlers(socket) {
     socket.addEventListener("open", () => {
       // hello 会把本页面 clientId 注册到 gateway，后续审批/fetch 响应才能定向回来。
       reconnectDelay = 500;

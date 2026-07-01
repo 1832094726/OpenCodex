@@ -42,11 +42,11 @@ The transport layer is also still too hand-rolled. Raw `ws` works, but OpenCodex
 
 ## Mature Transport Direction
 
-Preferred direction: run Socket.IO beside the existing `/ws` endpoint first, then migrate browser clients once parity is proven.
+Preferred direction: use Socket.IO as the browser default transport while keeping the existing `/ws` endpoint as a compatibility fallback.
 
 - Socket.IO handles connection lifecycle, ping/pong, reconnect, rooms, event acks, and connection state recovery.
 - OpenCodex keeps the Codex-specific protocol: `threadSeq`, memory snapshot watermarks, app-host MessagePort relay, and sanitized diagnostics.
-- Raw `/ws` remains as a compatibility fallback until the browser transport adapter proves stable on desktop and phone.
+- Raw `/ws` remains as a compatibility fallback when the Socket.IO client script or handshake fails.
 
 ### Why Not CRDT or Local-first DB Here
 
@@ -56,10 +56,11 @@ Yjs, Automerge, Replicache, ElectricSQL, and PowerSync are mature, but they expe
 
 1. Add Socket.IO server dependency and mount it on the same HTTP server.
 2. Normalize raw WS sockets and Socket.IO sockets behind a small JSON transport adapter.
-3. Keep existing message payloads unchanged: `hello`, `ipc-invoke`, `app-host-connect`, `app-host-port-message`, `opencodex:fast-sync-snapshot-ack`, and diagnostics.
-4. Use Socket.IO rooms for `clientId` and eventually `threadId`.
-5. Enable connection state recovery so short mobile disconnects can receive missed packets from Socket.IO before falling back to OpenCodex `threadSeq` replay.
-6. Keep OpenCodex replay/snapshot repair as the authoritative semantic fallback, because Socket.IO packet recovery cannot reconstruct official state after retention gaps or process restarts.
+3. Load `/socket.io/socket.io.js` in the browser and prefer Socket.IO for gateway messages.
+4. Keep existing message payloads unchanged: `hello`, `ipc-invoke`, `app-host-connect`, `app-host-port-message`, `opencodex:fast-sync-snapshot-ack`, and diagnostics.
+5. Use Socket.IO rooms for `clientId` and eventually `threadId`.
+6. Enable connection state recovery so short mobile disconnects can receive missed packets from Socket.IO before falling back to OpenCodex `threadSeq` replay.
+7. Keep OpenCodex replay/snapshot repair as the authoritative semantic fallback, because Socket.IO packet recovery cannot reconstruct official state after retention gaps or process restarts.
 
 ## Target Protocol
 
