@@ -176,6 +176,11 @@ function ensureThreadState(state, threadId) {
       lastThreadReplayQueued: 0,
       lastThreadReplaySent: 0,
       lastTurnId: "",
+      lastNudgeAtMs: 0,
+      lastNudgeExcludedClientId: "",
+      lastNudgeReason: "",
+      lastNudgeSent: 0,
+      nudgeCount: 0,
       portClientIdByPortId: new Map(),
       portLastSeenAtMs: new Map(),
       sessionId: "",
@@ -300,6 +305,19 @@ function recordAppHostThreadReplay(state, details = {}) {
   return appHostThreadStateSnapshot(state, threadId);
 }
 
+function recordAppHostThreadNudge(state, details = {}) {
+  const threadId = typeof details.threadId === "string" ? details.threadId : "";
+  if (!state || !threadId) return null;
+  const nowMs = Date.now();
+  const thread = ensureThreadState(state, threadId);
+  thread.nudgeCount += 1;
+  thread.lastNudgeAtMs = nowMs;
+  thread.lastNudgeExcludedClientId = typeof details.excludedClientId === "string" ? details.excludedClientId : "";
+  thread.lastNudgeReason = typeof details.reason === "string" ? details.reason : "";
+  thread.lastNudgeSent = Math.max(0, Number(details.sent) || 0);
+  return appHostThreadStateSnapshot(state, threadId);
+}
+
 function appHostThreadStateSnapshot(state, threadId) {
   if (!state || !threadId || !state.threadStatesById) return null;
   const thread = state.threadStatesById.get(threadId);
@@ -317,6 +335,10 @@ function appHostThreadStateSnapshot(state, threadId) {
     lastDirection: thread.lastDirection,
     lastFrameAtMs: thread.lastFrameAtMs,
     lastMethod: thread.lastMethod,
+    lastNudgeAtMs: thread.lastNudgeAtMs,
+    lastNudgeExcludedClientId: thread.lastNudgeExcludedClientId,
+    lastNudgeReason: thread.lastNudgeReason,
+    lastNudgeSent: thread.lastNudgeSent,
     lastRequestId: thread.lastRequestId,
     lastThreadReplayAtMs: thread.lastThreadReplayAtMs,
     lastThreadReplayQueued: thread.lastThreadReplayQueued,
@@ -326,9 +348,29 @@ function appHostThreadStateSnapshot(state, threadId) {
     portIds: Array.from(thread.portLastSeenAtMs.keys()),
     sessionId: thread.sessionId,
     threadId: thread.threadId,
+    nudgeCount: thread.nudgeCount,
     threadReplayCount: thread.threadReplayCount,
     upstreamFrameCount: thread.upstreamFrameCount,
   };
+}
+
+function listAppHostThreadStateSnapshots(state, options = {}) {
+  if (!state || !state.threadStatesById) return { threads: [] };
+  const threadId = typeof options.threadId === "string" ? options.threadId : "";
+  const limit = Math.max(1, Math.min(500, Number(options.limit) || 100));
+  const snapshots = [];
+  // 诊断列表只返回已脱敏的线程摘要，避免把消息正文暴露给调试接口。
+  if (threadId) {
+    const snapshot = appHostThreadStateSnapshot(state, threadId);
+    if (snapshot) snapshots.push(snapshot);
+  } else {
+    for (const id of state.threadStatesById.keys()) {
+      const snapshot = appHostThreadStateSnapshot(state, id);
+      if (snapshot) snapshots.push(snapshot);
+    }
+  }
+  snapshots.sort((a, b) => Number(b.lastFrameAtMs || 0) - Number(a.lastFrameAtMs || 0));
+  return { threads: snapshots.slice(0, limit) };
 }
 
 function observeAppHostFrame(context = {}) {
@@ -385,8 +427,10 @@ module.exports = {
   appHostStateContext,
   appHostThreadStateSnapshot,
   createAppHostFrameState,
+  listAppHostThreadStateSnapshots,
   markAppHostClientInactive,
   observeAppHostFrame,
+  recordAppHostThreadNudge,
   recordAppHostThreadReplay,
   rememberAppHostThreadPort,
   summarizeAppHostFrame,

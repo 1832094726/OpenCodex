@@ -9,6 +9,7 @@ const {
   createAppHostFrameState,
   markAppHostClientInactive,
   observeAppHostFrame,
+  recordAppHostThreadNudge,
   recordAppHostThreadReplay,
   rememberAppHostThreadPort,
   summarizeAppHostFrame,
@@ -160,6 +161,52 @@ test("thread state records connect and replay diagnostics per thread", () => {
   assert.equal(missing, null);
 });
 
+test("thread state records snapshot nudge diagnostics", () => {
+  const state = createAppHostFrameState({ maxEntries: 20 });
+
+  rememberAppHostThreadPort(state, {
+    clientId: "client-nudge-a",
+    portId: "port-nudge-a",
+    threadId: "thread-nudge",
+  });
+  recordAppHostThreadNudge(state, {
+    excludedClientId: "client-nudge-source",
+    reason: "thread-detail-snapshot",
+    sent: 1,
+    threadId: "thread-nudge",
+  });
+
+  const snapshot = appHostThreadStateSnapshot(state, "thread-nudge");
+  assert.equal(snapshot.nudgeCount, 1);
+  assert.equal(snapshot.lastNudgeReason, "thread-detail-snapshot");
+  assert.equal(snapshot.lastNudgeSent, 1);
+  assert.equal(snapshot.lastNudgeExcludedClientId, "client-nudge-source");
+});
+
+test("thread state can list sanitized thread snapshots", () => {
+  const state = createAppHostFrameState({ maxEntries: 20 });
+
+  rememberAppHostThreadPort(state, {
+    clientId: "client-list-a",
+    portId: "port-list-a",
+    threadId: "thread-list-a",
+  });
+  rememberAppHostThreadPort(state, {
+    clientId: "client-list-b",
+    portId: "port-list-b",
+    threadId: "thread-list-b",
+  });
+
+  const { listAppHostThreadStateSnapshots } = require("../runtime/ipc/app-host-frame-observer.cjs");
+  const all = listAppHostThreadStateSnapshots(state, { limit: 5 });
+  const filtered = listAppHostThreadStateSnapshots(state, { threadId: "thread-list-b" });
+
+  assert.equal(all.threads.length, 2);
+  assert.equal(filtered.threads.length, 1);
+  assert.equal(filtered.threads[0].threadId, "thread-list-b");
+  assert.equal(filtered.threads[0].activeClientCount, 1);
+});
+
 test("thread state keeps historical clients while tracking active participants", () => {
   const state = createAppHostFrameState({ maxEntries: 20 });
 
@@ -233,6 +280,7 @@ test("ws hub can target active clients for a single app-host thread", () => {
   // 多端同步应尽量只发给正在看同一 thread 的活跃客户端，避免无关页面收到刷新提示。
   assert.match(wsHubSource, /appHostThreadStateSnapshot/);
   assert.match(wsHubSource, /function sendToThread/);
+  assert.match(wsHubSource, /function snapshotThreads/);
   assert.match(wsHubSource, /activeClientIds/);
-  assert.match(wsHubSource, /return \{ broadcast, broadcastExcept, clients, closeAllAppHostRelays, hasClient, sendTo, sendToThread \}/);
+  assert.match(wsHubSource, /return \{ broadcast, broadcastExcept, clients, closeAllAppHostRelays, hasClient, sendTo, sendToThread, snapshotThreads \}/);
 });

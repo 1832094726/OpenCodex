@@ -1625,6 +1625,50 @@ test("request handler supports an explicit mobile traffic query for desktop brow
   assert.equal(calls[1].mobileTrafficMode, false);
 });
 
+test("request handler exposes app-host thread diagnostics without message bodies", async () => {
+  const { createRequestHandler } = require("../runtime/server.cjs");
+  const handler = createRequestHandler({
+    getWsHub: () => ({
+      snapshotThreads: (options) => ({
+        ok: true,
+        options,
+        threads: [
+          {
+            activeClientCount: 1,
+            frameCount: 3,
+            lastMethod: "thread/read",
+            nudgeCount: 1,
+            threadId: "thread-diag",
+          },
+        ],
+      }),
+    }),
+    localFiles: {},
+    mobileApi: {},
+    pickedFiles: {},
+    staticAssets: {
+      isAppShellRoute: () => false,
+      isPublicStaticPath: () => false,
+      staticFile: () => null,
+    },
+  });
+
+  const response = await collectResponse(handler, {
+    headers: { host: "127.0.0.1:8080" },
+    method: "GET",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/api/diagnostics/threads?threadId=thread-diag&limit=3",
+  });
+
+  const body = JSON.parse(response.body);
+  assert.equal(response.statusCode, 200);
+  assert.equal(body.threads[0].threadId, "thread-diag");
+  assert.equal(body.threads[0].activeClientCount, 1);
+  assert.equal(body.options.threadId, "thread-diag");
+  assert.equal(body.options.limit, "3");
+  assert.equal(JSON.stringify(body).includes("prompt"), false);
+});
+
 test("request handler no longer serves a standalone mobile-lite shell at /m", async () => {
   const { createRequestHandler } = require("../runtime/server.cjs");
   const staticAssets = createStaticAssetService({

@@ -13,8 +13,10 @@ const {
   appHostStateContext,
   appHostThreadStateSnapshot,
   createAppHostFrameState,
+  listAppHostThreadStateSnapshots,
   markAppHostClientInactive,
   observeAppHostFrame,
+  recordAppHostThreadNudge,
   recordAppHostThreadReplay,
   rememberAppHostThreadPort,
 } = require("./app-host-frame-observer.cjs");
@@ -1042,6 +1044,12 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       if (!targetClientId || targetClientId === excludedClientId) continue;
       if (sendTo(targetClientId, payload, { ...options, route: "send_to_thread" })) sent += 1;
     }
+    recordAppHostThreadNudge(appHostFrameState, {
+      excludedClientId,
+      reason: payload && typeof payload.reason === "string" ? payload.reason : "",
+      sent,
+      threadId,
+    });
     if (DEBUG_LOGS && !options.suppressDiagnostic) {
       // thread 定向同步只投给同会话页面，避免其它客户端收到无关刷新提示。
       diagnosticLog("ws-hub", "send_to_thread", {
@@ -1053,6 +1061,13 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       });
     }
     return sent;
+  }
+
+  function snapshotThreads(options = {}) {
+    return {
+      ok: true,
+      ...listAppHostThreadStateSnapshots(appHostFrameState, options),
+    };
   }
 
   function hasClient(clientId) {
@@ -1566,7 +1581,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     });
   });
 
-  return { broadcast, broadcastExcept, clients, closeAllAppHostRelays, hasClient, sendTo, sendToThread };
+  return { broadcast, broadcastExcept, clients, closeAllAppHostRelays, hasClient, sendTo, sendToThread, snapshotThreads };
 }
 
 module.exports = { createWsHub };

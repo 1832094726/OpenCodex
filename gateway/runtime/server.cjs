@@ -307,7 +307,7 @@ async function listen(server) {
   });
 }
 
-function createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets }) {
+function createRequestHandler({ getWsHub = () => null, localFiles, mobileApi, pickedFiles, staticAssets }) {
   /**
    * 路由顺序很关键：
    * 1. 认证和 launcher 探活先处理。
@@ -421,6 +421,18 @@ function createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets
         }),
         { "cache-control": "no-store" }
       );
+    }
+
+    if (pathname === "/api/diagnostics/threads" && req.method === "GET") {
+      const hub = typeof getWsHub === "function" ? getWsHub() : null;
+      // 这里暴露的是 app-host 中间层状态摘要，用来定位多客户端同步和补偿刷新问题。
+      const snapshot = hub && typeof hub.snapshotThreads === "function"
+        ? hub.snapshotThreads({
+            limit: url.searchParams.get("limit") || 100,
+            threadId: url.searchParams.get("threadId") || "",
+          })
+        : { ok: true, threads: [] };
+      return sendJson(res, 200, snapshot, { "cache-control": "no-store" });
     }
 
     if (pathname === "/api/fast-sync/snapshot" && req.method === "GET") {
@@ -608,7 +620,8 @@ async function createGateway() {
         })
       ),
   });
-  const requestHandler = createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets });
+  let webSocketHub = null;
+  const requestHandler = createRequestHandler({ getWsHub: () => webSocketHub, localFiles, mobileApi, pickedFiles, staticAssets });
   const server = http.createServer((req, res) => {
     requestHandler(req, res).catch((error) => {
       diagnosticError("gateway", "request_failed", {
@@ -645,7 +658,7 @@ async function createGateway() {
     );
   }
 
-  const webSocketHub = createWsHub(server, {
+  webSocketHub = createWsHub(server, {
     createAppHostRelay: createOfficialAppHostRelay,
     handleNotificationEvent: handleOfficialNotificationEvent,
     isAuthed,
