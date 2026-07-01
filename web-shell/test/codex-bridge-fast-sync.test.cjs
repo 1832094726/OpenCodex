@@ -83,6 +83,15 @@ test("thread detail sync nudge refreshes only the matching route", () => {
   assert.match(syncBody, /refreshCurrentThreadRouteFromSnapshotNudge\(message\)/);
 });
 
+test("thread detail nudge skips hard reload when app-host replay was delivered", () => {
+  const source = readPolyfillSource();
+  const refreshBody = sourceBetween(source, "function refreshCurrentThreadRouteFromSnapshotNudge", "function scheduleCrossClientSyncRefresh");
+
+  assert.match(refreshBody, /Number\(message && message\.replaySent \|\| 0\) > 0/);
+  assert.match(refreshBody, /thread-detail-snapshot-replay-applied/);
+  assert.match(refreshBody, /return true/);
+});
+
 test("fast sync snapshot reads have short miss timeouts", () => {
   const source = readPolyfillSource();
   // 弱网下冷缓存 miss 不能长期卡住真实 IPC，浏览器本地和 gateway 快照读取都要有短超时。

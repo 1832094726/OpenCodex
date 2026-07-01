@@ -1065,11 +1065,24 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   function sendToThread(threadId, payload, options = {}) {
     const snapshot = appHostThreadStateSnapshot(appHostFrameState, threadId);
     const activeClientIds = snapshot && Array.isArray(snapshot.activeClientIds) ? snapshot.activeClientIds : [];
+    const activeClientPorts = snapshot && Array.isArray(snapshot.activeClientPorts) ? snapshot.activeClientPorts : [];
     const excludedClientId = options.excludedClientId || "";
+    const shouldReplayBeforeNudge = payload && payload.reason === "thread-detail-snapshot";
     let sent = 0;
     for (const targetClientId of activeClientIds) {
       if (!targetClientId || targetClientId === excludedClientId) continue;
-      if (sendTo(targetClientId, payload, { ...options, route: "send_to_thread" })) sent += 1;
+      let replaySent = 0;
+      if (shouldReplayBeforeNudge) {
+        const socket = clientsById.get(targetClientId);
+        const clientPorts = activeClientPorts.find((entry) => entry && entry.clientId === targetClientId);
+        const portIds = clientPorts && Array.isArray(clientPorts.portIds) ? clientPorts.portIds : [];
+        for (const portId of portIds) {
+          // nudge 前先把 gateway 已缓存的同 thread app-host 增量补给目标端口，浏览器按 threadSeq 自行去重。
+          replaySent += flushAppHostThreadReplay(socket, targetClientId, portId, threadId);
+        }
+      }
+      const targetPayload = shouldReplayBeforeNudge ? { ...payload, replaySent } : payload;
+      if (sendTo(targetClientId, targetPayload, { ...options, route: "send_to_thread" })) sent += 1;
     }
     recordAppHostThreadNudge(appHostFrameState, {
       excludedClientId,

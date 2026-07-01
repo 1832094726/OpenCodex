@@ -308,6 +308,7 @@ test("thread state keeps historical clients while tracking active participants",
   assert.equal(snapshot.portCount, 2);
   assert.equal(snapshot.activePortCount, 1);
   assert.deepEqual(snapshot.activePortIds, ["port-active-b"]);
+  assert.deepEqual(snapshot.activeClientPorts, [{ clientId: "client-active-b", portIds: ["port-active-b"] }]);
 });
 
 test("app-host downstream replay protocol is wired on gateway and browser sides", () => {
@@ -475,6 +476,80 @@ test("ws hub records fast sync snapshot acknowledgements per app-host thread", a
     assert.equal(snapshot.threads[0].lastSnapshotAckSource, "gateway-memory");
   } finally {
     if (ws) ws.close();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("ws hub replays cached app-host thread frames before snapshot nudge reload", async () => {
+  const { createWsHub } = require("../runtime/ipc/ws-hub.cjs");
+  const server = http.createServer((req, res) => {
+    res.writeHead(404);
+    res.end();
+  });
+  const relays = [];
+  const hub = createWsHub(server, {
+    createAppHostRelay(details) {
+      const relay = {
+        clientId: details.clientId,
+        close() {},
+        onMessage: details.onMessage,
+        portId: details.portId,
+        postMessage() {},
+      };
+      relays.push(relay);
+      return relay;
+    },
+    isAuthed: () => true,
+  });
+  const address = await listen(server);
+  const wsUrl = `ws://127.0.0.1:${address.port}/ws`;
+  let wsA = null;
+  let wsB = null;
+
+  try {
+    wsA = await connectClient(wsUrl, "client-nudge-source");
+    wsB = await connectClient(wsUrl, "client-nudge-target");
+    wsA.send(JSON.stringify({
+      clientId: "client-nudge-source",
+      portId: "port-nudge-source",
+      threadId: "thread-nudge-replay",
+      type: "app-host-connect",
+    }));
+    wsB.send(JSON.stringify({
+      clientId: "client-nudge-target",
+      portId: "port-nudge-target",
+      threadId: "thread-nudge-replay",
+      type: "app-host-connect",
+    }));
+    await wsMessage(wsA, (message) => message.type === "app-host-port-connected");
+    await wsMessage(wsB, (message) => message.type === "app-host-port-connected");
+
+    const relayA = relays.find((relay) => relay.clientId === "client-nudge-source");
+    assert.ok(relayA);
+    relayA.onMessage(JSON.stringify({ id: "rpc-nudge-replay", method: "thread/read", result: { threadId: "thread-nudge-replay", turnId: "turn-new" } }));
+    await wsMessage(wsA, (message) => message.type === "app-host-port-message" && message.threadSeq === 1);
+
+    const replayPromise = wsMessage(wsB, (message) => message.type === "app-host-port-message" && message.replay === "thread");
+    const nudgePromise = wsMessage(wsB, (message) => message.type === "opencodex:sync-nudge");
+    hub.sendToThread(
+      "thread-nudge-replay",
+      {
+        type: "opencodex:sync-nudge",
+        reason: "thread-detail-snapshot",
+        threadId: "thread-nudge-replay",
+      },
+      { excludedClientId: "client-nudge-source", suppressDiagnostic: true }
+    );
+
+    const replay = await replayPromise;
+    const nudge = await nudgePromise;
+
+    assert.equal(replay.threadSeq, 1);
+    assert.match(replay.data, /turn-new/);
+    assert.equal(nudge.replaySent, 1);
+  } finally {
+    if (wsA) wsA.close();
+    if (wsB) wsB.close();
     await new Promise((resolve) => server.close(resolve));
   }
 });

@@ -352,9 +352,18 @@ function appHostThreadStateSnapshot(state, threadId) {
   if (!state || !threadId || !state.threadStatesById) return null;
   const thread = state.threadStatesById.get(threadId);
   if (!thread) return null;
+  const activeClientPorts = [];
+  for (const clientId of thread.activeClientIds.keys()) {
+    const portIds = [];
+    for (const portId of thread.activePortIds.keys()) {
+      if (thread.portClientIdByPortId.get(portId) === clientId) portIds.push(portId);
+    }
+    activeClientPorts.push({ clientId, portIds });
+  }
   return {
     activeClientCount: thread.activeClientIds.size,
     activeClientIds: Array.from(thread.activeClientIds.keys()),
+    activeClientPorts,
     activePortCount: thread.activePortIds.size,
     activePortIds: Array.from(thread.activePortIds.keys()),
     clientCount: thread.clientLastSeenAtMs.size,

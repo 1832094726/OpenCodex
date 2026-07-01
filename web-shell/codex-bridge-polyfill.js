@@ -2257,6 +2257,13 @@
   function refreshCurrentThreadRouteFromSnapshotNudge(message) {
     const route = currentRestorableRoute();
     if (!route || document.visibilityState !== "visible" || hasEditableFocus()) return false;
+    if (Number(message && message.replaySent || 0) > 0) {
+      clientDiagnostic("thread-detail-snapshot-replay-applied", {
+        replaySent: Number(message && message.replaySent || 0),
+        threadId: shortThreadId((message && message.threadId) || ""),
+      });
+      return true;
+    }
     clientDiagnostic("thread-detail-snapshot-route-refresh", {
       reason: message && message.reason ? String(message.reason) : "",
       threadId: shortThreadId((message && message.threadId) || ""),
