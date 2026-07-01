@@ -43,10 +43,34 @@
 ### 推荐演进顺序
 
 1. 继续用 Socket.IO 做默认传输，补齐 transport recovery 诊断。
-2. 把 OpenCodex 当前的 `threadSeq + queue + cursor + gap` 抽成一个小的 `ThreadEventLog` 接口。
-3. 先提供内存实现，后续再评估替换为 JetStream、SQLite event log 或其它 stream store。
+2. `threadSeq + queue + cursor + gap` 已抽成 `ThreadEventLog` 接口，gateway 默认使用内存实现。
+3. `ws-hub` 支持注入替换 `threadEventLog`，后续可以在不改 Codex 业务适配层的情况下接入 JetStream、SQLite event log 或其它 stream store。
 4. 把 snapshot repair 决策抽成状态机，避免浏览器和 gateway 各自散落判断。
 5. 如果未来把 thread 可见状态落成本地数据库，再评估 Replicache/Electric 这类 local-first sync。
+
+## ThreadEventLog 边界
+
+`ThreadEventLog` 是 OpenCodex 目前的同步抽象层，不绑定具体存储。它只表达通用事件流语义：
+
+```js
+const log = createThreadEventLog({ maxEntries, ttlMs });
+log.append(threadId, event);
+log.readAfter(threadId, afterSeq);
+log.rememberCursor(clientId, portId, threadId, seq);
+log.cursor(clientId, portId, threadId);
+log.ackSnapshot(clientId, threadId, seq, activePortIds);
+log.stats(threadId);
+```
+
+`ws-hub` 只依赖这组方法：
+
+- `append`：把官方 app-host 下行帧变成 thread 事件，并拿到新的 `threadSeq`。
+- `readAfter`：客户端重连时按 `lastThreadSeq` 读取缺失增量，同时返回 `gap`。
+- `rememberCursor` / `cursor`：记录每个 `clientId + portId + threadId` 的投递水位。
+- `ackSnapshot`：客户端消费全量快照后，把对应 active ports 推进到快照覆盖的 `threadSeq`。
+- `stats`：给诊断接口提供 retained queue 和 latest seq 水位。
+
+当前内存实现适合单机调试和短断线修复；如果要覆盖进程重启、多机部署或更长弱网窗口，可以保持这组接口不变，把实现替换为持久 event stream。
 
 ## 当前传输路径
 
@@ -198,7 +222,7 @@ gateway 收到 ack 后：
 - 浏览器默认优先 Socket.IO client，失败回退 raw `/ws`。
 - Socket.IO adapter 复用既有 JSON 协议和 `ws-hub` handler。
 - Socket.IO 客户端加入 `client:<clientId>` 和 `thread:<threadId>` room；非 replay thread nudge 通过 room 定向投递，同步保留 raw `/ws` fallback。
-- app-host thread replay queue 与 `threadSeq`。
+- app-host thread replay queue 与 `threadSeq` 已收敛到可替换的 `ThreadEventLog` 接口。
 - 浏览器 `sessionStorage` 保存每个 thread 的 `lastThreadSeq`。
 - memory snapshot 携带 `threadSeq`。
 - 浏览器 snapshot ack 携带 `threadSeq`。
@@ -210,7 +234,7 @@ gateway 收到 ack 后：
 1. 补齐 Socket.IO recovery 与 OpenCodex repair 的关联诊断：`missedByTransport`、`repairedByThreadReplay`、`repairedBySnapshot`。
 2. 增加浏览器端真实集成测试：Socket.IO 主路径、脚本加载失败回退、握手失败回退。
 3. 在诊断面板展示 per-client watermarks，而不是只在 JSON API 里可见。
-4. 评估更长窗口的持久 event log：SQLite event log、JetStream 或其它 stream store。
+4. 基于 `ThreadEventLog` 接口实现一个持久 adapter：优先评估 SQLite event log，复杂部署再评估 JetStream。
 
 ## 可执行验证
 

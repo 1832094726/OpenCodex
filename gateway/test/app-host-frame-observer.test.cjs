@@ -494,6 +494,129 @@ test("ws hub replays only app-host thread frames after the client thread cursor"
   }
 });
 
+test("ws hub can use an injected thread event log for app-host thread replay", async () => {
+  const { createWsHub } = require("../runtime/ipc/ws-hub.cjs");
+  const server = http.createServer((req, res) => {
+    res.writeHead(404);
+    res.end();
+  });
+  const calls = [];
+  const injectedThreadEventLog = {
+    ackSnapshot() {
+      calls.push(["ackSnapshot", ...arguments]);
+      return 0;
+    },
+    append(threadId, event) {
+      calls.push(["append", threadId, event.sourceClientId, event.sourcePortId]);
+      // 这里故意返回非 1 起步的 seq，证明 gateway 使用的是可替换 event log，而不是内置队列。
+      return { ...event, atMs: Date.now(), threadId, threadSeq: 42 };
+    },
+    cursor(clientId, portId, threadId) {
+      calls.push(["cursor", clientId, portId, threadId]);
+      return 41;
+    },
+    readAfter(threadId, afterSeq, options) {
+      calls.push(["readAfter", threadId, afterSeq, options.sourceClientId, options.sourcePortId]);
+      if (Number(afterSeq) !== 41) {
+        return {
+          cachedThreadFrameCount: 0,
+          events: [],
+          gap: false,
+          latestKnownThreadSeq: 0,
+          latestThreadFrameAtMs: 0,
+          latestThreadSeq: 0,
+          oldestThreadSeq: 0,
+        };
+      }
+      return {
+        cachedThreadFrameCount: 1,
+        events: [
+          {
+            atMs: Date.now(),
+            data: JSON.stringify({ id: "rpc-injected-replay", method: "thread/read", result: { threadId, turnId: "turn-injected" } }),
+            threadId,
+            threadSeq: 99,
+          },
+        ],
+        gap: false,
+        latestKnownThreadSeq: 99,
+        latestThreadFrameAtMs: Date.now(),
+        latestThreadSeq: 99,
+        oldestThreadSeq: 99,
+      };
+    },
+    rememberCursor(clientId, portId, threadId, seq) {
+      calls.push(["rememberCursor", clientId, portId, threadId, seq]);
+      return seq;
+    },
+    stats() {
+      return {
+        cachedThreadFrameCount: 0,
+        latestKnownThreadSeq: 0,
+        latestThreadFrameAtMs: 0,
+        latestThreadSeq: 0,
+        oldestThreadSeq: 0,
+      };
+    },
+  };
+  const relays = [];
+  createWsHub(server, {
+    createAppHostRelay(details) {
+      const relay = {
+        clientId: details.clientId,
+        close() {},
+        onMessage: details.onMessage,
+        portId: details.portId,
+        postMessage() {},
+      };
+      relays.push(relay);
+      return relay;
+    },
+    isAuthed: () => true,
+    threadEventLog: injectedThreadEventLog,
+  });
+  const address = await listen(server);
+  const wsUrl = `ws://127.0.0.1:${address.port}/ws`;
+  let wsA = null;
+  let wsB = null;
+
+  try {
+    wsA = await connectClient(wsUrl, "client-injected-log-a");
+    wsA.send(JSON.stringify({
+      clientId: "client-injected-log-a",
+      portId: "port-injected-log-a",
+      threadId: "thread-injected-log",
+      type: "app-host-connect",
+    }));
+    await wsMessage(wsA, (message) => message.type === "app-host-port-connected");
+    const relayA = relays.find((relay) => relay.clientId === "client-injected-log-a");
+    assert.ok(relayA);
+
+    relayA.onMessage(JSON.stringify({ id: "rpc-injected-live", method: "thread/read", result: { threadId: "thread-injected-log", turnId: "turn-live" } }));
+    const live = await wsMessage(wsA, (message) => message.type === "app-host-port-message" && message.threadId === "thread-injected-log");
+    assert.equal(live.threadSeq, 42);
+
+    wsB = await connectClient(wsUrl, "client-injected-log-b");
+    wsB.send(JSON.stringify({
+      clientId: "client-injected-log-b",
+      lastThreadSeq: 41,
+      portId: "port-injected-log-b",
+      threadId: "thread-injected-log",
+      type: "app-host-connect",
+    }));
+    const replay = await wsMessage(wsB, (message) => message.type === "app-host-port-message" && message.replay === "thread");
+    assert.equal(replay.threadSeq, 99);
+    assert.match(replay.data, /turn-injected/);
+
+    assert.ok(calls.some((call) => call[0] === "append" && call[1] === "thread-injected-log"));
+    assert.ok(calls.some((call) => call[0] === "readAfter" && call[1] === "thread-injected-log" && call[2] === 41));
+  } finally {
+    if (wsA) wsA.close();
+    if (wsB) wsB.close();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("ws hub marks app-host thread replay gaps when a client cursor is older than the retained queue", async () => {
   const wsHubPath = path.join(repoRoot, "gateway", "runtime", "ipc", "ws-hub.cjs");
   const oldMaxMessages = process.env.OPENCODEX_APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES;

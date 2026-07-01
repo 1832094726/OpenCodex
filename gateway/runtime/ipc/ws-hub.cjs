@@ -121,7 +121,7 @@ function wsCompressionOptions() {
 
 // ws-hub 不理解官方 IPC 协议，只负责维护连接和按 clientId 投递 JSON 消息。
 /** 创建 WebSocket hub，负责浏览器连接管理和 gateway 事件分发。 */
-function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAuthed, invokeIpc }) {
+function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAuthed, invokeIpc, threadEventLog }) {
   if (!WebSocketServer) {
     throw new Error("The ws package is required for gateway websocket support.");
   }
@@ -147,7 +147,8 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   const pendingAppHostMessagesByRelayKey = new Map();
   const appHostDownstreamFramesByRelayKey = new Map();
   const appHostDownstreamSeqByRelayKey = new Map();
-  const appHostThreadEventLog = createThreadEventLog({
+  // threadEventLog 是同步抽象边界：默认用内存实现，测试或未来持久化 stream 可直接注入替换。
+  const appHostThreadEventLog = threadEventLog || createThreadEventLog({
     maxEntries: APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES,
     ttlMs: APP_HOST_DOWNSTREAM_REPLAY_TTL_MS,
   });

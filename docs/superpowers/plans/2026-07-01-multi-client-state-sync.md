@@ -195,7 +195,7 @@ rtk pnpm test
 - 修改：`gateway/runtime/ipc/ws-hub.cjs`
 - 修改：`docs/MULTI-CLIENT-STATE-SYNC.md`
 
-- [ ] **步骤 1：新增失败测试**
+- [x] **步骤 1：新增失败测试**
 
 测试一个内存 `ThreadEventLog` 需要覆盖：
 
@@ -205,7 +205,7 @@ rtk pnpm test
 - 为每个 `clientId + portId + threadId` 保存 cursor；
 - ack snapshot 后推进对应 client 的 cursor。
 
-- [ ] **步骤 2：实现内存 ThreadEventLog**
+- [x] **步骤 2：实现内存 ThreadEventLog**
 
 接口先按最小能力设计：
 
@@ -219,11 +219,12 @@ log.ackSnapshot(clientId, threadId, seq, activePortIds);
 log.stats(threadId);
 ```
 
-- [ ] **步骤 3：让 ws-hub 使用接口**
+- [x] **步骤 3：让 ws-hub 使用接口**
 
 把当前散落在 `appHostDownstreamFramesByThreadId`、`appHostDownstreamThreadSeqByThreadId`、`appHostThreadSeqByRelayKey` 的逻辑收拢到 `ThreadEventLog`。
+`ws-hub` 现在默认使用内存 `ThreadEventLog`，也支持通过 `threadEventLog` 注入替换实现，方便后续接入 JetStream、SQLite event log 或其它成熟 stream store。
 
-- [ ] **步骤 4：验证**
+- [x] **步骤 4：验证**
 
 ```bash
 rtk node --test gateway/test/thread-event-log.test.cjs
