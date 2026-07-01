@@ -9,6 +9,11 @@ const { diagnosticLog, diagnosticWarn, shortId } = require("../core/diagnostics.
 const { recordFlowEvent } = require("../core/flow-monitor.cjs");
 const { DEBUG_LOGS, RUNTIME_DIR, ensureDir } = require("../core/config.cjs");
 const { resolveOpenCodexI18n } = require("../../../shared/i18n/index.cjs");
+const {
+  appHostStateContext,
+  createAppHostFrameState,
+  observeAppHostFrame,
+} = require("./app-host-frame-observer.cjs");
 
 // 下面这些阈值只服务于 OPENCODEX_DEBUG_WS=1 的链路排障；默认运行不会采样慢 WS 发送。
 const WS_LARGE_MESSAGE_BYTES = Number(process.env.OPENCODEX_WS_LARGE_LOG_BYTES || 256 * 1024);
@@ -30,6 +35,8 @@ const ORPHAN_TARGET_RESPONSE_BUFFER_TTL_MS = Number(process.env.OPENCODEX_ORPHAN
 const ORPHAN_TARGET_RESPONSE_BUFFER_MAX_MESSAGES = Number(process.env.OPENCODEX_ORPHAN_TARGET_RESPONSE_BUFFER_MAX_MESSAGES || 100);
 const APP_HOST_MISSING_RELAY_BUFFER_TTL_MS = Number(process.env.OPENCODEX_APP_HOST_MISSING_RELAY_BUFFER_TTL_MS || 30 * 1000);
 const APP_HOST_MISSING_RELAY_BUFFER_MAX_MESSAGES = Number(process.env.OPENCODEX_APP_HOST_MISSING_RELAY_BUFFER_MAX_MESSAGES || 100);
+const APP_HOST_FRAME_OBSERVER_ENABLED = process.env.OPENCODEX_APP_HOST_FRAME_OBSERVER !== "0";
+const APP_HOST_FRAME_LOG_MODE = process.env.OPENCODEX_APP_HOST_FRAME_LOG || "routed";
 // 插件列表会随安装/启用即时变化，转发层不缓存 plugin/list，避免管理页显示旧状态。
 const APP_HOST_READ_ONLY_METHODS = new Set(["app/list", "mcpServerStatus/list"]);
 const appHostReadOnlyCache = new Map();
@@ -124,6 +131,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   const pendingTargetMessagesByClientId = new Map();
   const pendingOrphanTargetResponses = [];
   const pendingAppHostMessagesByRelayKey = new Map();
+  const appHostFrameState = createAppHostFrameState();
   let lastAuthRejectLogAtMs = 0;
   let suppressedAuthRejectCount = 0;
   const appHostTraffic = new Map();
@@ -143,6 +151,23 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
 
   function appHostRelayKey(clientId, portId) {
     return `${clientId || ""}\n${portId || ""}`;
+  }
+
+  function observeAppHostPortFrame(ws, direction, portId, data) {
+    if (!APP_HOST_FRAME_OBSERVER_ENABLED || typeof data !== "string") return null;
+    return observeAppHostFrame({
+      clientId: socketClientId(ws),
+      data,
+      direction,
+      flow: true,
+      log: APP_HOST_FRAME_LOG_MODE,
+      portId,
+      state: appHostFrameState,
+    });
+  }
+
+  function appHostContextFor(clientId, portId) {
+    return appHostStateContext(appHostFrameState, clientId, portId);
   }
 
   function flushAppHostTraffic(key) {
@@ -1033,7 +1058,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
         );
       },
       onMessage(data) {
-        // app-host RPC 是高频字符串流，只转发不逐条写日志，避免首屏日志刷屏和拖慢关键链路。
+        observeAppHostPortFrame(ws, "official-to-browser", portId, data);
         maybeHandleAppHostReadOnlyResponse(ws, portId, relay, data);
         safeSend(ws, { type: "app-host-port-message", portId, data }, { suppressDiagnostic: true });
       },
@@ -1103,7 +1128,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
           );
         },
         onMessage(data) {
-          // app-host RPC 是高频字符串流，只转发不逐条写日志，避免首屏日志刷屏和拖慢关键链路。
+          observeAppHostPortFrame(ws, "official-to-browser", portId, data);
           maybeHandleAppHostReadOnlyResponse(ws, portId, relay, data);
           safeSend(ws, { type: "app-host-port-message", portId, data }, { suppressDiagnostic: true });
         },
@@ -1161,19 +1186,30 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     }
     const relays = appHostRelaysForSocket(ws);
     let relay = relays.get(portId);
+    const frameSummary = observeAppHostPortFrame(ws, "browser-to-official", portId, data);
     if (!relay) {
       rememberPendingAppHostMessage(clientId, portId, data);
+      const stateContext = appHostContextFor(clientId, portId);
       recordFlowEvent({
         clientId,
         hint: "app-host relay 丢失，正在缓存消息并尝试重建通道",
         level: "warn",
+        method: frameSummary && frameSummary.raw ? frameSummary.raw.method : stateContext.method,
+        requestId: frameSummary && frameSummary.raw ? frameSummary.raw.requestId : stateContext.requestId,
         scope: "relay",
         stage: "relay_missing",
+        threadId: frameSummary && frameSummary.raw ? frameSummary.raw.threadId : stateContext.threadId,
+        turnId: frameSummary && frameSummary.raw ? frameSummary.raw.turnId : stateContext.turnId,
       });
       diagnosticWarn("ws-hub", "app_host_message_missing_relay", {
+        ...stateContext,
         clientId: shortId(clientId),
+        method: frameSummary && frameSummary.raw && frameSummary.raw.method ? frameSummary.raw.method : stateContext.method,
         portId: shortId(portId),
         queued: prunePendingAppHostMessages(clientId, portId).length,
+        requestId: frameSummary && frameSummary.raw && frameSummary.raw.requestId ? shortId(frameSummary.raw.requestId) : stateContext.requestId,
+        threadId: frameSummary && frameSummary.raw && frameSummary.raw.threadId ? shortId(frameSummary.raw.threadId) : stateContext.threadId,
+        turnId: frameSummary && frameSummary.raw && frameSummary.raw.turnId ? shortId(frameSummary.raw.turnId) : stateContext.turnId,
       });
       if (typeof createAppHostRelay !== "function") return true;
       try {
