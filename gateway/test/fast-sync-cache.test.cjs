@@ -131,14 +131,28 @@ test("memory snapshots keep thread detail out of disk cache", () => {
   const cache = createMemoryFastSyncCache({ maxEntries: 20, ttlMs: 60_000 });
   const detail = { turns: [{ id: "turn-1", message: "进程内可恢复内容" }] };
 
-  assert.equal(cache.writeSnapshot({ key: "detail-key", method: "thread/turns/list", value: detail }), true);
+  assert.equal(cache.writeSnapshot({ key: "detail-key", method: "thread/turns/list", threadId: "thread-memory", value: detail }), true);
   assert.equal(cache.writeSnapshot({ key: "list-key", method: "thread/list", value: { threads: [] } }), false);
   detail.turns[0].message = "mutated";
 
   const read = cache.readSnapshot({ key: "detail-key" });
   assert.equal(read.source, "gateway-memory");
   assert.deepEqual(read.value, { turns: [{ id: "turn-1", message: "进程内可恢复内容" }] });
+  assert.deepEqual(cache.readSnapshot({ method: "thread/turns/list", threadId: "thread-memory" })?.value, {
+    turns: [{ id: "turn-1", message: "进程内可恢复内容" }],
+  });
   assert.equal(cache.readSnapshot({ key: "list-key" }), null);
+});
+
+test("memory snapshots keep the latest thread detail key by thread id", () => {
+  const cache = createMemoryFastSyncCache({ maxEntries: 20, ttlMs: 60_000 });
+
+  // 同一个 thread 的后续详情快照应该成为中间层全量状态入口，旧请求 key 不再是唯一恢复路径。
+  assert.equal(cache.writeSnapshot({ key: "old-key", method: "thread/read", threadId: "thread-latest", value: { version: 1 } }), true);
+  assert.equal(cache.writeSnapshot({ key: "new-key", method: "thread/read", threadId: "thread-latest", value: { version: 2 } }), true);
+
+  assert.deepEqual(cache.readSnapshot({ method: "thread/read", threadId: "thread-latest" })?.value, { version: 2 });
+  assert.deepEqual(cache.readSnapshot({ key: "old-key" })?.value, { version: 1 });
 });
 
 test("redacts sensitive fields before writing snapshots", () => {

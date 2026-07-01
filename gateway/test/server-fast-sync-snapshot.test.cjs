@@ -19,8 +19,9 @@ test("fast-sync snapshot API can read by explicit snapshot key without rebuildin
 
   // gap nudge 已经携带写入端 key，服务端必须允许直接按 key 读，避免弱网重连时再依赖完整 args 形状。
   assert.match(handlerBody, /const explicitKey = url\.searchParams\.get\("key"\) \|\| ""/);
+  assert.match(handlerBody, /const threadId = url\.searchParams\.get\("threadId"\) \|\| ""/);
   assert.match(handlerBody, /let key = explicitKey/);
-  assert.match(handlerBody, /if \(!key\) \{/);
+  assert.match(handlerBody, /if \(!key && !threadId\) \{/);
   assert.match(handlerBody, /parseFastSyncSnapshotArgsJson\(argsJson\)/);
-  assert.match(handlerBody, /cache\.readSnapshot\(\{ key \}\)/);
+  assert.match(handlerBody, /cache\.readSnapshot\(\{ key, method, threadId \}\)/);
 });

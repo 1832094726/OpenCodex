@@ -1906,10 +1906,10 @@ function rememberFastSyncSnapshot(channel, _args, requestSummary, responseResult
   const key = requestSummary && typeof requestSummary.fastSyncSnapshotKey === "string" ? requestSummary.fastSyncSnapshotKey : "";
   if (!method || !key || !responseResult || responseResult.ok !== true) return;
   const responseValue = responseResult.value;
+  const threadId = flowThreadIdFromPayload(responseValue) || flowThreadIdFromPayload(requestSummary);
   // 会话详情只写进程内存，入口列表/配置等轻量读才允许落盘，避免把完整对话持久化到快照目录。
   const cache = isFastSyncCacheableMethod(method) ? fastSyncCache : memoryFastSyncCache;
-  if (!cache.writeSnapshot({ key, method, value: responseValue })) return;
-  const threadId = flowThreadIdFromPayload(responseValue) || flowThreadIdFromPayload(requestSummary);
+  if (!cache.writeSnapshot({ key, method, threadId, value: responseValue })) return;
   recordFlowEvent({
     clientId: context.clientId || "",
     hint: isFastSyncCacheableMethod(method) ? "已写入 gateway 快照" : "已写入 gateway 内存快照",

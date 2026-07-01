@@ -197,22 +197,43 @@ function createMemoryFastSyncCache(options = {}) {
   const ttlMs = normalizeTtlMs(options.ttlMs ?? process.env.OPENCODEX_FAST_SYNC_MEMORY_CACHE_TTL_MS, FALLBACK_TTL_MS);
   const maxEntries = Math.max(10, Number(options.maxEntries || process.env.OPENCODEX_FAST_SYNC_MEMORY_CACHE_MAX_ENTRIES) || 200);
   const snapshots = new Map();
+  const keyByMethodThreadId = new Map();
+
+  function methodThreadKey(method, threadId) {
+    return `${method || ""}\n${threadId || ""}`;
+  }
 
   function prune(nowMs = Date.now()) {
     for (const [key, entry] of snapshots) {
-      if (!entry || nowMs - entry.capturedAtMs > ttlMs) snapshots.delete(key);
+      if (!entry || nowMs - entry.capturedAtMs > ttlMs) {
+        snapshots.delete(key);
+        if (entry && entry.threadId) {
+          const indexKey = methodThreadKey(entry.method, entry.threadId);
+          if (keyByMethodThreadId.get(indexKey) === key) keyByMethodThreadId.delete(indexKey);
+        }
+      }
     }
     while (snapshots.size > maxEntries) {
       const first = snapshots.keys().next().value;
+      const entry = snapshots.get(first);
       snapshots.delete(first);
+      if (entry && entry.threadId) {
+        const indexKey = methodThreadKey(entry.method, entry.threadId);
+        if (keyByMethodThreadId.get(indexKey) === first) keyByMethodThreadId.delete(indexKey);
+      }
     }
   }
 
-  function readSnapshot({ key }) {
-    if (!key) return null;
+  function readSnapshot({ key, method, threadId }) {
     const nowMs = Date.now();
     prune(nowMs);
-    const entry = snapshots.get(key);
+    let resolvedKey = key;
+    if (!resolvedKey && method && threadId) {
+      // thread 详情快照需要支持“按会话取最新全量状态”，避免弱网重连时必须重建原始 IPC args。
+      resolvedKey = keyByMethodThreadId.get(methodThreadKey(method, threadId)) || "";
+    }
+    if (!resolvedKey) return null;
+    const entry = snapshots.get(resolvedKey);
     if (!entry || nowMs - entry.capturedAtMs > ttlMs) return null;
     return {
       capturedAtMs: entry.capturedAtMs,
@@ -223,7 +244,7 @@ function createMemoryFastSyncCache(options = {}) {
     };
   }
 
-  function writeSnapshot({ capturedAtMs = Date.now(), key, method, value }) {
+  function writeSnapshot({ capturedAtMs = Date.now(), key, method, threadId = "", value }) {
     if (!key || !isFastSyncMemoryCacheableMethod(method)) return false;
     try {
       // 详情快照只留在进程内，仍做 JSON clone，避免官方运行时对象被后续 mutation 污染。
@@ -231,8 +252,10 @@ function createMemoryFastSyncCache(options = {}) {
         capturedAtMs,
         key,
         method,
+        threadId: typeof threadId === "string" ? threadId.slice(0, 160) : "",
         value: safeClone(value),
       });
+      if (threadId) keyByMethodThreadId.set(methodThreadKey(method, threadId), key);
       prune(capturedAtMs);
       return true;
     } catch {

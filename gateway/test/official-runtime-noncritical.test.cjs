@@ -94,6 +94,7 @@ test("thread detail fast-sync snapshots stay memory-only", () => {
   assert.match(source, /memoryFastSyncCache/);
   assert.match(source, /isFastSyncSnapshotMethod/);
   assert.match(fastSyncBody, /isFastSyncCacheableMethod\(method\) \? fastSyncCache : memoryFastSyncCache/);
+  assert.match(fastSyncBody, /cache\.writeSnapshot\(\{ key, method, threadId, value: responseValue \}\)/);
   assert.match(fastSyncBody, /gateway 内存快照/);
 });
 
