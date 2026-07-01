@@ -230,6 +230,22 @@ test("client diagnostics upload only flow events by default", () => {
   assert.match(source, /shouldUploadClientDiagnostic\(event\)/);
 });
 
+test("network status widget surfaces thread watermarks and repair counters", () => {
+  const source = readPolyfillSource();
+  const refreshBody = sourceBetween(source, "async function refreshThreadDiagnosticsSnapshot", "function ensureNetworkStatusWidget");
+  const updateBody = sourceBetween(source, "function updateNetworkStatusWidget", "async function checkNetworkStatusHealth");
+  const copyBody = sourceBetween(source, "async function copyFlowDiagnostics", "function installNetworkStatusWidget");
+
+  assert.match(source, /let latestThreadDiagnosticsSnapshot = null/);
+  assert.match(refreshBody, /\/api\/diagnostics\/threads\?threadId=/);
+  assert.match(refreshBody, /currentRouteThreadId\(\)/);
+  assert.match(updateBody, /threadDiagnosticsSummary\(threadDiagnostics\)/);
+  assert.match(copyBody, /threadDiagnostics: latestThreadDiagnosticsSnapshot/);
+  for (const field of ["clientWatermarks", "missedByTransport", "repairedByThreadReplay", "repairedBySnapshot"]) {
+    assert.match(source, new RegExp(field));
+  }
+});
+
 test("desktop disables official tail hydration gate in web statsig payload", () => {
   const source = readPolyfillSource();
   // tail hydration 依赖 resume.initialTurnsPage；Web 桥下该页缺失会导致历史正文要等发消息后才显示。

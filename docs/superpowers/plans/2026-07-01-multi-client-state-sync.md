@@ -358,6 +358,42 @@ rtk node --test gateway/test/app-host-frame-observer.test.cjs
 - 修改：`pnpm-lock.yaml`
 - 修改：`pnpm-workspace.yaml`
 
+### 任务 15：前端可见 Thread Diagnostics
+
+**文件：**
+- 修改：`web-shell/codex-bridge-polyfill.js`
+- 修改：`web-shell/test/codex-bridge-fast-sync.test.cjs`
+- 修改：`docs/STATUS-FLOW-MONITORING.md`
+
+- [x] **步骤 1：新增失败测试**
+
+要求网络/链路状态浮层能拉取：
+
+```text
+/api/diagnostics/threads?threadId=<currentRouteThreadId>
+```
+
+并在源码级覆盖：
+
+- `clientWatermarks`
+- `missedByTransport`
+- `repairedByThreadReplay`
+- `repairedBySnapshot`
+
+- [x] **步骤 2：实现浏览器侧诊断摘要**
+
+链路状态面板展开、健康检查和复制诊断时，同时刷新 flow diagnostics 和 thread diagnostics。面板正文展示：
+
+- 当前 thread 的 latest seq；
+- 传输缺失、thread replay 修复、snapshot repair 修复累计；
+- 每个客户端的 `threadCursor`、`snapshotAckThreadSeq` 和 lag。
+
+- [x] **步骤 3：验证**
+
+```bash
+rtk node --test web-shell/test/codex-bridge-fast-sync.test.cjs
+```
+
 ## 验收标准
 
 - 手机前台恢复时优先使用 Socket.IO，只有 Socket.IO 不可用时才回退 raw `/ws`。

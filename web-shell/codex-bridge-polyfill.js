@@ -777,6 +777,10 @@
   let latestFlowExtra = "";
   let flowSnapshotInFlight = false;
   let lastFlowSnapshotAtMs = 0;
+  let latestThreadDiagnosticsSnapshot = null;
+  let latestThreadDiagnosticsError = "";
+  let threadDiagnosticsSnapshotInFlight = false;
+  let lastThreadDiagnosticsSnapshotAtMs = 0;
 
   function stateLabel(state) {
     const labels = {
@@ -843,6 +847,64 @@
       flowSnapshotInFlight = false;
     }
     return latestFlowSnapshot;
+  }
+
+  function firstThreadDiagnosticRecord(snapshot) {
+    const threads = snapshot && Array.isArray(snapshot.threads) ? snapshot.threads : [];
+    return threads[0] || null;
+  }
+
+  function threadDiagnosticsSummary(snapshot) {
+    const thread = firstThreadDiagnosticRecord(snapshot);
+    if (!thread) return latestThreadDiagnosticsError ? `线程诊断：${latestThreadDiagnosticsError}` : "线程诊断：暂无";
+    const watermarks = Array.isArray(thread.clientWatermarks) ? thread.clientWatermarks : [];
+    const latestSeq = Math.max(0, Number(thread.latestKnownThreadSeq) || 0);
+    const repair = [
+      `缺失 ${Math.max(0, Number(thread.missedByTransport) || 0)}`,
+      `补增量 ${Math.max(0, Number(thread.repairedByThreadReplay) || 0)}`,
+      `补快照 ${Math.max(0, Number(thread.repairedBySnapshot) || 0)}`,
+    ].join(" / ");
+    const clients = watermarks.length
+      ? watermarks
+          .slice(0, 4)
+          .map((item) => {
+            const client = item && item.clientId ? shortClientId(item.clientId) : "unknown";
+            const cursor = Math.max(0, Number(item && item.threadCursor) || 0);
+            const ack = Math.max(0, Number(item && item.snapshotAckThreadSeq) || 0);
+            const lag = Math.max(0, latestSeq - cursor);
+            return `${client}: cursor=${cursor} ack=${ack} lag=${lag}`;
+          })
+          .join("\n")
+      : "无客户端水位";
+    return [`线程：${shortThreadId(thread.threadId || "") || "unknown"} latest=${latestSeq}`, `恢复：${repair}`, "客户端水位", clients].join("\n");
+  }
+
+  async function refreshThreadDiagnosticsSnapshot(force) {
+    const now = Date.now();
+    const threadId = currentRouteThreadId();
+    if (!threadId) {
+      latestThreadDiagnosticsSnapshot = null;
+      latestThreadDiagnosticsError = "";
+      return latestThreadDiagnosticsSnapshot;
+    }
+    if (threadDiagnosticsSnapshotInFlight) return latestThreadDiagnosticsSnapshot;
+    if (!force && now - lastThreadDiagnosticsSnapshotAtMs < 2000) return latestThreadDiagnosticsSnapshot;
+    threadDiagnosticsSnapshotInFlight = true;
+    try {
+      const response = await w.fetch(`/api/diagnostics/threads?threadId=${encodeURIComponent(threadId)}&limit=1`, {
+        credentials: "same-origin",
+        headers: gatewayAuthHeaders(),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      latestThreadDiagnosticsSnapshot = await response.json();
+      latestThreadDiagnosticsError = "";
+      lastThreadDiagnosticsSnapshotAtMs = Date.now();
+    } catch (error) {
+      latestThreadDiagnosticsError = error instanceof Error ? error.message : String(error);
+    } finally {
+      threadDiagnosticsSnapshotInFlight = false;
+    }
+    return latestThreadDiagnosticsSnapshot;
   }
 
   function ensureNetworkStatusWidget() {
@@ -994,8 +1056,12 @@
       ((options && options.forceFlowRefresh) || (panel && !panel.hidden && Date.now() - lastFlowSnapshotAtMs >= 2000));
     if (shouldRefreshFlow) {
       refreshFlowSnapshot(options && options.forceFlowRefresh).then(() => updateNetworkStatusWidget("", { skipFlowRefresh: true }));
+      refreshThreadDiagnosticsSnapshot(options && options.forceFlowRefresh).then(() =>
+        updateNetworkStatusWidget("", { skipFlowRefresh: true })
+      );
     }
     const flow = latestFlowSnapshot || {};
+    const threadDiagnostics = latestThreadDiagnosticsSnapshot || {};
     const bad =
       !snapshot.online ||
       snapshot.wsState === "closed" ||
@@ -1026,6 +1092,9 @@
         latestFlowExtra ? `检查：${latestFlowExtra}` : "",
         latestFlowError ? `诊断接口：${latestFlowError}` : "",
         "",
+        "线程恢复",
+        threadDiagnosticsSummary(threadDiagnostics),
+        "",
         "链路时间线",
         flowTimeline(flow),
         "",
@@ -1045,6 +1114,7 @@
         headers: gatewayAuthHeaders(),
       });
       await refreshFlowSnapshot(true);
+      await refreshThreadDiagnosticsSnapshot(true);
       updateNetworkStatusWidget(`HTTP ${response.status} ${Date.now() - startedAtMs}ms`);
     } catch (error) {
       updateNetworkStatusWidget(error instanceof Error ? error.message : String(error));
@@ -1053,11 +1123,14 @@
 
   async function copyFlowDiagnostics() {
     await refreshFlowSnapshot(true);
+    await refreshThreadDiagnosticsSnapshot(true);
     const snapshot = networkStatusSnapshot();
     const payload = {
       browser: snapshot,
       flow: latestFlowSnapshot,
       flowError: latestFlowError,
+      threadDiagnostics: latestThreadDiagnosticsSnapshot,
+      threadDiagnosticsError: latestThreadDiagnosticsError,
     };
     try {
       await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));

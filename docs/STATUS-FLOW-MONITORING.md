@@ -236,6 +236,13 @@ GET /api/diagnostics/flow?clientId=...&threadId=...
 
 排查规则：如果 `latestKnownThreadSeq > threadCursor` 且 replay 队列连续，gateway 只补增量；如果队列不连续，浏览器应读取 gateway memory snapshot 并发送 snapshot ack。
 
+浏览器右上角“链路状态”面板会在展开、健康检查和复制诊断时按当前 route 的 threadId 拉取这个接口，并展示：
+
+- `missedByTransport` / `repairedByThreadReplay` / `repairedBySnapshot`：判断主要靠传输恢复、增量补发还是全量快照救回来。
+- 每个客户端的 `threadCursor`、`snapshotAckThreadSeq` 和相对 `latestKnownThreadSeq` 的 lag：判断手机或电脑端是否仍落后。
+
+复制诊断会同时包含 `flow` 和 `threadDiagnostics`，方便把“打开慢、发消息后才显示、后台回来不刷新”这类问题一次性贴到 issue 或新会话里。
+
 ## 传输层选型
 
 OpenCodex 优先复用成熟传输层。当前 gateway 同时支持：
