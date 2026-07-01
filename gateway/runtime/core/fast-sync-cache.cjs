@@ -10,6 +10,10 @@ const CACHEABLE_METHODS = new Set([
   "model/list",
   "thread/list",
 ]);
+const MEMORY_CACHEABLE_METHODS = new Set([
+  "thread/read",
+  "thread/turns/list",
+]);
 const REDACTED_VALUE = "[redacted]";
 const SENSITIVE_FIELD_PARTS = [
   "token",
@@ -57,6 +61,14 @@ function hashText(text) {
 
 function isFastSyncCacheableMethod(method) {
   return CACHEABLE_METHODS.has(String(method || ""));
+}
+
+function isFastSyncMemoryCacheableMethod(method) {
+  return MEMORY_CACHEABLE_METHODS.has(String(method || ""));
+}
+
+function isFastSyncSnapshotMethod(method) {
+  return isFastSyncCacheableMethod(method) || isFastSyncMemoryCacheableMethod(method);
 }
 
 function cacheKeyForSnapshot(method, args) {
@@ -181,10 +193,66 @@ function createFastSyncCache(options = {}) {
   return { filePathForKey, readSnapshot, writeSnapshot };
 }
 
+function createMemoryFastSyncCache(options = {}) {
+  const ttlMs = normalizeTtlMs(options.ttlMs ?? process.env.OPENCODEX_FAST_SYNC_MEMORY_CACHE_TTL_MS, FALLBACK_TTL_MS);
+  const maxEntries = Math.max(10, Number(options.maxEntries || process.env.OPENCODEX_FAST_SYNC_MEMORY_CACHE_MAX_ENTRIES) || 200);
+  const snapshots = new Map();
+
+  function prune(nowMs = Date.now()) {
+    for (const [key, entry] of snapshots) {
+      if (!entry || nowMs - entry.capturedAtMs > ttlMs) snapshots.delete(key);
+    }
+    while (snapshots.size > maxEntries) {
+      const first = snapshots.keys().next().value;
+      snapshots.delete(first);
+    }
+  }
+
+  function readSnapshot({ key }) {
+    if (!key) return null;
+    const nowMs = Date.now();
+    prune(nowMs);
+    const entry = snapshots.get(key);
+    if (!entry || nowMs - entry.capturedAtMs > ttlMs) return null;
+    return {
+      capturedAtMs: entry.capturedAtMs,
+      key: entry.key,
+      method: entry.method,
+      source: "gateway-memory",
+      value: safeClone(entry.value),
+    };
+  }
+
+  function writeSnapshot({ capturedAtMs = Date.now(), key, method, value }) {
+    if (!key || !isFastSyncMemoryCacheableMethod(method)) return false;
+    try {
+      // 详情快照只留在进程内，仍做 JSON clone，避免官方运行时对象被后续 mutation 污染。
+      snapshots.set(key, {
+        capturedAtMs,
+        key,
+        method,
+        value: safeClone(value),
+      });
+      prune(capturedAtMs);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  return { readSnapshot, writeSnapshot };
+}
+
+const memoryFastSyncCache = createMemoryFastSyncCache();
+
 module.exports = {
   cacheKeyForSnapshot,
   createFastSyncCache,
+  createMemoryFastSyncCache,
   isFastSyncCacheableMethod,
+  isFastSyncMemoryCacheableMethod,
+  isFastSyncSnapshotMethod,
+  memoryFastSyncCache,
   parseFastSyncSnapshotArgsJson,
   valueFromFastSyncFetchResponsePayload,
 };

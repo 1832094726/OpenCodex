@@ -87,3 +87,12 @@ test("thread list and auxiliary state can use stale read-only cache during conve
   // config/read 涉及供应商切换，只走短 TTL，不允许 24 小时 stale。
   assert.doesNotMatch(staleBody, /"config\/read"/);
 });
+
+test("thread detail fast-sync snapshots stay memory-only", () => {
+  const fastSyncBody = officialRuntimeFunctionSource("rememberFastSyncSnapshot", "outgoingIpcDiagnosticSummary");
+
+  assert.match(source, /memoryFastSyncCache/);
+  assert.match(source, /isFastSyncSnapshotMethod/);
+  assert.match(fastSyncBody, /isFastSyncCacheableMethod\(method\) \? fastSyncCache : memoryFastSyncCache/);
+  assert.match(fastSyncBody, /gateway 内存快照/);
+});

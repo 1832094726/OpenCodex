@@ -29,6 +29,8 @@ const {
   cacheKeyForSnapshot,
   createFastSyncCache,
   isFastSyncCacheableMethod,
+  isFastSyncSnapshotMethod,
+  memoryFastSyncCache,
   parseFastSyncSnapshotArgsJson,
 } = require("./core/fast-sync-cache.cjs");
 const { createLocalFileService } = require("./http/local-files.cjs");
@@ -424,7 +426,7 @@ function createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets
     if (pathname === "/api/fast-sync/snapshot" && req.method === "GET") {
       const method = url.searchParams.get("method") || "";
       const argsJson = url.searchParams.get("args") || "[]";
-      if (!isFastSyncCacheableMethod(method)) {
+      if (!isFastSyncSnapshotMethod(method)) {
         return sendJson(res, 400, { ok: false, error: "Method is not fast-sync cacheable" }, { "cache-control": "no-store" });
       }
 
@@ -435,7 +437,9 @@ function createRequestHandler({ localFiles, mobileApi, pickedFiles, staticAssets
       }
 
       const key = cacheKeyForSnapshot(method, parsedArgs.args);
-      const snapshot = fastSyncCache.readSnapshot({ key });
+      // thread/read 和 thread/turns/list 只读 gateway 进程内快照，不落盘也不回退到磁盘缓存。
+      const cache = isFastSyncCacheableMethod(method) ? fastSyncCache : memoryFastSyncCache;
+      const snapshot = cache.readSnapshot({ key });
       return sendJson(res, 200, { ok: true, snapshot }, { "cache-control": "no-store" });
     }
 

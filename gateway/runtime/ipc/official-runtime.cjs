@@ -34,6 +34,8 @@ const {
   cacheKeyForSnapshot,
   createFastSyncCache,
   isFastSyncCacheableMethod,
+  isFastSyncSnapshotMethod,
+  memoryFastSyncCache,
   valueFromFastSyncFetchResponsePayload,
 } = require("../core/fast-sync-cache.cjs");
 const { resolveOpenCodexI18n } = require("../../../shared/i18n/index.cjs");
@@ -1369,7 +1371,7 @@ function readOnlyAppServerCacheKey(channel, invokeArgs, summary) {
 
 function fastSyncMethodFromRequestSummary(summary) {
   const method = summary && typeof summary.method === "string" ? summary.method : "";
-  return isFastSyncCacheableMethod(method) ? method : "";
+  return isFastSyncSnapshotMethod(method) ? method : "";
 }
 
 function attachFastSyncSnapshotKey(summary, invokeArgs) {
@@ -1900,10 +1902,12 @@ function rememberFastSyncSnapshot(channel, _args, requestSummary, responseResult
   const key = requestSummary && typeof requestSummary.fastSyncSnapshotKey === "string" ? requestSummary.fastSyncSnapshotKey : "";
   if (!method || !key || !responseResult || responseResult.ok !== true) return;
   const responseValue = responseResult.value;
-  if (!fastSyncCache.writeSnapshot({ key, method, value: responseValue })) return;
+  // 会话详情只写进程内存，入口列表/配置等轻量读才允许落盘，避免把完整对话持久化到快照目录。
+  const cache = isFastSyncCacheableMethod(method) ? fastSyncCache : memoryFastSyncCache;
+  if (!cache.writeSnapshot({ key, method, value: responseValue })) return;
   recordFlowEvent({
     clientId: context.clientId || "",
-    hint: "已写入 gateway 快照",
+    hint: isFastSyncCacheableMethod(method) ? "已写入 gateway 快照" : "已写入 gateway 内存快照",
     method,
     scope: "thread",
     stage: "gateway_snapshot_store",

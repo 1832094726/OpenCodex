@@ -18,27 +18,36 @@ function sourceBetween(source, startMarker, endMarker) {
   return source.slice(start, end);
 }
 
-test("fast sync snapshot allowlist stays limited to first-screen reads", () => {
+test("fast sync snapshot allowlist separates persistent and memory-only reads", () => {
   const source = readPolyfillSource();
-  const expectedMethods = [
+  const persistentMethods = [
     "account/read",
     "config/read",
     "model/list",
     "thread/list",
   ];
+  const memoryOnlyMethods = [
+    "thread/read",
+    "thread/turns/list",
+  ];
 
   assert.match(source, /FAST_SYNC_SNAPSHOT_METHODS/);
-  for (const method of expectedMethods) {
+  assert.match(source, /FAST_SYNC_PERSISTENT_SNAPSHOT_METHODS/);
+  for (const method of persistentMethods.concat(memoryOnlyMethods)) {
     assert.match(source, new RegExp(JSON.stringify(method)));
   }
 
   const allowlistBlock = source.match(/FAST_SYNC_SNAPSHOT_METHODS[\s\S]*?\]\);/);
   assert.ok(allowlistBlock, "expected a local fast-sync allowlist block");
-  // 浏览器首屏快照只能服务安全只读方法，避免插件列表、发起 turn 和未知写操作被错误复用。
+  const persistentBlock = source.match(/FAST_SYNC_PERSISTENT_SNAPSHOT_METHODS[\s\S]*?\]\);/);
+  assert.ok(persistentBlock, "expected a persistent fast-sync allowlist block");
+  // 总快照方法可以包含会话详情，但浏览器本地持久化仍只允许轻量首屏读。
   assert.doesNotMatch(allowlistBlock[0], /"plugin\/list"/);
-  assert.doesNotMatch(allowlistBlock[0], /"thread\/read"/);
-  assert.doesNotMatch(allowlistBlock[0], /"thread\/turns\/list"/);
   assert.doesNotMatch(allowlistBlock[0], /"turn\/start"/);
+  assert.doesNotMatch(persistentBlock[0], /"thread\/read"/);
+  assert.doesNotMatch(persistentBlock[0], /"thread\/turns\/list"/);
+  assert.doesNotMatch(persistentBlock[0], /"plugin\/list"/);
+  assert.doesNotMatch(persistentBlock[0], /"turn\/start"/);
 });
 
 test("fast sync snapshot diagnostics are wired in the polyfill", () => {

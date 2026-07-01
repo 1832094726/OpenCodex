@@ -2743,6 +2743,14 @@
     "account/read",
     "config/read",
     "model/list",
+    "thread/read",
+    "thread/list",
+    "thread/turns/list",
+  ]);
+  const FAST_SYNC_PERSISTENT_SNAPSHOT_METHODS = new Set([
+    "account/read",
+    "config/read",
+    "model/list",
     "thread/list",
   ]);
 
@@ -2958,6 +2966,7 @@
   }
 
   function writeFastSyncBrowserSnapshot(method, ipcArgs, value, diagnosticSummary, reason) {
+    if (!FAST_SYNC_PERSISTENT_SNAPSHOT_METHODS.has(method)) return;
     const store = fastSyncStore();
     if (!store || typeof store.writeSnapshot !== "function") return;
     Promise.resolve(store.writeSnapshot(method, ipcArgs, value))
@@ -3084,10 +3093,12 @@
     const method = fastSyncSnapshotMethod(payload);
     if (!method) return null;
 
-    const browserValue = await readBrowserFastSyncSnapshot(method, ipcArgs, diagnosticSummary);
-    if (browserValue && browserValue.hit) {
-      refreshFastSyncSnapshot(channel, ipcArgs, payload, method, diagnosticSummary, "browser-hit");
-      return browserValue;
+    if (FAST_SYNC_PERSISTENT_SNAPSHOT_METHODS.has(method)) {
+      const browserValue = await readBrowserFastSyncSnapshot(method, ipcArgs, diagnosticSummary);
+      if (browserValue && browserValue.hit) {
+        refreshFastSyncSnapshot(channel, ipcArgs, payload, method, diagnosticSummary, "browser-hit");
+        return browserValue;
+      }
     }
 
     const gatewayValue = await readGatewayFastSyncSnapshot(method, ipcArgs, diagnosticSummary);

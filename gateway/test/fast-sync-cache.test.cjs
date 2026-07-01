@@ -7,7 +7,10 @@ const test = require("node:test");
 const {
   cacheKeyForSnapshot,
   createFastSyncCache,
+  createMemoryFastSyncCache,
   isFastSyncCacheableMethod,
+  isFastSyncMemoryCacheableMethod,
+  isFastSyncSnapshotMethod,
   parseFastSyncSnapshotArgsJson,
   valueFromFastSyncFetchResponsePayload,
 } = require("../runtime/core/fast-sync-cache.cjs");
@@ -26,6 +29,16 @@ test("allows only first-screen read methods", () => {
   assert.equal(isFastSyncCacheableMethod("model/list"), true);
   assert.equal(isFastSyncCacheableMethod("plugin/list"), false);
   assert.equal(isFastSyncCacheableMethod("turn/start"), false);
+});
+
+test("allows thread detail methods only through memory snapshots", () => {
+  assert.equal(isFastSyncSnapshotMethod("thread/list"), true);
+  assert.equal(isFastSyncSnapshotMethod("thread/read"), true);
+  assert.equal(isFastSyncSnapshotMethod("thread/turns/list"), true);
+  assert.equal(isFastSyncMemoryCacheableMethod("thread/read"), true);
+  assert.equal(isFastSyncMemoryCacheableMethod("thread/turns/list"), true);
+  assert.equal(isFastSyncMemoryCacheableMethod("thread/list"), false);
+  assert.equal(isFastSyncCacheableMethod("thread/read"), false);
 });
 
 test("cache keys ignore volatile request ids", () => {
@@ -112,6 +125,20 @@ test("writes and reads a snapshot from disk", () => {
   const key = cacheKeyForSnapshot("thread/list", []);
   cache.writeSnapshot({ key, method: "thread/list", value: { items: [{ threadId: "t1", title: "Hello" }] } });
   assert.deepEqual(cache.readSnapshot({ key })?.value, { items: [{ threadId: "t1", title: "Hello" }] });
+});
+
+test("memory snapshots keep thread detail out of disk cache", () => {
+  const cache = createMemoryFastSyncCache({ maxEntries: 20, ttlMs: 60_000 });
+  const detail = { turns: [{ id: "turn-1", message: "进程内可恢复内容" }] };
+
+  assert.equal(cache.writeSnapshot({ key: "detail-key", method: "thread/turns/list", value: detail }), true);
+  assert.equal(cache.writeSnapshot({ key: "list-key", method: "thread/list", value: { threads: [] } }), false);
+  detail.turns[0].message = "mutated";
+
+  const read = cache.readSnapshot({ key: "detail-key" });
+  assert.equal(read.source, "gateway-memory");
+  assert.deepEqual(read.value, { turns: [{ id: "turn-1", message: "进程内可恢复内容" }] });
+  assert.equal(cache.readSnapshot({ key: "list-key" }), null);
 });
 
 test("redacts sensitive fields before writing snapshots", () => {
