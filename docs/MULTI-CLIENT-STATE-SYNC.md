@@ -211,7 +211,10 @@ gateway 收到 ack 后：
 ```json
 {
   "latestKnownThreadSeq": 45,
+  "missedByTransport": 5,
   "oldestThreadSeq": 39,
+  "repairedBySnapshot": 1,
+  "repairedByThreadReplay": 3,
   "clientWatermarks": [
     {
       "clientId": "client-desktop",
@@ -238,6 +241,11 @@ gateway 收到 ack 后：
 - `latestKnownThreadSeq > threadCursor` 且 retained queue 连续：应该补增量。
 - `latestKnownThreadSeq > threadCursor` 且 `oldestThreadSeq > threadCursor + 1`：必须快照修复。
 - `snapshotAckThreadSeq > 0` 但 `threadCursor` 更低：说明 ack 后 active port cursor 推进可能有问题。
+- `missedByTransport`：客户端重连/replay 时按 cursor 推断缺失的 thread frame 累计数。
+- `repairedByThreadReplay`：gateway 已通过 ThreadEventLog replay 实际补发的 frame 累计数。
+- `repairedBySnapshot`：客户端已消费 gateway memory snapshot 并 ack 的全量修复累计次数。
+
+这三个 repair 指标是诊断事件累计值，可能因为同一客户端多次重连而重复计入；它们用于判断“主要靠哪条恢复路径救回来”，不是审计级唯一帧集合。
 
 ## 已落地能力
 
@@ -252,13 +260,13 @@ gateway 收到 ack 后：
 - 浏览器 snapshot ack 携带 `threadSeq`。
 - gateway 按 client 保存 `snapshotAckThreadSeqByClientId`。
 - diagnostics 暴露 `clientWatermarks`。
+- diagnostics 暴露 `missedByTransport`、`repairedByThreadReplay`、`repairedBySnapshot`，用于区分传输恢复、thread replay 和 snapshot repair 的实际贡献。
 
 ## 下一步
 
-1. 补齐 Socket.IO recovery 与 OpenCodex repair 的关联诊断：`missedByTransport`、`repairedByThreadReplay`、`repairedBySnapshot`。
-2. 增加浏览器端真实集成测试：Socket.IO 主路径、脚本加载失败回退、握手失败回退。
-3. 在诊断面板展示 per-client watermarks，而不是只在 JSON API 里可见。
-4. 基于同一 `ThreadEventLog` 接口实现正式持久 adapter：优先 SQLite event log，复杂/多机部署再评估 Redis Streams 或 JetStream。
+1. 增加浏览器端真实集成测试：Socket.IO 主路径、脚本加载失败回退、握手失败回退。
+2. 在诊断面板展示 per-client watermarks 和 repair counters，而不是只在 JSON API 里可见。
+3. 基于同一 `ThreadEventLog` 接口实现正式持久 adapter：优先 SQLite event log，复杂/多机部署再评估 Redis Streams 或 JetStream。
 
 ## 可执行验证
 

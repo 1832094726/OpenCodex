@@ -288,6 +288,37 @@ rtk node --test gateway/test/app-host-frame-observer.test.cjs
 
 下一步不是继续扩大 JSONL，而是用同一接口评估 SQLite event log、Redis Streams 或 JetStream。
 
+### 任务 13：Thread Repair Counters
+
+**文件：**
+- 修改：`gateway/runtime/ipc/app-host-frame-observer.cjs`
+- 修改：`gateway/test/app-host-frame-observer.test.cjs`
+- 修改：`docs/MULTI-CLIENT-STATE-SYNC.md`
+
+- [x] **步骤 1：新增失败测试**
+
+覆盖 diagnostics thread snapshot 中必须包含：
+
+- `missedByTransport`：客户端重连/replay 时按 cursor 推断缺失的 thread frame 累计数；
+- `repairedByThreadReplay`：gateway 通过 ThreadEventLog replay 实际补发的 frame 累计数；
+- `repairedBySnapshot`：客户端消费 gateway memory snapshot 后 ack 的累计次数。
+
+- [x] **步骤 2：实现累计指标**
+
+在 app-host thread state 中维护累计计数：
+
+- `recordAppHostThreadReplay` 根据 `latestKnownThreadSeq - cursor` 累加 `missedByTransport`；
+- `recordAppHostThreadReplay` 根据 `sent` 累加 `repairedByThreadReplay`；
+- `recordAppHostThreadSnapshotAck` 在 `source === "gateway-memory"` 且 `threadSeq > 0` 时累加 `repairedBySnapshot`。
+
+这些值是恢复事件累计诊断，不是去重后的精确帧审计。
+
+- [x] **步骤 3：验证**
+
+```bash
+rtk node --test gateway/test/app-host-frame-observer.test.cjs
+```
+
 ## 验收标准
 
 - 手机前台恢复时优先使用 Socket.IO，只有 Socket.IO 不可用时才回退 raw `/ws`。

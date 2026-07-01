@@ -194,11 +194,14 @@ function ensureThreadState(state, threadId) {
       nudgeCount: 0,
       portClientIdByPortId: new Map(),
       portLastSeenAtMs: new Map(),
+      repairedBySnapshot: 0,
+      repairedByThreadReplay: 0,
       sessionId: "",
       snapshotAckClientIds: new Set(),
       snapshotAckCount: 0,
       snapshotAckThreadSeqByClientId: new Map(),
       threadId,
+      missedByTransport: 0,
       threadReplayCount: 0,
       upstreamFrameCount: 0,
     };
@@ -344,6 +347,9 @@ function recordAppHostThreadReplay(state, details = {}) {
   thread.lastThreadReplayOldestSeq = Math.max(0, Number(details.oldestThreadSeq) || 0);
   thread.lastThreadReplayQueued = Math.max(0, Number(details.queued) || 0);
   thread.lastThreadReplaySent = Math.max(0, Number(details.sent) || 0);
+  // 这些是恢复链路的累计诊断：缺了多少、replay 补了多少、还剩多少需要 snapshot 兜底。
+  thread.missedByTransport += Math.max(0, thread.lastThreadReplayLatestKnownSeq - thread.lastThreadReplayCursor);
+  thread.repairedByThreadReplay += thread.lastThreadReplaySent;
   return appHostThreadStateSnapshot(state, threadId);
 }
 
@@ -384,6 +390,9 @@ function recordAppHostThreadSnapshotAck(state, details = {}) {
   thread.lastSnapshotAckMethod = typeof details.method === "string" ? details.method.slice(0, 80) : "";
   thread.lastSnapshotAckSource = typeof details.source === "string" ? details.source.slice(0, 80) : "";
   thread.lastSnapshotAckThreadSeq = snapshotAckThreadSeq;
+  if (thread.lastSnapshotAckSource === "gateway-memory" && snapshotAckThreadSeq > 0) {
+    thread.repairedBySnapshot += 1;
+  }
   trimMap(thread.clientLastSeenAtMs, state.maxEntries);
   trimMap(thread.snapshotAckThreadSeqByClientId, state.maxEntries);
   return appHostThreadStateSnapshot(state, threadId);
@@ -437,6 +446,9 @@ function appHostThreadStateSnapshot(state, threadId) {
     lastTurnId: thread.lastTurnId,
     portCount: thread.portLastSeenAtMs.size,
     portIds: Array.from(thread.portLastSeenAtMs.keys()),
+    missedByTransport: thread.missedByTransport,
+    repairedBySnapshot: thread.repairedBySnapshot,
+    repairedByThreadReplay: thread.repairedByThreadReplay,
     sessionId: thread.sessionId,
     snapshotAckClientCount: thread.snapshotAckClientIds.size,
     snapshotAckClientIds: Array.from(thread.snapshotAckClientIds.keys()),

@@ -246,6 +246,9 @@ test("thread state records connect and replay diagnostics per thread", () => {
   assert.equal(connected.lastThreadReplayLatestKnownSeq, 8);
   assert.equal(connected.lastThreadReplayOldestSeq, 6);
   assert.equal(connected.lastThreadReplayGap, true);
+  assert.equal(connected.missedByTransport, 4);
+  assert.equal(connected.repairedByThreadReplay, 2);
+  assert.equal(connected.repairedBySnapshot, 0);
   assert.equal(missing, null);
 });
 
@@ -303,6 +306,7 @@ test("thread state records per-client snapshot acknowledgements", () => {
   assert.equal(snapshot.lastSnapshotAckCapturedAtMs, 1780000001000);
   assert.equal(snapshot.lastSnapshotAckKey, "snapshot-key-other");
   assert.equal(snapshot.lastSnapshotAckThreadSeq, 9);
+  assert.equal(snapshot.repairedBySnapshot, 2);
   assert.deepEqual(snapshot.snapshotAckThreadSeqByClientId, {
     "client-snapshot-a": 4,
     "client-snapshot-b": 9,
@@ -754,6 +758,9 @@ test("ws hub marks app-host thread replay gaps when a client cursor is older tha
     assert.equal(snapshot.oldestThreadSeq, 3);
     assert.equal(snapshot.latestThreadSeq, 4);
     assert.equal(snapshot.lastThreadReplayGap, true);
+    assert.equal(snapshot.missedByTransport, 3);
+    assert.equal(snapshot.repairedByThreadReplay, 2);
+    assert.equal(snapshot.repairedBySnapshot, 0);
 
     relayA.onMessage(JSON.stringify({ id: "rpc-gap-5", method: "thread/read", result: { threadId: "thread-gap", turnId: "turn-5" } }));
     await wsMessage(wsA, (message) => message.type === "app-host-port-message" && message.threadSeq === 5);
@@ -775,6 +782,8 @@ test("ws hub marks app-host thread replay gaps when a client cursor is older tha
     assert.equal(nudgeReplay.replayGap, false);
     assert.equal(nudge.replaySent, 1);
     assert.equal(nudge.replayGap, false);
+    const repairedSnapshot = hub.snapshotThreads({ threadId: "thread-gap" }).threads[0];
+    assert.equal(repairedSnapshot.repairedByThreadReplay, 3);
   } finally {
     if (wsA) wsA.close();
     if (wsB) wsB.close();
