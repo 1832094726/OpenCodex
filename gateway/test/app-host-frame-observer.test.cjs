@@ -83,7 +83,7 @@ test("app-host downstream replay protocol is wired on gateway and browser sides"
 
   // Gateway 给 official->browser app-host 帧编号并缓存，客户端重连时按 lastServerSeq 只补缺失帧。
   assert.match(wsHubSource, /APP_HOST_DOWNSTREAM_REPLAY_TTL_MS/);
-  assert.match(wsHubSource, /rememberAppHostDownstreamFrame\(clientId, portId, data\)/);
+  assert.match(wsHubSource, /rememberAppHostDownstreamFrame\(clientId, portId, data, frameSummary && frameSummary\.raw\)/);
   assert.match(wsHubSource, /flushAppHostDownstreamReplay\(ws, clientId, portId, lastServerSeq\)/);
   assert.match(wsHubSource, /type: "app-host-port-message", portId, data, seq/);
 
@@ -92,4 +92,22 @@ test("app-host downstream replay protocol is wired on gateway and browser sides"
   assert.match(polyfillSource, /result\.lastServerSeq = Number\(state\.lastServerSeq \|\| 0\)/);
   assert.match(polyfillSource, /app-host-duplicate-server-frame/);
   assert.match(polyfillSource, /state\.lastServerSeq = serverSeq/);
+});
+
+test("app-host thread replay keeps cross-client state separate from per-port seq", () => {
+  const wsHubSource = fs.readFileSync(path.join(repoRoot, "gateway", "runtime", "ipc", "ws-hub.cjs"), "utf8");
+  const polyfillSource = fs.readFileSync(path.join(repoRoot, "web-shell", "codex-bridge-polyfill.js"), "utf8");
+
+  // Gateway 额外按 threadId 索引官方下行帧，给新客户端接同一会话时补缺失增量。
+  assert.match(wsHubSource, /appHostDownstreamFramesByThreadId/);
+  assert.match(wsHubSource, /function flushAppHostThreadReplay/);
+  assert.match(wsHubSource, /route: "app_host_thread_replay"/);
+  assert.match(wsHubSource, /replay: "thread"/);
+  assert.doesNotMatch(wsHubSource, /type: "app-host-port-message", portId, data: entry\.data, replay: "thread", seq/);
+
+  // 浏览器 connect 帧携带当前路由 threadId；没有 per-port 游标的新客户端才能触发 thread replay。
+  assert.match(polyfillSource, /function currentRouteThreadId/);
+  assert.match(polyfillSource, /result\.threadId = currentRouteThreadId\(\)/);
+  assert.match(wsHubSource, /lastServerSeq > 0[\s\S]*flushAppHostDownstreamReplay/);
+  assert.match(wsHubSource, /flushAppHostThreadReplay\(ws, clientId, portId, routeThreadId\)/);
 });

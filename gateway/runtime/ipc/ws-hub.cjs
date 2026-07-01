@@ -134,6 +134,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   const pendingOrphanTargetResponses = [];
   const pendingAppHostMessagesByRelayKey = new Map();
   const appHostDownstreamFramesByRelayKey = new Map();
+  const appHostDownstreamFramesByThreadId = new Map();
   const appHostDownstreamSeqByRelayKey = new Map();
   const appHostFrameState = createAppHostFrameState();
   let lastAuthRejectLogAtMs = 0;
@@ -177,7 +178,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return fresh;
   }
 
-  function rememberAppHostDownstreamFrame(clientId, portId, data) {
+  function rememberAppHostDownstreamFrame(clientId, portId, data, summary) {
     const seq = appHostDownstreamNextSeq(clientId, portId);
     if (
       !clientId ||
@@ -193,7 +194,26 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     queue.push({ atMs: Date.now(), data, seq });
     while (queue.length > APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES) queue.shift();
     appHostDownstreamFramesByRelayKey.set(key, queue);
+    const threadId = summary && typeof summary.threadId === "string" ? summary.threadId : "";
+    if (threadId) {
+      const threadQueue = pruneAppHostThreadFrames(threadId);
+      threadQueue.push({ atMs: Date.now(), data, sourceClientId: clientId, sourcePortId: portId, threadId });
+      while (threadQueue.length > APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES) threadQueue.shift();
+      appHostDownstreamFramesByThreadId.set(threadId, threadQueue);
+    }
     return seq;
+  }
+
+  function pruneAppHostThreadFrames(threadId, nowMs = Date.now()) {
+    const queue = appHostDownstreamFramesByThreadId.get(threadId);
+    if (!queue) return [];
+    const fresh = queue.filter((entry) => entry && nowMs - entry.atMs <= APP_HOST_DOWNSTREAM_REPLAY_TTL_MS);
+    if (fresh.length === 0) {
+      appHostDownstreamFramesByThreadId.delete(threadId);
+      return [];
+    }
+    if (fresh.length !== queue.length) appHostDownstreamFramesByThreadId.set(threadId, fresh);
+    return fresh;
   }
 
   function flushAppHostDownstreamReplay(ws, clientId, portId, afterSeq) {
@@ -220,6 +240,35 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       hint: `app-host 已按游标补发 ${sent}/${queue.length} 条官方下行帧`,
       scope: "relay",
       stage: sent === queue.length ? "downstream_replay_flushed" : "downstream_replay_partial",
+    });
+    return sent;
+  }
+
+  function flushAppHostThreadReplay(ws, clientId, portId, threadId) {
+    if (!threadId || !ws || ws.readyState !== ws.OPEN) return 0;
+    const queue = pruneAppHostThreadFrames(threadId).filter((entry) => entry.sourceClientId !== clientId || entry.sourcePortId !== portId);
+    if (!queue.length) return 0;
+    let sent = 0;
+    for (const entry of queue) {
+      // 跨客户端补发只沿用官方 app-host data，不带新端口 seq，避免影响新端口后续 live 增量游标。
+      if (!safeSend(ws, { type: "app-host-port-message", portId, data: entry.data, replay: "thread" }, { suppressDiagnostic: true, route: "app_host_thread_replay" })) {
+        break;
+      }
+      sent += 1;
+    }
+    diagnosticLog("ws-hub", "app_host_thread_replay_flushed", {
+      clientId: shortId(clientId),
+      portId: shortId(portId),
+      queued: queue.length,
+      sent,
+      threadId: shortId(threadId),
+    });
+    recordFlowEvent({
+      clientId,
+      hint: `app-host 已按 thread 补发 ${sent}/${queue.length} 条旧客户端增量帧`,
+      scope: "relay",
+      stage: sent === queue.length ? "thread_replay_flushed" : "thread_replay_partial",
+      threadId,
     });
     return sent;
   }
@@ -1129,9 +1178,9 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
         );
       },
       onMessage(data) {
-        observeAppHostPortFrame(ws, "official-to-browser", portId, data);
+        const frameSummary = observeAppHostPortFrame(ws, "official-to-browser", portId, data);
         maybeHandleAppHostReadOnlyResponse(ws, portId, relay, data);
-        const seq = rememberAppHostDownstreamFrame(clientId, portId, data);
+        const seq = rememberAppHostDownstreamFrame(clientId, portId, data, frameSummary && frameSummary.raw);
         safeSend(ws, { type: "app-host-port-message", portId, data, seq }, { suppressDiagnostic: true });
       },
     });
@@ -1146,6 +1195,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     const clientId = normalizedWsClientId(ws, message);
     const portId = message && typeof message.portId === "string" ? message.portId : "";
     const lastServerSeq = Number(message && message.lastServerSeq);
+    const routeThreadId = typeof (message && message.threadId) === "string" ? message.threadId.slice(0, 160) : "";
     if (!clientId || ws.__codexWebClientId !== clientId || !validAppHostPortId(portId)) {
       diagnosticWarn("ws-hub", "app_host_connect_rejected", {
         clientId: shortId(clientId),
@@ -1201,15 +1251,19 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
           );
         },
         onMessage(data) {
-          observeAppHostPortFrame(ws, "official-to-browser", portId, data);
+          const frameSummary = observeAppHostPortFrame(ws, "official-to-browser", portId, data);
           maybeHandleAppHostReadOnlyResponse(ws, portId, relay, data);
-          const seq = rememberAppHostDownstreamFrame(clientId, portId, data);
+          const seq = rememberAppHostDownstreamFrame(clientId, portId, data, frameSummary && frameSummary.raw);
           safeSend(ws, { type: "app-host-port-message", portId, data, seq }, { suppressDiagnostic: true });
         },
       });
       relays.set(portId, relay);
       safeSend(ws, { type: "app-host-port-connected", portId }, { suppressDiagnostic: true });
-      flushAppHostDownstreamReplay(ws, clientId, portId, lastServerSeq);
+      if (lastServerSeq > 0) {
+        flushAppHostDownstreamReplay(ws, clientId, portId, lastServerSeq);
+      } else {
+        flushAppHostThreadReplay(ws, clientId, portId, routeThreadId);
+      }
       flushPendingAppHostMessages(ws, clientId, portId, relay);
       if (DEBUG_LOGS) {
         // app-host 端口连接/关闭是前端组件生命周期的一部分，默认只保留失败日志。

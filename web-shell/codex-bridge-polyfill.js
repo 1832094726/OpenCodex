@@ -2289,6 +2289,17 @@
     return `app-host-${clientId}-${w.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`;
   }
 
+  function currentRouteThreadId() {
+    const route = currentRestorableRoute();
+    const match = route.match(/^\/(?:local|thread|conversation|remote)\/([^/?#]+)/);
+    if (!match || !match[1]) return "";
+    try {
+      return decodeURIComponent(match[1]).slice(0, 160);
+    } catch {
+      return match[1].slice(0, 160);
+    }
+  }
+
   function appHostWsPayload(state, payload) {
     // 所有 app-host 控制帧都带 clientId + portId，gateway 据此绑定到正确浏览器页面。
     const result = {
@@ -2299,6 +2310,7 @@
     if (payload && payload.type === "app-host-connect") {
       // connect 帧带回浏览器已收到的官方下行游标，gateway 只补缺失增量。
       result.lastServerSeq = Number(state.lastServerSeq || 0);
+      result.threadId = currentRouteThreadId();
     }
     return result;
   }
