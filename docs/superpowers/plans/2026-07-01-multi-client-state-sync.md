@@ -164,7 +164,7 @@ rtk git diff --check
 - 修改：`package.json`
 - 修改：`docs/MULTI-CLIENT-STATE-SYNC.md`
 
-- [ ] **步骤 1：创建脚本化测试脚本**
+- [x] **步骤 1：创建脚本化测试脚本**
 
 测试脚本需要模拟：
 
@@ -174,13 +174,13 @@ rtk git diff --check
 - 保留队列连续时只补 replay；
 - replay gap 后走 snapshot ack。
 
-- [ ] **步骤 2：新增 npm script**
+- [x] **步骤 2：新增 npm script**
 
 ```json
 "test:multi-client-recovery": "node scripts/test-multi-client-recovery.cjs"
 ```
 
-- [ ] **步骤 3：验证**
+- [x] **步骤 3：验证**
 
 ```bash
 rtk pnpm run test:multi-client-recovery

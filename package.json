@@ -11,6 +11,7 @@
     "sync:version": "node scripts/sync-app-version.cjs",
     "check:version": "node scripts/sync-app-version.cjs --check",
     "test": "node --test gateway/test/app-host-frame-observer.test.cjs gateway/test/auth-rate-limit.test.cjs gateway/test/http-utils.test.cjs gateway/test/fast-sync-cache.test.cjs gateway/test/flow-monitor.test.cjs gateway/test/mobile-api.test.cjs gateway/test/mobile-audit-script.test.cjs gateway/test/official-runtime-noncritical.test.cjs gateway/test/server-fast-sync-snapshot.test.cjs gateway/test/thread-event-log.test.cjs launcher/test/log-writer.test.cjs web-shell/test/codex-bridge-fast-sync.test.cjs",
+    "test:multi-client-recovery": "node scripts/test-multi-client-recovery.cjs",
     "web:dev": "pnpm run build:gateway && node gateway/dev/run-gateway.cjs",
     "mobile:audit": "node scripts/audit-mobile-lite.cjs",
     "service:install:mac": "node scripts/install-macos-launchd.cjs",

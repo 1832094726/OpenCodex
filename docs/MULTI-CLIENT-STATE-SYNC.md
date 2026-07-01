@@ -207,11 +207,23 @@ gateway 收到 ack 后：
 
 ## 下一步
 
-1. 增加端到端弱网恢复脚本：高延迟、随机断线、乱序 reconnect、多客户端同 thread。
-2. 补齐 Socket.IO recovery 与 OpenCodex repair 的关联诊断：`missedByTransport`、`repairedByThreadReplay`、`repairedBySnapshot`。
-3. 增加浏览器端真实集成测试：Socket.IO 主路径、脚本加载失败回退、握手失败回退。
-4. 在诊断面板展示 per-client watermarks，而不是只在 JSON API 里可见。
-5. 评估更长窗口的持久 event log：SQLite event log、JetStream 或其它 stream store。
+1. 补齐 Socket.IO recovery 与 OpenCodex repair 的关联诊断：`missedByTransport`、`repairedByThreadReplay`、`repairedBySnapshot`。
+2. 增加浏览器端真实集成测试：Socket.IO 主路径、脚本加载失败回退、握手失败回退。
+3. 在诊断面板展示 per-client watermarks，而不是只在 JSON API 里可见。
+4. 评估更长窗口的持久 event log：SQLite event log、JetStream 或其它 stream store。
+
+## 可执行验证
+
+```bash
+pnpm run test:multi-client-recovery
+```
+
+该脚本会启动一个真实 gateway hub，并模拟：
+
+- 两个客户端打开同一个 thread。
+- 一个客户端收到 app-host frames，另一个客户端断开后重连。
+- 保留队列连续时只补缺失 replay。
+- replay 队列不连续时标记 `replayGap`，随后通过 gateway memory snapshot ack 推进该客户端 `threadCursor`。
 
 ## 验收标准
 
