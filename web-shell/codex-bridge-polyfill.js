@@ -2299,10 +2299,17 @@
     const method = typeof message.method === "string" ? message.method : "";
     const snapshotKey = typeof message.snapshotKey === "string" ? message.snapshotKey : "";
     const threadId = typeof message.threadId === "string" ? message.threadId : "";
-    if (!method || !snapshotKey || !threadId) return null;
-    rememberGatewayKeySnapshotHint(method, threadId, snapshotKey);
+    if (!method || !threadId) return null;
+    if (snapshotKey) {
+      rememberGatewayKeySnapshotHint(method, threadId, snapshotKey);
+    }
     // gap 表示增量不能完整补齐；刷新前先确认 gateway 是否已有同会话全量快照可兜底。
-    return readGatewayFastSyncSnapshotByKey(method, snapshotKey, {
+    if (snapshotKey) return readGatewayFastSyncSnapshotByKey(method, snapshotKey, {
+      requestId: message.requestId || "",
+      threadId,
+    });
+    // 某些 nudge 只携带 threadId；这时让 gateway 用中间层维护的最新 thread 全量状态补洞。
+    return readGatewayFastSyncSnapshot(method, [], {
       requestId: message.requestId || "",
       threadId,
     });
@@ -3304,6 +3311,7 @@
         source: snapshot.source || "gateway",
       });
       acknowledgeFastSyncSnapshotHit(method, ipcArgs, snapshot);
+      if (threadId && FAST_SYNC_MEMORY_SNAPSHOT_METHODS.has(method)) rememberGatewayKeySnapshot(method, threadId, snapshot);
       writeFastSyncBrowserSnapshot(method, ipcArgs, snapshot.value, diagnosticSummary, "gateway-hit");
       return fastSyncSnapshotHit(snapshot.value);
     } catch (error) {
@@ -3361,7 +3369,11 @@
           ...diagnosticSummary,
           method,
         });
-        return null;
+        // snapshotKey 可能已过期或未写入；threadId 仍能命中 gateway 当前维护的最新会话全量状态。
+        return readGatewayFastSyncSnapshot(method, [], {
+          ...diagnosticSummary,
+          threadId: diagnosticSummary && diagnosticSummary.threadId,
+        });
       }
       clientDiagnostic("fast-sync-gateway-key-hit", {
         ...diagnosticSummary,

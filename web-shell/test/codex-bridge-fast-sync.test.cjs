@@ -97,6 +97,26 @@ test("gateway snapshots can be preloaded by snapshot key after a replay gap", ()
   assert.match(keyReadBody, /fast-sync-gateway-key-miss/);
 });
 
+test("replay gap snapshot preload can fall back to thread id without snapshot key", () => {
+  const source = readPolyfillSource();
+  const preloadBody = sourceBetween(source, "function preloadGatewaySnapshotFromNudge", "function scheduleCrossClientSyncRefresh");
+  const gatewayBody = sourceBetween(source, "async function readGatewayFastSyncSnapshot", "async function readGatewayFastSyncSnapshotByKey");
+
+  // 有些 gap nudge 只有 method/threadId；这时也要让 gateway 按 threadId 返回中间层最新全量状态。
+  assert.doesNotMatch(preloadBody, /if \(!method \|\| !snapshotKey \|\| !threadId\) return null/);
+  assert.match(preloadBody, /if \(!method \|\| !threadId\) return null/);
+  assert.match(preloadBody, /return readGatewayFastSyncSnapshot\(method, \[\], \{/);
+  assert.match(gatewayBody, /rememberGatewayKeySnapshot\(method, threadId, snapshot\)/);
+});
+
+test("snapshot key preload falls back to thread id when the key misses", () => {
+  const source = readPolyfillSource();
+  const keyReadBody = sourceBetween(source, "async function readGatewayFastSyncSnapshotByKey", "async function invokeFastSyncSnapshot");
+
+  // snapshotKey 是短期定位符；key miss 时仍可按 threadId 读取 gateway 最新全量状态。
+  assert.match(keyReadBody, /return readGatewayFastSyncSnapshot\(method, \[\], \{\s*\.\.\.diagnosticSummary,\s*threadId: diagnosticSummary && diagnosticSummary\.threadId/);
+});
+
 test("preloaded gateway key snapshots are consumed before live thread reads", () => {
   const source = readPolyfillSource();
   const invokeBody = sourceBetween(source, "async function invokeFastSyncSnapshot", "/** locale-info");
