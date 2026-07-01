@@ -394,6 +394,59 @@ rtk node --test gateway/test/app-host-frame-observer.test.cjs
 rtk node --test web-shell/test/codex-bridge-fast-sync.test.cjs
 ```
 
+### 任务 16：单机真机弱网验证和 Relay Lifecycle
+
+**文件：**
+- 新建：`gateway/runtime/core/relay-lifecycle.cjs`
+- 新建：`gateway/test/relay-lifecycle.test.cjs`
+- 新建：`scripts/observe-weak-network.cjs`
+- 修改：`gateway/runtime/ipc/ws-hub.cjs`
+- 修改：`package.json`
+- 修改：`docs/MULTI-CLIENT-STATE-SYNC.md`
+- 修改：`docs/STATUS-FLOW-MONITORING.md`
+
+- [x] **步骤 1：确认单机边界**
+
+OpenCodex 当前按单机运行，继续使用 SQLite 作为持久 event log；Redis Streams 和 JetStream 不进入近期实现范围。
+
+- [x] **步骤 2：Relay 生命周期状态机**
+
+新增 `relay-lifecycle.cjs`，覆盖：
+
+- `relay_connected`
+- `relay_missing`
+- `relay_recreating`
+- `relay_flushed`
+- `relay_partial_flush`
+- `relay_failed`
+- `relay_closed`
+
+失败态会保留错误证据，直到下一次明确 reconnect/close。
+
+- [x] **步骤 3：接入 ws-hub**
+
+`ws-hub` 在 connect、missing、recreating、flush、failed、close 时记录 relay lifecycle；现有 flow monitor stage 保持兼容。
+
+- [x] **步骤 4：真机弱网 observer**
+
+新增：
+
+```bash
+pnpm run observe:weak-network
+```
+
+常用环境变量：
+
+```bash
+OPENCODEX_WEAK_OBSERVER_BASE_URL=http://127.0.0.1:3737
+OPENCODEX_WEAK_OBSERVER_THREAD_ID=<thread-id>
+OPENCODEX_WEAK_OBSERVER_DURATION_MS=60000
+OPENCODEX_WEAK_OBSERVER_INTERVAL_MS=2000
+OPENCODEX_WEAK_OBSERVER_OUTPUT=/tmp/opencodex-weak-network.jsonl
+```
+
+电脑端运行 observer，手机端执行后台、切网、重进 thread 和发送消息，最后用 JSONL 里的 health、flow、relay、lag 和 repair counters 判断真机弱网恢复是否成立。
+
 ## 验收标准
 
 - 手机前台恢复时优先使用 Socket.IO，只有 Socket.IO 不可用时才回退 raw `/ws`。

@@ -11,6 +11,7 @@ const fs = require("fs");
 const path = require("path");
 const { diagnosticLog, diagnosticWarn, shortId } = require("../core/diagnostics.cjs");
 const { recordFlowEvent } = require("../core/flow-monitor.cjs");
+const { createRelayLifecycleTracker } = require("../core/relay-lifecycle.cjs");
 const { createConfiguredThreadEventLog } = require("../core/thread-event-log.cjs");
 const { DEBUG_LOGS, RUNTIME_DIR, ensureDir } = require("../core/config.cjs");
 const { resolveOpenCodexI18n } = require("../../../shared/i18n/index.cjs");
@@ -145,6 +146,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   const pendingTargetMessagesByClientId = new Map();
   const pendingOrphanTargetResponses = [];
   const pendingAppHostMessagesByRelayKey = new Map();
+  const relayLifecycle = createRelayLifecycleTracker();
   const appHostDownstreamFramesByRelayKey = new Map();
   const appHostDownstreamSeqByRelayKey = new Map();
   const threadEventLogMode = String(process.env.OPENCODEX_THREAD_EVENT_LOG_MODE || "memory").toLowerCase();
@@ -1476,11 +1478,12 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       queued: queue.length,
       sent,
     });
+    const lifecycle = relayLifecycle.markFlushed(clientId, portId, { queued: queue.length, sent });
     recordFlowEvent({
       clientId,
       hint: `relay 已恢复，缓存 ${sent}/${queue.length} 条已补发`,
       scope: "relay",
-      stage: sent === queue.length ? "relay_flushed" : "relay_partial_flush",
+      stage: lifecycle.state,
     });
   }
 
@@ -1495,6 +1498,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       remoteAddress: remoteAddress || socketRemoteAddress(ws),
       onClose(reason) {
         if (relays.get(portId) === relay) relays.delete(portId);
+        relayLifecycle.markClosed(clientId, portId, { reason });
         safeSend(ws, { type: "app-host-port-close", portId, reason }, { suppressDiagnostic: true });
         if (DEBUG_LOGS) {
           diagnosticLog("ws-hub", "app_host_closed", {
@@ -1525,6 +1529,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       },
     });
     relays.set(portId, relay);
+    relayLifecycle.markConnected(clientId, portId, { reason: "attach" });
     safeSend(ws, { type: "app-host-port-connected", portId }, { suppressDiagnostic: true });
     flushPendingAppHostMessages(ws, clientId, portId, relay);
     return relay;
@@ -1577,6 +1582,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
         remoteAddress: req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "",
         onClose(reason) {
           if (relays.get(portId) === relay) relays.delete(portId);
+          relayLifecycle.markClosed(clientId, portId, { reason });
           safeSend(ws, { type: "app-host-port-close", portId, reason }, { suppressDiagnostic: true });
           if (DEBUG_LOGS) {
             diagnosticLog("ws-hub", "app_host_closed", {
@@ -1607,6 +1613,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
         },
       });
       relays.set(portId, relay);
+      relayLifecycle.markConnected(clientId, portId, { reason: "connect" });
       safeSend(ws, { type: "app-host-port-connected", portId }, { suppressDiagnostic: true });
       if (lastServerSeq > 0) {
         flushAppHostDownstreamReplay(ws, clientId, portId, lastServerSeq);
@@ -1667,6 +1674,8 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     if (!relay) {
       rememberPendingAppHostMessage(clientId, portId, data);
       const stateContext = appHostContextFor(clientId, portId);
+      const pendingCount = prunePendingAppHostMessages(clientId, portId).length;
+      relayLifecycle.markMissing(clientId, portId, { queued: pendingCount });
       recordFlowEvent({
         clientId,
         hint: "app-host relay 丢失，正在缓存消息并尝试重建通道",
@@ -1683,18 +1692,23 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
         clientId: shortId(clientId),
         method: frameSummary && frameSummary.raw && frameSummary.raw.method ? frameSummary.raw.method : stateContext.method,
         portId: shortId(portId),
-        queued: prunePendingAppHostMessages(clientId, portId).length,
+        queued: pendingCount,
         requestId: frameSummary && frameSummary.raw && frameSummary.raw.requestId ? shortId(frameSummary.raw.requestId) : stateContext.requestId,
         threadId: frameSummary && frameSummary.raw && frameSummary.raw.threadId ? shortId(frameSummary.raw.threadId) : stateContext.threadId,
         turnId: frameSummary && frameSummary.raw && frameSummary.raw.turnId ? shortId(frameSummary.raw.turnId) : stateContext.turnId,
       });
-      if (typeof createAppHostRelay !== "function") return true;
+      if (typeof createAppHostRelay !== "function") {
+        relayLifecycle.markFailed(clientId, portId, { error: "App host relay is unavailable" });
+        return true;
+      }
       try {
         // 手机端可能仍持有可用的浏览器 MessagePort，但 gateway 侧 relay 已被释放；
         // 当前消息到达时立即补建官方端口，再把缓存和本帧继续送过去，避免用户消息显示失败后消失。
+        relayLifecycle.markRecreating(clientId, portId, { queued: pendingCount });
         relay = createAndAttachAppHostRelay(ws, clientId, portId, socketRemoteAddress(ws));
         return true;
       } catch (error) {
+        relayLifecycle.markFailed(clientId, portId, { error: error instanceof Error ? error.message : String(error) });
         recordFlowEvent({
           clientId,
           error: error instanceof Error ? error.message : String(error),

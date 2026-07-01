@@ -243,6 +243,16 @@ GET /api/diagnostics/flow?clientId=...&threadId=...
 
 复制诊断会同时包含 `flow` 和 `threadDiagnostics`，方便把“打开慢、发消息后才显示、后台回来不刷新”这类问题一次性贴到 issue 或新会话里。
 
+单机真机弱网验证时，可以在电脑端启动 observer：
+
+```bash
+OPENCODEX_WEAK_OBSERVER_BASE_URL=http://127.0.0.1:3737 \
+OPENCODEX_WEAK_OBSERVER_THREAD_ID=<thread-id> \
+pnpm run observe:weak-network
+```
+
+然后在手机端访问同一个 OpenCodex 地址，执行后台 30 秒、切换 Wi-Fi/蜂窝、重新进入同一 thread、发送一条测试消息。observer 会把 health、flow、relay 状态、thread lag 和 repair counters 写入 JSONL，作为判断“是否真的多端流畅”的证据。
+
 ## 传输层选型
 
 OpenCodex 优先复用成熟传输层。当前 gateway 同时支持：
