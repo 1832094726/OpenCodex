@@ -105,5 +105,6 @@ test("thread detail snapshots notify other clients for the same thread", () => {
   assert.match(fastSyncBody, /notifyOtherClientsForThreadSnapshot\(context\.clientId \|\| "", method, threadId, requestSummary\)/);
   assert.match(notifyBody, /reason: "thread-detail-snapshot"/);
   assert.match(notifyBody, /threadId/);
-  assert.match(notifyBody, /broadcastExcept/);
+  assert.match(notifyBody, /sendToThread/);
+  assert.doesNotMatch(notifyBody, /broadcastExcept/);
 });

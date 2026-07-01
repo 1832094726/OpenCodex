@@ -11,6 +11,7 @@ const { DEBUG_LOGS, RUNTIME_DIR, ensureDir } = require("../core/config.cjs");
 const { resolveOpenCodexI18n } = require("../../../shared/i18n/index.cjs");
 const {
   appHostStateContext,
+  appHostThreadStateSnapshot,
   createAppHostFrameState,
   markAppHostClientInactive,
   observeAppHostFrame,
@@ -1031,6 +1032,29 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     }
   }
 
+  /** 向正在查看指定 app-host thread 的活跃浏览器发送 gateway 消息。 */
+  function sendToThread(threadId, payload, options = {}) {
+    const snapshot = appHostThreadStateSnapshot(appHostFrameState, threadId);
+    const activeClientIds = snapshot && Array.isArray(snapshot.activeClientIds) ? snapshot.activeClientIds : [];
+    const excludedClientId = options.excludedClientId || "";
+    let sent = 0;
+    for (const targetClientId of activeClientIds) {
+      if (!targetClientId || targetClientId === excludedClientId) continue;
+      if (sendTo(targetClientId, payload, { ...options, route: "send_to_thread" })) sent += 1;
+    }
+    if (DEBUG_LOGS && !options.suppressDiagnostic) {
+      // thread 定向同步只投给同会话页面，避免其它客户端收到无关刷新提示。
+      diagnosticLog("ws-hub", "send_to_thread", {
+        ...wsPayloadSummary(payload),
+        activeClientCount: activeClientIds.length,
+        excludedClientId: shortId(excludedClientId),
+        sent,
+        threadId: shortId(threadId),
+      });
+    }
+    return sent;
+  }
+
   function hasClient(clientId) {
     const socket = clientsById.get(clientId);
     return !!socket && socket.readyState === socket.OPEN;
@@ -1542,7 +1566,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     });
   });
 
-  return { broadcast, broadcastExcept, clients, closeAllAppHostRelays, sendTo, hasClient };
+  return { broadcast, broadcastExcept, clients, closeAllAppHostRelays, hasClient, sendTo, sendToThread };
 }
 
 module.exports = { createWsHub };

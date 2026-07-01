@@ -1922,14 +1922,14 @@ function rememberFastSyncSnapshot(channel, _args, requestSummary, responseResult
 }
 
 function notifyOtherClientsForThreadSnapshot(sourceClientId, method, threadId, requestSummary) {
-  if (!sourceClientId || !threadId || !wsHub || typeof wsHub.broadcastExcept !== "function") return false;
+  if (!sourceClientId || !threadId || !wsHub || typeof wsHub.sendToThread !== "function") return false;
   if (!isFastSyncMemoryCacheableMethod(method)) return false;
   const nowMs = Date.now();
   const lastAtMs = Number(threadSnapshotNudgeAtMsByThreadId.get(threadId) || 0);
   if (lastAtMs > 0 && nowMs - lastAtMs < THREAD_SNAPSHOT_NUDGE_MIN_INTERVAL_MS) return false;
   threadSnapshotNudgeAtMsByThreadId.set(threadId, nowMs);
-  wsHub.broadcastExcept(
-    sourceClientId,
+  wsHub.sendToThread(
+    threadId,
     {
       type: "opencodex:sync-nudge",
       sourceClientId,
@@ -1939,7 +1939,7 @@ function notifyOtherClientsForThreadSnapshot(sourceClientId, method, threadId, r
       threadId,
       at: nowMs,
     },
-    { suppressDiagnostic: true }
+    { excludedClientId: sourceClientId, suppressDiagnostic: true }
   );
   return true;
 }

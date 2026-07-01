@@ -226,3 +226,13 @@ test("ws lifecycle marks app-host thread clients inactive on disconnect", () => 
   assert.match(wsHubSource, /markAppHostClientInactive\(appHostFrameState, closedClientId\)/);
   assert.match(wsHubSource, /markAppHostClientInactive\(appHostFrameState, erroredClientId\)/);
 });
+
+test("ws hub can target active clients for a single app-host thread", () => {
+  const wsHubSource = fs.readFileSync(path.join(repoRoot, "gateway", "runtime", "ipc", "ws-hub.cjs"), "utf8");
+
+  // 多端同步应尽量只发给正在看同一 thread 的活跃客户端，避免无关页面收到刷新提示。
+  assert.match(wsHubSource, /appHostThreadStateSnapshot/);
+  assert.match(wsHubSource, /function sendToThread/);
+  assert.match(wsHubSource, /activeClientIds/);
+  assert.match(wsHubSource, /return \{ broadcast, broadcastExcept, clients, closeAllAppHostRelays, hasClient, sendTo, sendToThread \}/);
+});
