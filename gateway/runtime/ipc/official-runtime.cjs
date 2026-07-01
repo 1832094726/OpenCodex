@@ -606,8 +606,8 @@ function ccSwitchSettingsWatchPathFromFilename(filename) {
 function scheduleHiddenOfficialRuntimeRefresh(reason, changedPath) {
   if (codexRuntimeRefreshTimer) clearTimeout(codexRuntimeRefreshTimer);
   const clientCount = wsHub && wsHub.clients && typeof wsHub.clients.size === "number" ? wsHub.clients.size : 0;
-  // 有浏览器客户端在线时延迟刷新隐藏 runtime，避免用户点进会话时 app-server 被配置监听器中途杀掉。
-  const delayMs = clientCount > 0 ? CODEX_RUNTIME_REFRESH_ACTIVE_CLIENT_DELAY_MS : CODEX_RUNTIME_REFRESH_DEBOUNCE_MS;
+  // 配置切换需要尽快落到隐藏 runtime；只做短防抖，避免客户端在线时无限顺延导致会话详情一直读旧状态。
+  const delayMs = CODEX_RUNTIME_REFRESH_DEBOUNCE_MS;
   appServerSpawnHook.lastRestartScheduledAt = new Date(Date.now() + delayMs).toISOString();
   appServerSpawnHook.lastRestartScheduleReason = reason;
   appServerSpawnHook.lastRestartScheduleDelayMs = delayMs;
@@ -620,17 +620,6 @@ function scheduleHiddenOfficialRuntimeRefresh(reason, changedPath) {
   });
   codexRuntimeRefreshTimer = setTimeout(() => {
     codexRuntimeRefreshTimer = null;
-    const activeClientCount = wsHub && wsHub.clients && typeof wsHub.clients.size === "number" ? wsHub.clients.size : 0;
-    if (activeClientCount > 0) {
-      // 用户仍有浏览器页在线时继续顺延，避免后台配置刷新打断正在进行的 thread/resume 或 turns/list。
-      diagnosticLog("official-runtime", "hidden_runtime_refresh_deferred_for_clients", {
-        activeClientCount,
-        changedPath,
-        reason,
-      });
-      scheduleHiddenOfficialRuntimeRefresh(reason, changedPath);
-      return;
-    }
     refreshHiddenOfficialRuntime(reason, changedPath);
   }, delayMs);
   if (codexRuntimeRefreshTimer && typeof codexRuntimeRefreshTimer.unref === "function") codexRuntimeRefreshTimer.unref();
