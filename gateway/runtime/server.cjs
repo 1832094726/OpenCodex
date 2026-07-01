@@ -442,13 +442,17 @@ function createRequestHandler({ getWsHub = () => null, localFiles, mobileApi, pi
         return sendJson(res, 400, { ok: false, error: "Method is not fast-sync cacheable" }, { "cache-control": "no-store" });
       }
 
-      // args 与官方 IPC 入站参数保持同形，确保浏览器读取和 gateway 写入使用同一个快照 key。
-      const parsedArgs = parseFastSyncSnapshotArgsJson(argsJson);
-      if (!parsedArgs.ok) {
-        return sendJson(res, 400, { ok: false, error: parsedArgs.error }, { "cache-control": "no-store" });
+      const explicitKey = url.searchParams.get("key") || "";
+      // gap nudge 已经知道写入端生成的快照 key，可以直接按 key 读中间层全量状态，避免弱网下再重建同形 args。
+      let key = explicitKey;
+      if (!key) {
+        // args 与官方 IPC 入站参数保持同形，确保浏览器读取和 gateway 写入使用同一个快照 key。
+        const parsedArgs = parseFastSyncSnapshotArgsJson(argsJson);
+        if (!parsedArgs.ok) {
+          return sendJson(res, 400, { ok: false, error: parsedArgs.error }, { "cache-control": "no-store" });
+        }
+        key = cacheKeyForSnapshot(method, parsedArgs.args);
       }
-
-      const key = cacheKeyForSnapshot(method, parsedArgs.args);
       // thread/read 和 thread/turns/list 只读 gateway 进程内快照，不落盘也不回退到磁盘缓存。
       const cache = isFastSyncCacheableMethod(method) ? fastSyncCache : memoryFastSyncCache;
       const snapshot = cache.readSnapshot({ key });

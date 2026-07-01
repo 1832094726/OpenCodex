@@ -73,6 +73,21 @@ test("gateway thread snapshot hits acknowledge the client cursor", () => {
   assert.match(source, /FAST_SYNC_PERSISTENT_SNAPSHOT_METHODS\.has\(method\)/);
 });
 
+test("gateway snapshots can be preloaded by snapshot key after a replay gap", () => {
+  const source = readPolyfillSource();
+  const refreshBody = sourceBetween(source, "function refreshCurrentThreadRouteFromSnapshotNudge", "function scheduleCrossClientSyncRefresh");
+  const keyReadBody = sourceBetween(source, "async function readGatewayFastSyncSnapshotByKey", "async function invokeFastSyncSnapshot");
+
+  assert.match(refreshBody, /preloadGatewaySnapshotFromNudge\(message\)/);
+  assert.match(refreshBody, /preload\.catch\(\(\) => \{\}\)/);
+  assert.match(refreshBody, /return navigateToRestorableRoute\(route, message\)/);
+  assert.match(source, /function preloadGatewaySnapshotFromNudge/);
+  assert.match(source, /message\.snapshotKey/);
+  assert.match(keyReadBody, /parsed\.searchParams\.set\("key", snapshotKey\)/);
+  assert.match(keyReadBody, /fast-sync-gateway-key-hit/);
+  assert.match(keyReadBody, /fast-sync-gateway-key-miss/);
+});
+
 test("thread detail sync nudge refreshes only the matching route", () => {
   const source = readPolyfillSource();
   const syncBody = sourceBetween(source, "function scheduleCrossClientSyncRefresh", "function waitForGatewayWsReady");

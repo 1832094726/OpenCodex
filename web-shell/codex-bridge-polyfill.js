@@ -2268,6 +2268,14 @@
       reason: message && message.reason ? String(message.reason) : "",
       threadId: shortThreadId((message && message.threadId) || ""),
     });
+    const preload = preloadGatewaySnapshotFromNudge(message);
+    if (preload) {
+      preload.catch(() => {});
+    }
+    return navigateToRestorableRoute(route, message);
+  }
+
+  function navigateToRestorableRoute(route, message) {
     try {
       if (route === `${location.pathname || "/"}${location.search || ""}${location.hash || ""}`) {
         location.reload();
@@ -2282,6 +2290,18 @@
       });
       return false;
     }
+  }
+
+  function preloadGatewaySnapshotFromNudge(message) {
+    if (!message || message.replayGap !== true) return null;
+    const method = typeof message.method === "string" ? message.method : "";
+    const snapshotKey = typeof message.snapshotKey === "string" ? message.snapshotKey : "";
+    if (!method || !snapshotKey) return null;
+    // gap 表示增量不能完整补齐；刷新前先确认 gateway 是否已有同会话全量快照可兜底。
+    return readGatewayFastSyncSnapshotByKey(method, snapshotKey, {
+      requestId: message.requestId || "",
+      threadId: message.threadId || "",
+    });
   }
 
   function scheduleCrossClientSyncRefresh(message) {
@@ -3196,6 +3216,69 @@
         error: error instanceof Error ? error.message : String(error),
         method,
         reason: "gateway-read",
+      });
+      return null;
+    } finally {
+      if (abortTimer) clearTimeout(abortTimer);
+    }
+  }
+
+  async function readGatewayFastSyncSnapshotByKey(method, snapshotKey, diagnosticSummary) {
+    let url = "";
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timeoutMs = fastSyncTimeoutMs(FAST_SYNC_GATEWAY_READ_TIMEOUT_MS, 250);
+    let abortTimer = null;
+    try {
+      const parsed = new URL("/api/fast-sync/snapshot", location.origin);
+      parsed.searchParams.set("method", method);
+      parsed.searchParams.set("key", snapshotKey);
+      url = parsed.toString();
+    } catch {
+      return null;
+    }
+    try {
+      if (controller && timeoutMs > 0) {
+        abortTimer = setTimeout(() => {
+          clientDiagnostic("fast-sync-refresh-failed", {
+            ...diagnosticSummary,
+            error: "timeout",
+            method,
+            reason: "gateway-key-read-timeout",
+          });
+          try {
+            controller.abort();
+          } catch {}
+        }, timeoutMs);
+      }
+      const res = await w.fetch(url, {
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: gatewayAuthHeaders({ accept: "application/json" }),
+        signal: controller ? controller.signal : undefined,
+      });
+      if (!res.ok) return null;
+      const body = await res.json().catch(() => null);
+      const snapshot = body && body.ok !== false ? body.snapshot : null;
+      if (!snapshotHasValue(snapshot)) {
+        clientDiagnostic("fast-sync-gateway-key-miss", {
+          ...diagnosticSummary,
+          method,
+        });
+        return null;
+      }
+      clientDiagnostic("fast-sync-gateway-key-hit", {
+        ...diagnosticSummary,
+        method,
+        source: snapshot.source || "gateway",
+      });
+      return fastSyncSnapshotHit(snapshot.value);
+    } catch (error) {
+      if (error && error.name === "AbortError") return null;
+      clientDiagnostic("fast-sync-refresh-failed", {
+        ...diagnosticSummary,
+        error: error instanceof Error ? error.message : String(error),
+        method,
+        reason: "gateway-key-read",
       });
       return null;
     } finally {

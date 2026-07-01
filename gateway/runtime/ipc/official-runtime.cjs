@@ -1936,6 +1936,7 @@ function notifyOtherClientsForThreadSnapshot(sourceClientId, method, threadId, r
       reason: "thread-detail-snapshot",
       method,
       requestId: (requestSummary && requestSummary.requestId) || "",
+      snapshotKey: (requestSummary && requestSummary.fastSyncSnapshotKey) || "",
       threadId,
       at: nowMs,
     },
