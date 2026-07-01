@@ -2871,6 +2871,7 @@
     "model/list",
     "thread/list",
   ]);
+  const FAST_SYNC_MEMORY_SNAPSHOT_METHODS = new Set(["thread/read", "thread/turns/list"]);
 
   /** 提取官方 app-server 只读方法名；这些方法多次并发调用时结果可短时间复用。 */
   function readOnlyAppServerMethod(payload) {
@@ -3266,6 +3267,9 @@
       const parsed = new URL("/api/fast-sync/snapshot", location.origin);
       parsed.searchParams.set("method", method);
       parsed.searchParams.set("args", JSON.stringify(ipcArgs));
+      const threadId = diagnosticSummary && typeof diagnosticSummary.threadId === "string" ? diagnosticSummary.threadId : "";
+      // thread 详情快照由 gateway 进程内维护；带上 threadId 才能在 args/key 不匹配时读取最新全量状态。
+      if (threadId && FAST_SYNC_MEMORY_SNAPSHOT_METHODS.has(method)) parsed.searchParams.set("threadId", threadId);
       url = parsed.toString();
     } catch {
       return null;

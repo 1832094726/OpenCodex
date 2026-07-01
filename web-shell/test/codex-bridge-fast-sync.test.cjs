@@ -113,6 +113,17 @@ test("preloaded gateway key snapshots are consumed before live thread reads", ()
   assert.match(invokeBody, /return keyedSnapshot/);
 });
 
+test("thread detail gateway reads include thread id for middle-layer full-state fallback", () => {
+  const source = readPolyfillSource();
+  const gatewayBody = sourceBetween(source, "async function readGatewayFastSyncSnapshot", "async function readGatewayFastSyncSnapshotByKey");
+  const invokeBody = sourceBetween(source, "async function invokeFastSyncSnapshot", "/** locale-info");
+
+  // thread 详情没有 snapshotKey hint 时，也要让 gateway 能按 threadId 读取最新进程内全量状态。
+  assert.match(gatewayBody, /const threadId = diagnosticSummary && typeof diagnosticSummary\.threadId === "string" \? diagnosticSummary\.threadId : ""/);
+  assert.match(gatewayBody, /if \(threadId && FAST_SYNC_MEMORY_SNAPSHOT_METHODS\.has\(method\)\) parsed\.searchParams\.set\("threadId", threadId\)/);
+  assert.match(invokeBody, /threadId,/);
+});
+
 test("thread detail sync nudge refreshes only the matching route", () => {
   const source = readPolyfillSource();
   const syncBody = sourceBetween(source, "function scheduleCrossClientSyncRefresh", "function waitForGatewayWsReady");
