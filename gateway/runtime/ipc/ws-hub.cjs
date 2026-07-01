@@ -2,6 +2,10 @@ let WebSocketServer = null;
 try {
   ({ WebSocketServer } = require("ws"));
 } catch {}
+let SocketIoServer = null;
+try {
+  ({ Server: SocketIoServer } = require("socket.io"));
+} catch {}
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
@@ -149,6 +153,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   let lastAuthRejectLogAtMs = 0;
   let suppressedAuthRejectCount = 0;
   const appHostTraffic = new Map();
+  attachSocketIoTransport();
 
   function socketRemoteAddress(socket) {
     return (socket && socket.__codexRemoteAddress) || "";
@@ -156,6 +161,31 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
 
   function socketClientId(socket) {
     return (socket && socket.__codexWebClientId) || "";
+  }
+
+  function socketIoWsLike(socket) {
+    const ws = {
+      CLOSED: 3,
+      OPEN: 1,
+      bufferedAmount: 0,
+      readyState: 1,
+      __codexRemoteAddress: socket && socket.handshake ? socket.handshake.address || "" : "",
+      __codexSocketIoId: socket ? socket.id : "",
+      close() {
+        ws.readyState = ws.CLOSED;
+        if (socket && socket.connected) socket.disconnect(true);
+      },
+      send(message, callback) {
+        if (!socket || !socket.connected || ws.readyState !== ws.OPEN) {
+          if (typeof callback === "function") callback(new Error("Socket.IO transport is closed"));
+          return;
+        }
+        // Socket.IO 负责传输恢复；OpenCodex 仍发送原始 JSON 字符串，保持 browser 协议不分叉。
+        socket.emit("message", message);
+        if (typeof callback === "function") process.nextTick(callback);
+      },
+    };
+    return ws;
   }
 
   function appHostTrafficKey(clientId, portId, direction) {
@@ -1213,13 +1243,17 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
 
   function appHostThreadClientWatermarks(thread) {
     const activeClientPorts = Array.isArray(thread && thread.activeClientPorts) ? thread.activeClientPorts : [];
+    const snapshotAckThreadSeqByClientId =
+      thread && thread.snapshotAckThreadSeqByClientId && typeof thread.snapshotAckThreadSeqByClientId === "object"
+        ? thread.snapshotAckThreadSeqByClientId
+        : {};
     return activeClientPorts.map((entry) => {
       const portIds = Array.isArray(entry && entry.portIds) ? entry.portIds : [];
       const cursors = portIds.map((portId) => rememberedAppHostThreadCursor(entry.clientId, portId, thread.threadId));
       return {
         clientId: entry.clientId,
         portIds,
-        snapshotAckThreadSeq: entry.clientId === thread.lastSnapshotAckClientId ? Number(thread.lastSnapshotAckThreadSeq || 0) : 0,
+        snapshotAckThreadSeq: Math.max(0, Number(snapshotAckThreadSeqByClientId[entry.clientId]) || 0),
         threadCursor: Math.max(0, ...cursors),
       };
     });
@@ -1696,10 +1730,138 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return false;
   }
 
+  function registerClientHello(ws, clientId) {
+    const previousClientId = ws.__codexWebClientId;
+    if (previousClientId && previousClientId !== clientId && clientsById.get(previousClientId) === ws) {
+      clientsById.delete(previousClientId);
+    }
+    // 后来重复 hello 时直接覆盖映射，保证同一 clientId 指向最新连接。
+    ws.__codexWebClientId = clientId;
+    clientsById.set(clientId, ws);
+    flushPendingTargetMessages(ws, clientId);
+    flushOrphanTargetResponses(ws, clientId);
+    recordFlowEvent({
+      clientId,
+      hint: "浏览器连接已确认 clientId，可以接收定向回包",
+      scope: "connection",
+      stage: "transport_ready",
+    });
+    if (DEBUG_LOGS) {
+      diagnosticLog("ws-hub", "hello", {
+        clientId: shortId(clientId),
+        clientCount: clients.size,
+        mappedClientCount: clientsById.size,
+        remoteAddress: socketRemoteAddress(ws),
+      });
+    }
+    try {
+      // ack 明确告诉浏览器：clientId 已经进入路由表，可以开始发会产生异步回包的官方 IPC。
+      ws.send(JSON.stringify({ type: "hello-ack", clientId }));
+      if (DEBUG_LOGS) diagnosticLog("ws-hub", "hello_ack", { clientId: shortId(clientId) });
+    } catch (error) {
+      diagnosticWarn("ws-hub", "hello_ack_failed", {
+        clientId: shortId(clientId),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  function parseClientFrame(raw) {
+    if (typeof raw === "string" || Buffer.isBuffer(raw)) return JSON.parse(String(raw));
+    if (raw && typeof raw === "object") return raw;
+    return null;
+  }
+
+  function handleClientMessageFrame(ws, req, raw) {
+    try {
+      const message = parseClientFrame(raw);
+      const clientId = message && typeof message.clientId === "string" ? message.clientId : "";
+      // hello 是浏览器接入 IPC 的握手消息，拿到 clientId 后才能定向投递事件。
+      if (message && message.type === "hello" && clientId) {
+        registerClientHello(ws, clientId);
+        return;
+      }
+      if (handleWsControlMessage(ws, req, message)) return;
+    } catch (error) {
+      diagnosticWarn("ws-hub", "message_parse_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  function attachSocketIoTransport() {
+    if (!SocketIoServer) {
+      diagnosticWarn("ws-hub", "socketio_unavailable", {
+        hint: "socket.io dependency is not installed; raw /ws transport remains active",
+      });
+      return null;
+    }
+    const io = new SocketIoServer(server, {
+      connectionStateRecovery: {
+        // 复用现有重连缓冲窗口，短暂移动端断线优先交给成熟传输层补包。
+        maxDisconnectionDuration: Math.max(1_000, TARGET_RECONNECT_BUFFER_TTL_MS),
+        skipMiddlewares: false,
+      },
+      path: "/socket.io",
+      serveClient: true,
+    });
+    io.engine.use((req, res, next) => {
+      const url = new URL(req.url || "", `http://${req.headers.host || "localhost"}`);
+      if (!isAuthed(req, url)) {
+        logAuthRejected(url.pathname);
+        res.writeHead(401);
+        res.end("Unauthorized");
+        return;
+      }
+      next();
+    });
+    io.on("connection", (socket) => {
+      const ws = socketIoWsLike(socket);
+      clients.add(ws);
+      if (DEBUG_LOGS) {
+        diagnosticLog("ws-hub", "socketio_connected", {
+          clientCount: clients.size,
+          recovered: socket.recovered === true,
+          remoteAddress: socketRemoteAddress(ws),
+        });
+      }
+      socket.on("message", (raw) => handleClientMessageFrame(ws, socket.request, raw));
+      socket.on("disconnect", () => {
+        ws.readyState = ws.CLOSED;
+        const closedClientId = ws.__codexWebClientId || "";
+        markAppHostClientInactive(appHostFrameState, closedClientId);
+        removeClient(ws);
+        if (DEBUG_LOGS) {
+          diagnosticLog("ws-hub", "socketio_closed", {
+            clientId: shortId(closedClientId),
+            clientCount: clients.size,
+            mappedClientCount: clientsById.size,
+          });
+        }
+      });
+      socket.on("error", (error) => {
+        ws.readyState = ws.CLOSED;
+        const erroredClientId = ws.__codexWebClientId || "";
+        markAppHostClientInactive(appHostFrameState, erroredClientId);
+        removeClient(ws);
+        diagnosticWarn("ws-hub", "socketio_error", {
+          clientId: shortId(erroredClientId),
+          clientCount: clients.size,
+          error: error instanceof Error ? error.message : String(error),
+          mappedClientCount: clientsById.size,
+        });
+      });
+    });
+    return io;
+  }
+
   // 只接受 /ws 升级，并校验 gateway 访问 token。浏览器 WebSocket 不能自定义 header，所以允许 query/cookie。
   server.on("upgrade", (req, socket, head) => {
     // 先在 HTTP upgrade 阶段完成路径和 auth 校验，失败时不创建 WebSocket 对象。
     const url = new URL(req.url || "", `http://${req.headers.host || "localhost"}`);
+    if (url.pathname === "/socket.io" || url.pathname.startsWith("/socket.io/")) {
+      return;
+    }
     if (url.pathname !== "/ws") {
       diagnosticWarn("ws-hub", "upgrade_rejected_path", { url: req.url || "" });
       return socket.destroy();
@@ -1719,52 +1881,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
         });
       }
       ws.on("message", (raw) => {
-        try {
-          const message = JSON.parse(String(raw));
-          const clientId = message && typeof message.clientId === "string" ? message.clientId : "";
-          // hello 是浏览器接入 IPC 的握手消息，拿到 clientId 后才能定向投递事件。
-          if (message && message.type === "hello" && clientId) {
-            const previousClientId = ws.__codexWebClientId;
-            if (previousClientId && previousClientId !== clientId && clientsById.get(previousClientId) === ws) {
-              clientsById.delete(previousClientId);
-            }
-            // 后来重复 hello 时直接覆盖映射，保证同一 clientId 指向最新连接。
-            ws.__codexWebClientId = clientId;
-            clientsById.set(clientId, ws);
-            flushPendingTargetMessages(ws, clientId);
-            flushOrphanTargetResponses(ws, clientId);
-            recordFlowEvent({
-              clientId,
-              hint: "WebSocket 已确认 clientId，浏览器可以接收定向回包",
-              scope: "connection",
-              stage: "ws_ready",
-            });
-            if (DEBUG_LOGS) {
-              diagnosticLog("ws-hub", "hello", {
-                clientId: shortId(clientId),
-                clientCount: clients.size,
-                mappedClientCount: clientsById.size,
-                remoteAddress: socketRemoteAddress(ws),
-              });
-            }
-            try {
-              // ack 明确告诉浏览器：clientId 已经进入路由表，可以开始发会产生异步回包的官方 IPC。
-              ws.send(JSON.stringify({ type: "hello-ack", clientId }));
-              if (DEBUG_LOGS) diagnosticLog("ws-hub", "hello_ack", { clientId: shortId(clientId) });
-            } catch (error) {
-              diagnosticWarn("ws-hub", "hello_ack_failed", {
-                clientId: shortId(clientId),
-                error: error instanceof Error ? error.message : String(error),
-              });
-            }
-            return;
-          }
-          if (handleWsControlMessage(ws, req, message)) return;
-        } catch (error) {
-          diagnosticWarn("ws-hub", "message_parse_failed", {
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
+        handleClientMessageFrame(ws, req, raw);
       });
       ws.on("close", () => {
         // close/error 都要从两个索引里删除，避免后续 sendTo 命中过期 socket。

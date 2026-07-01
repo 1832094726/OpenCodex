@@ -5,6 +5,7 @@ const path = require("node:path");
 const test = require("node:test");
 const { once } = require("node:events");
 const { WebSocket } = require("ws");
+const { io: createSocketIoClient } = require("socket.io-client");
 
 const {
   appHostStateContext,
@@ -279,6 +280,7 @@ test("thread state records per-client snapshot acknowledgements", () => {
     method: "thread/read",
     source: "gateway-memory",
     threadId: "thread-snapshot",
+    threadSeq: 4,
   });
   recordAppHostThreadSnapshotAck(state, {
     capturedAtMs: 1780000001000,
@@ -300,6 +302,10 @@ test("thread state records per-client snapshot acknowledgements", () => {
   assert.equal(snapshot.lastSnapshotAckCapturedAtMs, 1780000001000);
   assert.equal(snapshot.lastSnapshotAckKey, "snapshot-key-other");
   assert.equal(snapshot.lastSnapshotAckThreadSeq, 9);
+  assert.deepEqual(snapshot.snapshotAckThreadSeqByClientId, {
+    "client-snapshot-a": 4,
+    "client-snapshot-b": 9,
+  });
 });
 
 test("thread state can list sanitized thread snapshots", () => {
@@ -783,6 +789,56 @@ test("ws hub can target active clients for a single app-host thread", () => {
   assert.match(wsHubSource, /return \{ broadcast, broadcastExcept, clients, closeAllAppHostRelays, hasClient, sendTo, sendToThread, snapshotThreads \}/);
 });
 
+test("ws hub exposes a Socket.IO transport beside raw websocket fallback", () => {
+  const wsHubSource = fs.readFileSync(path.join(repoRoot, "gateway", "runtime", "ipc", "ws-hub.cjs"), "utf8");
+  const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+
+  // 成熟传输层由 Socket.IO 承担连接恢复和 room/ack 语义；raw /ws 保留为兼容回退。
+  assert.equal(typeof packageJson.dependencies["socket.io"], "string");
+  assert.match(wsHubSource, /require\("socket\.io"\)/);
+  assert.match(wsHubSource, /connectionStateRecovery/);
+  assert.match(wsHubSource, /function attachSocketIoTransport/);
+  assert.match(wsHubSource, /url\.pathname !== "\/ws"/);
+});
+
+test("socket.io transport accepts the existing gateway json protocol", async () => {
+  const { createWsHub } = require("../runtime/ipc/ws-hub.cjs");
+  const server = http.createServer((req, res) => {
+    res.writeHead(404);
+    res.end();
+  });
+  const hub = createWsHub(server, {
+    createAppHostRelay() {
+      throw new Error("not used");
+    },
+    isAuthed: () => true,
+  });
+  const address = await listen(server);
+  const client = createSocketIoClient(`http://127.0.0.1:${address.port}`, {
+    path: "/socket.io",
+    reconnection: false,
+    transports: ["websocket"],
+  });
+
+  try {
+    await once(client, "connect");
+    const helloAckPromise = once(client, "message");
+    client.emit("message", { type: "hello", clientId: "client-socketio" });
+    const [helloAckRaw] = await helloAckPromise;
+    const helloAck = JSON.parse(String(helloAckRaw));
+    assert.deepEqual(helloAck, { type: "hello-ack", clientId: "client-socketio" });
+    assert.equal(hub.hasClient("client-socketio"), true);
+
+    const targetedPromise = once(client, "message");
+    assert.equal(hub.sendTo("client-socketio", { type: "socketio-targeted", value: 1 }), true);
+    const [targetedRaw] = await targetedPromise;
+    assert.deepEqual(JSON.parse(String(targetedRaw)), { type: "socketio-targeted", value: 1 });
+  } finally {
+    client.close();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("ws hub records fast sync snapshot acknowledgements per app-host thread", async () => {
   const { createWsHub } = require("../runtime/ipc/ws-hub.cjs");
   const server = http.createServer((req, res) => {
@@ -967,6 +1023,19 @@ test("ws hub advances client thread cursor from gateway snapshot acknowledgement
     }));
     await new Promise((resolve) => setTimeout(resolve, 10));
 
+    // A 如果随后 ack 一个更低水位，不能把 B 的 per-client 快照水位覆盖掉。
+    wsA.send(JSON.stringify({
+      capturedAtMs: Date.now(),
+      clientId: "client-snapshot-cursor-source",
+      key: "snapshot-cursor-source-key",
+      method: "thread/read",
+      source: "gateway-memory",
+      threadId: "thread-snapshot-cursor",
+      threadSeq: 2,
+      type: "opencodex:fast-sync-snapshot-ack",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
     relayA.onMessage(JSON.stringify({ id: "rpc-snapshot-cursor-5", method: "thread/read", result: { threadId: "thread-snapshot-cursor", turnId: "turn-5" } }));
     await wsMessage(wsA, (message) => message.type === "app-host-port-message" && message.threadSeq === 5);
 
@@ -989,12 +1058,22 @@ test("ws hub advances client thread cursor from gateway snapshot acknowledgement
     assert.equal(nudge.replaySent, 1);
 
     const snapshot = hub.snapshotThreads({ threadId: "thread-snapshot-cursor" }).threads[0];
-    assert.equal(snapshot.lastSnapshotAckThreadSeq, 4);
+    assert.equal(snapshot.lastSnapshotAckThreadSeq, 2);
+    assert.deepEqual(snapshot.snapshotAckThreadSeqByClientId, {
+      "client-snapshot-cursor-target": 4,
+      "client-snapshot-cursor-source": 2,
+    });
     assert.ok(Array.isArray(snapshot.clientWatermarks));
     assert.deepEqual(snapshot.clientWatermarks.find((entry) => entry.clientId === "client-snapshot-cursor-target"), {
       clientId: "client-snapshot-cursor-target",
       portIds: ["port-snapshot-cursor-target"],
       snapshotAckThreadSeq: 4,
+      threadCursor: 5,
+    });
+    assert.deepEqual(snapshot.clientWatermarks.find((entry) => entry.clientId === "client-snapshot-cursor-source"), {
+      clientId: "client-snapshot-cursor-source",
+      portIds: ["port-snapshot-cursor-source"],
+      snapshotAckThreadSeq: 2,
       threadCursor: 5,
     });
   } finally {

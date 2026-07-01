@@ -197,6 +197,7 @@ function ensureThreadState(state, threadId) {
       sessionId: "",
       snapshotAckClientIds: new Set(),
       snapshotAckCount: 0,
+      snapshotAckThreadSeqByClientId: new Map(),
       threadId,
       threadReplayCount: 0,
       upstreamFrameCount: 0,
@@ -370,6 +371,11 @@ function recordAppHostThreadSnapshotAck(state, details = {}) {
     thread.activeClientIds.add(clientId);
     thread.snapshotAckClientIds.add(clientId);
   }
+  const snapshotAckThreadSeq = Math.max(0, Number(details.threadSeq) || 0);
+  if (clientId) {
+    // 每个浏览器/手机客户端都有自己的快照水位，不能用 thread 级最后一次 ack 覆盖。
+    thread.snapshotAckThreadSeqByClientId.set(clientId, snapshotAckThreadSeq);
+  }
   thread.snapshotAckCount += 1;
   thread.lastSnapshotAckAtMs = nowMs;
   thread.lastSnapshotAckCapturedAtMs = Math.max(0, Number(details.capturedAtMs) || 0);
@@ -377,8 +383,9 @@ function recordAppHostThreadSnapshotAck(state, details = {}) {
   thread.lastSnapshotAckKey = typeof details.key === "string" ? details.key.slice(0, 160) : "";
   thread.lastSnapshotAckMethod = typeof details.method === "string" ? details.method.slice(0, 80) : "";
   thread.lastSnapshotAckSource = typeof details.source === "string" ? details.source.slice(0, 80) : "";
-  thread.lastSnapshotAckThreadSeq = Math.max(0, Number(details.threadSeq) || 0);
+  thread.lastSnapshotAckThreadSeq = snapshotAckThreadSeq;
   trimMap(thread.clientLastSeenAtMs, state.maxEntries);
+  trimMap(thread.snapshotAckThreadSeqByClientId, state.maxEntries);
   return appHostThreadStateSnapshot(state, threadId);
 }
 
@@ -434,6 +441,7 @@ function appHostThreadStateSnapshot(state, threadId) {
     snapshotAckClientCount: thread.snapshotAckClientIds.size,
     snapshotAckClientIds: Array.from(thread.snapshotAckClientIds.keys()),
     snapshotAckCount: thread.snapshotAckCount,
+    snapshotAckThreadSeqByClientId: Object.fromEntries(thread.snapshotAckThreadSeqByClientId.entries()),
     threadId: thread.threadId,
     nudgeCount: thread.nudgeCount,
     threadReplayCount: thread.threadReplayCount,

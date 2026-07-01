@@ -221,6 +221,27 @@ GET /api/diagnostics/flow?clientId=...&threadId=...
 
 ## 多客户端水位诊断
 
+`GET /api/diagnostics/threads?threadId=<id>` 会返回每个活跃客户端的 `clientWatermarks`：
+
+- `threadCursor`：gateway 认为该客户端端口已经投递到的 app-host `threadSeq`。
+- `snapshotAckThreadSeq`：该客户端最近一次消费 gateway 全量快照的水位。
+- `latestKnownThreadSeq`：gateway 当前观察到的 thread 最新下行水位。
+
+`snapshotAckThreadSeqByClientId` 是按客户端保存的全量快照消费水位；`lastSnapshotAckThreadSeq` 只表示最近一次 ack 事件，不能用于判断其它客户端是否落后。
+
+排查规则：如果 `latestKnownThreadSeq > threadCursor` 且 replay 队列连续，gateway 只补增量；如果队列不连续，浏览器应读取 gateway memory snapshot 并发送 snapshot ack。
+
+## 传输层选型
+
+OpenCodex 优先复用成熟传输层。当前 gateway 同时支持：
+
+- `/socket.io`：Socket.IO 传输，负责连接生命周期、ping/pong、重连、ack/room 能力以及 connection state recovery。
+- `/ws`：raw WebSocket 兼容入口，保留给旧浏览器 polyfill 和回退路径。
+
+传输层只负责“消息可靠送达”；Codex 私有状态仍由 OpenCodex 管：`threadSeq`、快照水位、app-host MessagePort relay、缺口检测和脱敏诊断。短断线优先让 Socket.IO 恢复包，恢复不了再走 OpenCodex 的 thread replay 或 snapshot repair。
+
+## 多客户端水位诊断
+
 `GET /api/diagnostics/threads?threadId=<id>` 会返回 `clientWatermarks`，用于判断同一会话下每个客户端到底追到哪里：
 
 - `threadCursor`：gateway 已认为该客户端端口消费到的 app-host `threadSeq`。
