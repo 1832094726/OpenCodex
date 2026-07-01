@@ -585,6 +585,90 @@ test("ws hub marks app-host thread replay gaps when a client cursor is older tha
   }
 });
 
+test("ws hub marks replay gap when a client has no cursor and retained thread frames start late", async () => {
+  const wsHubPath = path.join(repoRoot, "gateway", "runtime", "ipc", "ws-hub.cjs");
+  const oldMaxMessages = process.env.OPENCODEX_APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES;
+  process.env.OPENCODEX_APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES = "2";
+  delete require.cache[require.resolve(wsHubPath)];
+  const { createWsHub } = require(wsHubPath);
+  const server = http.createServer((req, res) => {
+    res.writeHead(404);
+    res.end();
+  });
+  const relays = [];
+  const hub = createWsHub(server, {
+    createAppHostRelay(details) {
+      const relay = {
+        clientId: details.clientId,
+        close() {},
+        onMessage: details.onMessage,
+        portId: details.portId,
+        postMessage() {},
+      };
+      relays.push(relay);
+      return relay;
+    },
+    isAuthed: () => true,
+  });
+  const address = await listen(server);
+  const wsUrl = `ws://127.0.0.1:${address.port}/ws`;
+  let wsA = null;
+  let wsB = null;
+
+  try {
+    wsA = await connectClient(wsUrl, "client-thread-nocursor-a");
+    wsA.send(JSON.stringify({
+      clientId: "client-thread-nocursor-a",
+      portId: "port-thread-nocursor-a",
+      threadId: "thread-nocursor",
+      type: "app-host-connect",
+    }));
+    await wsMessage(wsA, (message) => message.type === "app-host-port-connected");
+    const relayA = relays.find((relay) => relay.clientId === "client-thread-nocursor-a");
+    assert.ok(relayA);
+
+    // 新客户端没有本地 cursor 时，如果队列已经只剩后半段，也必须标记缺口让前端触发快照补偿。
+    for (let index = 1; index <= 4; index += 1) {
+      relayA.onMessage(JSON.stringify({ id: `rpc-nocursor-${index}`, method: "thread/read", result: { threadId: "thread-nocursor", turnId: `turn-${index}` } }));
+      await wsMessage(wsA, (message) => message.type === "app-host-port-message" && message.threadSeq === index);
+    }
+
+    wsB = await connectClient(wsUrl, "client-thread-nocursor-b");
+    const replayMessagesPromise = wsMessages(wsB, (message) => message.type === "app-host-port-message" && message.replay === "thread", 2);
+    wsB.send(JSON.stringify({
+      clientId: "client-thread-nocursor-b",
+      portId: "port-thread-nocursor-b",
+      threadId: "thread-nocursor",
+      type: "app-host-connect",
+    }));
+
+    const [replay, secondReplay] = await replayMessagesPromise;
+    assert.equal(replay.replayGap, true);
+    assert.equal(replay.threadSeq, 3);
+    assert.equal(secondReplay.replayGap, true);
+    assert.equal(secondReplay.threadSeq, 4);
+
+    const snapshot = hub.snapshotThreads({ threadId: "thread-nocursor" }).threads[0];
+    assert.equal(snapshot.oldestThreadSeq, 3);
+    assert.equal(snapshot.latestThreadSeq, 4);
+    assert.equal(snapshot.latestKnownThreadSeq, 4);
+    assert.equal(snapshot.lastThreadReplayCursor, 0);
+    assert.equal(snapshot.lastThreadReplayOldestSeq, 3);
+    assert.equal(snapshot.lastThreadReplayLatestKnownSeq, 4);
+    assert.equal(snapshot.lastThreadReplayGap, true);
+  } finally {
+    if (wsA) wsA.close();
+    if (wsB) wsB.close();
+    await new Promise((resolve) => server.close(resolve));
+    if (oldMaxMessages == null) {
+      delete process.env.OPENCODEX_APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES;
+    } else {
+      process.env.OPENCODEX_APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES = oldMaxMessages;
+    }
+    delete require.cache[require.resolve(wsHubPath)];
+  }
+});
+
 test("ws hub marks replay gap when retained thread frames have expired", async () => {
   const wsHubPath = path.join(repoRoot, "gateway", "runtime", "ipc", "ws-hub.cjs");
   const oldTtlMs = process.env.OPENCODEX_APP_HOST_DOWNSTREAM_REPLAY_TTL_MS;

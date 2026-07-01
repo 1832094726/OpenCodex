@@ -325,12 +325,12 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       return oldest === 0 || seq < oldest ? seq : oldest;
     }, 0);
     const latestKnownThreadSeq = Number(appHostDownstreamThreadSeqByThreadId.get(threadId) || 0);
-    // 队列可能被 TTL/容量清空；只看 oldestThreadSeq 会把“已经丢完了”的旧会话误判成无缺口。
+    const hasUsableCursor = Number.isFinite(cursor) && cursor > 0;
+    // 队列可能被 TTL/容量清空；无 cursor 的新客户端如果只能拿到 seq>1 的后半段，也必须触发快照补偿。
+    const missingBeforeRetainedQueue = oldestThreadSeq > 1 && (!hasUsableCursor || oldestThreadSeq > cursor + 1);
     const replayGap =
-      Number.isFinite(cursor) &&
-      cursor > 0 &&
-      latestKnownThreadSeq > cursor &&
-      (oldestThreadSeq === 0 || oldestThreadSeq > cursor + 1);
+      latestKnownThreadSeq > (hasUsableCursor ? cursor : 0) &&
+      (oldestThreadSeq === 0 || missingBeforeRetainedQueue);
     const queue = allThreadFrames.filter((entry) => {
       if (entry.sourceClientId === clientId && entry.sourcePortId === portId) return false;
       return !Number.isFinite(cursor) || cursor <= 0 || Number(entry.threadSeq || 0) > cursor;
