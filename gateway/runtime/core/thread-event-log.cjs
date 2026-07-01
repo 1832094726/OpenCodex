@@ -212,10 +212,86 @@ function createFileThreadEventLog(options = {}) {
   };
 }
 
+function requireBetterSqlite3() {
+  try {
+    return require("better-sqlite3");
+  } catch (error) {
+    const wrapped = new Error("better-sqlite3 is required for OPENCODEX_THREAD_EVENT_LOG_MODE=sqlite");
+    wrapped.cause = error;
+    throw wrapped;
+  }
+}
+
+function normalizeSqliteRecord(row) {
+  if (!row || typeof row !== "object") return null;
+  try {
+    return JSON.parse(String(row.payload || ""));
+  } catch {
+    return null;
+  }
+}
+
+function createSqliteThreadEventLog(options = {}) {
+  const filePath = options.filePath || path.join(process.cwd(), ".data", "runtime", "cache", "thread-event-log.sqlite");
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const Database = requireBetterSqlite3();
+  const db = new Database(filePath);
+  db.pragma("journal_mode = WAL");
+  db.pragma("synchronous = NORMAL");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS thread_event_log_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT NOT NULL,
+      recorded_at_ms INTEGER NOT NULL,
+      thread_id TEXT,
+      client_id TEXT,
+      port_id TEXT,
+      seq INTEGER,
+      payload TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_thread_event_log_records_thread
+      ON thread_event_log_records(thread_id, id);
+  `);
+
+  const rows = db.prepare("SELECT payload FROM thread_event_log_records ORDER BY id ASC").all();
+  const records = rows.map(normalizeSqliteRecord).filter(Boolean);
+  const insertRecord = db.prepare(`
+    INSERT INTO thread_event_log_records (type, recorded_at_ms, thread_id, client_id, port_id, seq, payload)
+    VALUES (@type, @recordedAtMs, @threadId, @clientId, @portId, @seq, @payload)
+  `);
+  const log = createThreadEventLog({
+    ...options,
+    records,
+    onRecord(record) {
+      const recordedAtMs = typeof options.now === "function" ? options.now() : Date.now();
+      // SQLite adapter 只负责成熟持久化；replay/gap/cursor 语义仍由内存 ThreadEventLog 统一计算。
+      insertRecord.run({
+        clientId: record.clientId || null,
+        payload: JSON.stringify({ ...record, recordedAtMs }),
+        portId: record.portId || null,
+        recordedAtMs,
+        seq: Number(record.seq || (record.entry && record.entry.threadSeq) || 0) || null,
+        threadId: record.threadId || null,
+        type: record.type || "unknown",
+      });
+      if (typeof options.onRecord === "function") options.onRecord(record);
+    },
+  });
+  return {
+    ...log,
+    close() {
+      db.close();
+    },
+    db,
+    filePath,
+  };
+}
+
 function createConfiguredThreadEventLog(options = {}) {
   const mode = String(options.mode || process.env.OPENCODEX_THREAD_EVENT_LOG_MODE || "memory").toLowerCase();
+  if (mode === "sqlite" || mode === "sqlite3") return createSqliteThreadEventLog(options);
   if (mode === "file" || mode === "jsonl") return createFileThreadEventLog(options);
   return createThreadEventLog(options);
 }
 
-module.exports = { createConfiguredThreadEventLog, createFileThreadEventLog, createThreadEventLog };
+module.exports = { createConfiguredThreadEventLog, createFileThreadEventLog, createSqliteThreadEventLog, createThreadEventLog };

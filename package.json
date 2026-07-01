@@ -31,6 +31,7 @@
   "dependencies": {
     "@electron/asar": "^4.1.2",
     "balanced-match": "^4.0.2",
+    "better-sqlite3": "^12.11.1",
     "brace-expansion": "^5.0.6",
     "resedit": "1.7.2",
     "socket.io": "^4.8.3",
@@ -43,12 +44,6 @@
     "electron": "42.0.1",
     "electron-builder": "^26.0.12",
     "typescript": "^5.9.3"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "electron",
-      "electron-winstaller"
-    ]
   },
   "build": {
     "appId": "dev.opencodex.launcher",

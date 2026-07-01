@@ -339,12 +339,24 @@ rtk node --test gateway/test/app-host-frame-observer.test.cjs
 - Yjs/Automerge 只借鉴 state vector/update log，不直接承载官方 app-host RPC。
 - relay 生命周期和 snapshot repair 决策后续可用 XState 类状态机收敛。
 
-- [ ] **步骤 3：实现正式持久 adapter**
+- [x] **步骤 3：实现正式持久 adapter**
 
-在 JSONL 验证完成后，基于同一 `ThreadEventLog` 接口实现更成熟的持久 adapter。优先候选：
+在 JSONL 验证完成后，基于同一 `ThreadEventLog` 接口实现更成熟的持久 adapter。当前已落地：
 
 - SQLite event log：适合单机 OpenCodex，易打包，能覆盖重启恢复。
+
+后续候选：
+
 - Redis Streams：适合已经有 Redis 的部署，天然 stream id、consumer group 和 ack。
+
+**文件：**
+- 修改：`gateway/runtime/core/thread-event-log.cjs`
+- 修改：`gateway/runtime/ipc/ws-hub.cjs`
+- 修改：`gateway/test/thread-event-log.test.cjs`
+- 修改：`docs/MULTI-CLIENT-STATE-SYNC.md`
+- 修改：`package.json`
+- 修改：`pnpm-lock.yaml`
+- 修改：`pnpm-workspace.yaml`
 
 ## 验收标准
 

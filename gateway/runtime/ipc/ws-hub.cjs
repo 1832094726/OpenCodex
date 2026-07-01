@@ -147,9 +147,14 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   const pendingAppHostMessagesByRelayKey = new Map();
   const appHostDownstreamFramesByRelayKey = new Map();
   const appHostDownstreamSeqByRelayKey = new Map();
+  const threadEventLogMode = String(process.env.OPENCODEX_THREAD_EVENT_LOG_MODE || "memory").toLowerCase();
+  const threadEventLogDefaultFile =
+    threadEventLogMode === "sqlite" || threadEventLogMode === "sqlite3"
+      ? path.join(RUNTIME_DIR, "cache", "thread-event-log.sqlite")
+      : path.join(RUNTIME_DIR, "cache", "thread-event-log.jsonl");
   // threadEventLog 是同步抽象边界：默认用内存实现，测试或未来持久化 stream 可直接注入替换。
   const appHostThreadEventLog = threadEventLog || createConfiguredThreadEventLog({
-    filePath: process.env.OPENCODEX_THREAD_EVENT_LOG_FILE || path.join(RUNTIME_DIR, "cache", "thread-event-log.jsonl"),
+    filePath: process.env.OPENCODEX_THREAD_EVENT_LOG_FILE || threadEventLogDefaultFile,
     maxEntries: APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES,
     ttlMs: APP_HOST_DOWNSTREAM_REPLAY_TTL_MS,
   });

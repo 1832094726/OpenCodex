@@ -49,20 +49,21 @@
 | Socket.IO connection state recovery | 短断线 missed packets、room、自动重连、连接恢复标记 | 长期离线后的持久事件回放、Codex 快照语义 | 已作为默认传输层；OpenCodex 只在 recovery 失败后补 thread replay/snapshot |
 | Redis Streams | 单机或小集群持久 event log、stream id、consumer group offset、pending/ack | 浏览器直连、app-host MessagePort 生命周期 | 适合做下一阶段正式 `ThreadEventLog` adapter，复杂度低于 JetStream |
 | NATS JetStream | 多进程/多机器 event stream、consumer ack、redelivery、长期 replay | 只跑单机 gateway 时偏重 | 多机部署阶段再引入；保持 `ThreadEventLog` 接口可替换 |
-| SQLite event log | 单机持久化、重启恢复、便于随 OpenCodex 打包 | 多机共享消费、水位竞争 | 比 JSONL 更适合作为近期持久 adapter 候选 |
+| SQLite event log | 单机持久化、重启恢复、便于随 OpenCodex 打包 | 多机共享消费、水位竞争 | 已作为正式单机 `ThreadEventLog` adapter 落地 |
 | Yjs/Automerge | 协同编辑、CRDT 合并、我们拥有的数据模型 | 官方 app-host RPC 原样回放、工具流状态 | 可借鉴 state vector/update 思路，不直接引入为 thread 同步内核 |
 | Replicache/Electric/PowerSync | 本地优先数据库、pull/push/cookie、可见视图同步 | app-host 私有帧的低层转发 | 如果未来把 thread 列表/消息视图落成本地 DB，再评估 |
 | XState | relay 生命周期、恢复分支、错误状态收敛 | 事件持久化和网络传输 | 适合把 relay 重建和 snapshot repair 决策从散落 if/else 中抽出来 |
 
-近期不要继续扩大自研范围：短断线交给 Socket.IO，单机持久回放优先评估 SQLite/Redis Streams adapter，relay 和 repair 决策再用状态机收敛。OpenCodex 自己只维护 `thread/read`、`thread/turns/list`、app-host port、snapshot ack 这些官方协议和标准同步抽象之间的翻译。
+近期不要继续扩大自研范围：短断线交给 Socket.IO，单机持久回放使用 SQLite adapter，跨进程/多机再评估 Redis Streams 或 JetStream，relay 和 repair 决策再用状态机收敛。OpenCodex 自己只维护 `thread/read`、`thread/turns/list`、app-host port、snapshot ack 这些官方协议和标准同步抽象之间的翻译。
 
 ### 推荐演进顺序
 
 1. 继续用 Socket.IO 做默认传输，补齐 transport recovery 诊断。
 2. `threadSeq + queue + cursor + gap` 已抽成 `ThreadEventLog` 接口，gateway 默认使用内存实现。
 3. `ws-hub` 支持注入替换 `threadEventLog`，并可通过 opt-in JSONL adapter 做进程重启后的短窗口恢复验证。
-4. 把 snapshot repair 决策抽成状态机，避免浏览器和 gateway 各自散落判断。
-5. 如果未来把 thread 可见状态落成本地数据库，再评估 Replicache/Electric 这类 local-first sync。
+4. 单机持久回放使用 opt-in SQLite adapter；如果部署已经有 Redis，再新增 Redis Streams adapter。
+5. 把 snapshot repair 决策抽成状态机，避免浏览器和 gateway 各自散落判断。
+6. 如果未来把 thread 可见状态落成本地数据库，再评估 Replicache/Electric 这类 local-first sync。
 
 ## ThreadEventLog 边界
 
@@ -103,13 +104,21 @@ OPENCODEX_THREAD_EVENT_LOG_MODE=file
 OPENCODEX_THREAD_EVENT_LOG_FILE=/path/to/thread-event-log.jsonl
 ```
 
+推荐的单机持久 adapter 是 SQLite：
+
+```bash
+OPENCODEX_THREAD_EVENT_LOG_MODE=sqlite
+OPENCODEX_THREAD_EVENT_LOG_FILE=/path/to/thread-event-log.sqlite
+```
+
 未配置 `OPENCODEX_THREAD_EVENT_LOG_FILE` 时，gateway 会写到：
 
 ```text
-<RUNTIME_DIR>/cache/thread-event-log.jsonl
+<RUNTIME_DIR>/cache/thread-event-log.jsonl   # mode=file/jsonl
+<RUNTIME_DIR>/cache/thread-event-log.sqlite  # mode=sqlite/sqlite3
 ```
 
-注意：JSONL adapter 会保存用于 replay 的 app-host 原始下行帧，里面可能包含会话正文或工具结果，因此默认关闭。它的定位是验证持久 event log 边界和单机恢复能力；正式长期方案应继续评估 SQLite event log、Redis Streams 或 JetStream，并保持同一组 `ThreadEventLog` 方法不变。
+注意：JSONL 和 SQLite adapter 都会保存用于 replay 的 app-host 原始下行帧，里面可能包含会话正文或工具结果，因此默认关闭。JSONL 只用于验证边界；SQLite 是当前推荐的单机持久实现。多机或长期共享部署再评估 Redis Streams 或 JetStream，并保持同一组 `ThreadEventLog` 方法不变。
 
 ## 当前传输路径
 
@@ -270,7 +279,7 @@ gateway 收到 ack 后：
 - Socket.IO adapter 复用既有 JSON 协议和 `ws-hub` handler。
 - Socket.IO 客户端加入 `client:<clientId>` 和 `thread:<threadId>` room；非 replay thread nudge 通过 room 定向投递，同步保留 raw `/ws` fallback。
 - app-host thread replay queue 与 `threadSeq` 已收敛到可替换的 `ThreadEventLog` 接口。
-- `ThreadEventLog` 提供内存实现和 opt-in JSONL 文件实现；`ws-hub` 可通过环境变量选择文件 adapter。
+- `ThreadEventLog` 提供内存实现、opt-in JSONL 文件实现和 opt-in SQLite 实现；`ws-hub` 可通过环境变量选择持久 adapter。
 - 浏览器 `sessionStorage` 保存每个 thread 的 `lastThreadSeq`。
 - memory snapshot 携带 `threadSeq`。
 - 浏览器 snapshot ack 携带 `threadSeq`。
@@ -282,7 +291,8 @@ gateway 收到 ack 后：
 
 1. 增加浏览器端真实集成测试：Socket.IO 主路径、脚本加载失败回退、握手失败回退。
 2. 在诊断面板展示 per-client watermarks 和 repair counters，而不是只在 JSON API 里可见。
-3. 基于同一 `ThreadEventLog` 接口实现正式持久 adapter：优先 SQLite event log，复杂/多机部署再评估 Redis Streams 或 JetStream。
+3. 在诊断面板展示 per-client watermarks 和 repair counters，而不是只在 JSON API 里可见。
+4. 基于同一 `ThreadEventLog` 接口新增 Redis Streams adapter，服务于已有 Redis 或多进程部署；更复杂多机再评估 JetStream。
 
 ## 可执行验证
 

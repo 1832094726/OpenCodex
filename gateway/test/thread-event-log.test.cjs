@@ -7,6 +7,7 @@ const path = require("node:path");
 const {
   createConfiguredThreadEventLog,
   createFileThreadEventLog,
+  createSqliteThreadEventLog,
   createThreadEventLog,
 } = require("../runtime/core/thread-event-log.cjs");
 
@@ -106,4 +107,40 @@ test("configured thread event log selects file adapter only when requested", (t)
 
   const restored = createConfiguredThreadEventLog({ filePath, mode: "file", now: () => 2_000, ttlMs: 60_000 });
   assert.deepEqual(restored.readAfter("thread-config", 0).events.map((event) => event.data), ["file"]);
+});
+
+test("sqlite thread event log restores retained events and cursors across instances", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-thread-log-"));
+  t.after(() => fs.rmSync(dir, { force: true, recursive: true }));
+  const filePath = path.join(dir, "thread-events.sqlite");
+
+  const first = createSqliteThreadEventLog({ filePath, maxEntries: 10, ttlMs: 60_000 });
+  first.append("thread-sqlite", { data: "one", sourceClientId: "client-a", sourcePortId: "port-a" }, 1_000);
+  first.append("thread-sqlite", { data: "two", sourceClientId: "client-a", sourcePortId: "port-a" }, 2_000);
+  first.rememberCursor("client-b", "port-b", "thread-sqlite", 1);
+  first.ackSnapshot("client-b", "thread-sqlite", 2, ["port-b", "port-c"]);
+  first.close();
+
+  const restored = createSqliteThreadEventLog({ filePath, maxEntries: 10, ttlMs: 60_000, now: () => 3_000 });
+  t.after(() => restored.close());
+  assert.deepEqual(restored.readAfter("thread-sqlite", 1).events.map((event) => event.data), ["two"]);
+  assert.equal(restored.cursor("client-b", "port-b", "thread-sqlite"), 2);
+  assert.equal(restored.cursor("client-b", "port-c", "thread-sqlite"), 2);
+  assert.equal(restored.stats("thread-sqlite").latestKnownThreadSeq, 2);
+  assert.equal(restored.append("thread-sqlite", { data: "three" }, 4_000).threadSeq, 3);
+});
+
+test("configured thread event log selects sqlite adapter when requested", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-thread-log-"));
+  t.after(() => fs.rmSync(dir, { force: true, recursive: true }));
+  const filePath = path.join(dir, "configured.sqlite");
+
+  const sqliteLog = createConfiguredThreadEventLog({ filePath, mode: "sqlite", ttlMs: 60_000 });
+  t.after(() => sqliteLog.close());
+  sqliteLog.append("thread-config-sqlite", { data: "sqlite" }, 1_000);
+  assert.equal(fs.existsSync(filePath), true);
+
+  const restored = createConfiguredThreadEventLog({ filePath, mode: "sqlite", now: () => 2_000, ttlMs: 60_000 });
+  t.after(() => restored.close());
+  assert.deepEqual(restored.readAfter("thread-config-sqlite", 0).events.map((event) => event.data), ["sqlite"]);
 });
