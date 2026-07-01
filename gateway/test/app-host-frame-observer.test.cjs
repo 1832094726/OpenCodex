@@ -341,6 +341,32 @@ test("thread state keeps historical clients while tracking active participants",
   assert.deepEqual(snapshot.activeClientPorts, [{ clientId: "client-active-b", portIds: ["port-active-b"] }]);
 });
 
+test("thread state moves an active app-host port between threads", () => {
+  const state = createAppHostFrameState({ maxEntries: 20 });
+
+  rememberAppHostThreadPort(state, {
+    clientId: "client-route",
+    portId: "port-route",
+    threadId: "thread-old",
+  });
+  rememberAppHostThreadPort(state, {
+    clientId: "client-route",
+    portId: "port-route",
+    threadId: "thread-new",
+  });
+
+  const oldSnapshot = appHostThreadStateSnapshot(state, "thread-old");
+  const newSnapshot = appHostThreadStateSnapshot(state, "thread-new");
+
+  assert.deepEqual(oldSnapshot.clientIds, ["client-route"]);
+  assert.equal(oldSnapshot.activeClientCount, 0);
+  assert.equal(oldSnapshot.activePortCount, 0);
+  assert.deepEqual(oldSnapshot.activeClientPorts, []);
+  assert.deepEqual(newSnapshot.activeClientIds, ["client-route"]);
+  assert.deepEqual(newSnapshot.activePortIds, ["port-route"]);
+  assert.deepEqual(newSnapshot.activeClientPorts, [{ clientId: "client-route", portIds: ["port-route"] }]);
+});
+
 test("app-host downstream replay protocol is wired on gateway and browser sides", () => {
   const wsHubSource = fs.readFileSync(path.join(repoRoot, "gateway", "runtime", "ipc", "ws-hub.cjs"), "utf8");
   const polyfillSource = fs.readFileSync(path.join(repoRoot, "web-shell", "codex-bridge-polyfill.js"), "utf8");

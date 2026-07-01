@@ -217,9 +217,32 @@ function rememberThreadParticipant(thread, clientId, portId, nowMs) {
   }
 }
 
+function hasActivePortForClient(thread, clientId) {
+  if (!thread || !clientId) return false;
+  for (const portId of thread.activePortIds.keys()) {
+    if (thread.portClientIdByPortId.get(portId) === clientId) return true;
+  }
+  return false;
+}
+
+function moveActivePortToThread(state, targetThreadId, clientId, portId) {
+  if (!state || !targetThreadId || !portId || !state.threadStatesById) return;
+  for (const [threadId, thread] of state.threadStatesById.entries()) {
+    if (threadId === targetThreadId || !thread || !thread.activePortIds.has(portId)) continue;
+    const ownerClientId = thread.portClientIdByPortId.get(portId) || clientId || "";
+    // 同一个 app-host MessagePort 在官方页面内会随路由复用；进入新会话时必须从旧会话 active 集合移走。
+    thread.activePortIds.delete(portId);
+    thread.portClientIdByPortId.delete(portId);
+    if (ownerClientId && !hasActivePortForClient(thread, ownerClientId)) {
+      thread.activeClientIds.delete(ownerClientId);
+    }
+  }
+}
+
 function rememberThreadFrame(state, summary, context, nowMs) {
   if (!state || !summary || !summary.threadId) return null;
   const thread = ensureThreadState(state, summary.threadId);
+  moveActivePortToThread(state, summary.threadId, context.clientId || "", context.portId || "");
   rememberThreadParticipant(thread, context.clientId || "", context.portId || "", nowMs);
   thread.conversationId ||= summary.conversationId;
   thread.sessionId ||= summary.sessionId;
@@ -277,6 +300,7 @@ function rememberAppHostThreadPort(state, details = {}) {
   if (!state || !threadId) return null;
   const nowMs = Date.now();
   const thread = ensureThreadState(state, threadId);
+  moveActivePortToThread(state, threadId, clientId, portId);
   rememberThreadParticipant(thread, clientId, portId, nowMs);
   thread.lastFrameAtMs ||= nowMs;
   if (clientId) state.clientByThreadId.set(threadId, clientId);
