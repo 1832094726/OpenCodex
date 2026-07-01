@@ -7,6 +7,7 @@ const {
   appHostStateContext,
   appHostThreadStateSnapshot,
   createAppHostFrameState,
+  markAppHostClientInactive,
   observeAppHostFrame,
   recordAppHostThreadReplay,
   rememberAppHostThreadPort,
@@ -159,6 +160,30 @@ test("thread state records connect and replay diagnostics per thread", () => {
   assert.equal(missing, null);
 });
 
+test("thread state keeps historical clients while tracking active participants", () => {
+  const state = createAppHostFrameState({ maxEntries: 20 });
+
+  rememberAppHostThreadPort(state, {
+    clientId: "client-active-a",
+    portId: "port-active-a",
+    threadId: "thread-active",
+  });
+  rememberAppHostThreadPort(state, {
+    clientId: "client-active-b",
+    portId: "port-active-b",
+    threadId: "thread-active",
+  });
+  markAppHostClientInactive(state, "client-active-a");
+
+  const snapshot = appHostThreadStateSnapshot(state, "thread-active");
+  assert.equal(snapshot.clientCount, 2);
+  assert.equal(snapshot.activeClientCount, 1);
+  assert.deepEqual(snapshot.activeClientIds, ["client-active-b"]);
+  assert.equal(snapshot.portCount, 2);
+  assert.equal(snapshot.activePortCount, 1);
+  assert.deepEqual(snapshot.activePortIds, ["port-active-b"]);
+});
+
 test("app-host downstream replay protocol is wired on gateway and browser sides", () => {
   const wsHubSource = fs.readFileSync(path.join(repoRoot, "gateway", "runtime", "ipc", "ws-hub.cjs"), "utf8");
   const polyfillSource = fs.readFileSync(path.join(repoRoot, "web-shell", "codex-bridge-polyfill.js"), "utf8");
@@ -192,4 +217,12 @@ test("app-host thread replay keeps cross-client state separate from per-port seq
   assert.match(polyfillSource, /result\.threadId = currentRouteThreadId\(\)/);
   assert.match(wsHubSource, /lastServerSeq > 0[\s\S]*flushAppHostDownstreamReplay/);
   assert.match(wsHubSource, /flushAppHostThreadReplay\(ws, clientId, portId, routeThreadId\)/);
+});
+
+test("ws lifecycle marks app-host thread clients inactive on disconnect", () => {
+  const wsHubSource = fs.readFileSync(path.join(repoRoot, "gateway", "runtime", "ipc", "ws-hub.cjs"), "utf8");
+
+  // WebSocket 断开时只把 client 标成 inactive，不清掉历史 thread 参与者，后续才能做多端补偿判断。
+  assert.match(wsHubSource, /markAppHostClientInactive\(appHostFrameState, closedClientId\)/);
+  assert.match(wsHubSource, /markAppHostClientInactive\(appHostFrameState, erroredClientId\)/);
 });

@@ -12,6 +12,7 @@ const { resolveOpenCodexI18n } = require("../../../shared/i18n/index.cjs");
 const {
   appHostStateContext,
   createAppHostFrameState,
+  markAppHostClientInactive,
   observeAppHostFrame,
   recordAppHostThreadReplay,
   rememberAppHostThreadPort,
@@ -1515,6 +1516,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       ws.on("close", () => {
         // close/error 都要从两个索引里删除，避免后续 sendTo 命中过期 socket。
         const closedClientId = ws.__codexWebClientId || "";
+        markAppHostClientInactive(appHostFrameState, closedClientId);
         removeClient(ws);
         if (DEBUG_LOGS) {
           diagnosticLog("ws-hub", "closed", {
@@ -1527,6 +1529,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       ws.on("error", (error) => {
         // error 事件不一定随后触发 close，这里主动做一次相同清理。
         const erroredClientId = ws.__codexWebClientId || "";
+        markAppHostClientInactive(appHostFrameState, erroredClientId);
         removeClient(ws);
         diagnosticWarn("ws-hub", "error", {
           clientId: shortId(erroredClientId),

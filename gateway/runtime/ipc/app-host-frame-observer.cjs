@@ -162,6 +162,8 @@ function ensureThreadState(state, threadId) {
   let thread = state.threadStatesById.get(threadId);
   if (!thread) {
     thread = {
+      activeClientIds: new Set(),
+      activePortIds: new Set(),
       clientLastSeenAtMs: new Map(),
       conversationId: "",
       downstreamFrameCount: 0,
@@ -174,6 +176,7 @@ function ensureThreadState(state, threadId) {
       lastThreadReplayQueued: 0,
       lastThreadReplaySent: 0,
       lastTurnId: "",
+      portClientIdByPortId: new Map(),
       portLastSeenAtMs: new Map(),
       sessionId: "",
       threadId,
@@ -189,8 +192,15 @@ function ensureThreadState(state, threadId) {
 function rememberThreadParticipant(thread, clientId, portId, nowMs) {
   // thread 状态只保存路由身份和时间戳，正文内容仍由 summarize 阶段统一脱敏。
   if (!thread) return;
-  if (clientId) thread.clientLastSeenAtMs.set(clientId, nowMs);
-  if (portId) thread.portLastSeenAtMs.set(portId, nowMs);
+  if (clientId) {
+    thread.clientLastSeenAtMs.set(clientId, nowMs);
+    thread.activeClientIds.add(clientId);
+  }
+  if (portId) {
+    thread.portLastSeenAtMs.set(portId, nowMs);
+    thread.activePortIds.add(portId);
+    if (clientId) thread.portClientIdByPortId.set(portId, clientId);
+  }
 }
 
 function rememberThreadFrame(state, summary, context, nowMs) {
@@ -262,6 +272,21 @@ function rememberAppHostThreadPort(state, details = {}) {
   return appHostThreadStateSnapshot(state, threadId);
 }
 
+function markAppHostClientInactive(state, clientId) {
+  if (!state || !clientId || !state.threadStatesById) return 0;
+  let touched = 0;
+  for (const thread of state.threadStatesById.values()) {
+    if (!thread || !thread.clientLastSeenAtMs.has(clientId)) continue;
+    // 断线只改变活跃状态，不删除历史参与者；这样重连诊断仍能看到旧客户端曾接过该 thread。
+    thread.activeClientIds.delete(clientId);
+    for (const [portId, ownerClientId] of thread.portClientIdByPortId.entries()) {
+      if (ownerClientId === clientId) thread.activePortIds.delete(portId);
+    }
+    touched += 1;
+  }
+  return touched;
+}
+
 function recordAppHostThreadReplay(state, details = {}) {
   const threadId = typeof details.threadId === "string" ? details.threadId : "";
   if (!state || !threadId) return null;
@@ -280,6 +305,10 @@ function appHostThreadStateSnapshot(state, threadId) {
   const thread = state.threadStatesById.get(threadId);
   if (!thread) return null;
   return {
+    activeClientCount: thread.activeClientIds.size,
+    activeClientIds: Array.from(thread.activeClientIds.keys()),
+    activePortCount: thread.activePortIds.size,
+    activePortIds: Array.from(thread.activePortIds.keys()),
     clientCount: thread.clientLastSeenAtMs.size,
     clientIds: Array.from(thread.clientLastSeenAtMs.keys()),
     conversationId: thread.conversationId,
@@ -356,6 +385,7 @@ module.exports = {
   appHostStateContext,
   appHostThreadStateSnapshot,
   createAppHostFrameState,
+  markAppHostClientInactive,
   observeAppHostFrame,
   recordAppHostThreadReplay,
   rememberAppHostThreadPort,
