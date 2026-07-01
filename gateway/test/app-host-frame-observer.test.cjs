@@ -1,7 +1,10 @@
 const assert = require("node:assert/strict");
+const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const { once } = require("node:events");
+const { WebSocket } = require("ws");
 
 const {
   appHostStateContext,
@@ -16,6 +19,50 @@ const {
 } = require("../runtime/ipc/app-host-frame-observer.cjs");
 
 const repoRoot = path.resolve(__dirname, "..", "..");
+
+function listen(server) {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve(server.address());
+    });
+  });
+}
+
+function wsMessage(ws, predicate, timeoutMs = 1000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timed out waiting for websocket message"));
+    }, timeoutMs);
+    const cleanup = () => {
+      clearTimeout(timer);
+      ws.off("message", onMessage);
+      ws.off("error", onError);
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onMessage = (raw) => {
+      const message = JSON.parse(String(raw));
+      if (predicate && !predicate(message)) return;
+      cleanup();
+      resolve(message);
+    };
+    ws.on("message", onMessage);
+    ws.on("error", onError);
+  });
+}
+
+async function connectClient(url, clientId) {
+  const ws = new WebSocket(url);
+  await once(ws, "open");
+  ws.send(JSON.stringify({ type: "hello", clientId }));
+  await wsMessage(ws, (message) => message.type === "hello-ack" && message.clientId === clientId);
+  return ws;
+}
 
 test("summarizeAppHostFrame extracts routing fields without message bodies", () => {
   const summary = summarizeAppHostFrame(JSON.stringify({
@@ -239,7 +286,8 @@ test("app-host downstream replay protocol is wired on gateway and browser sides"
   assert.match(wsHubSource, /APP_HOST_DOWNSTREAM_REPLAY_TTL_MS/);
   assert.match(wsHubSource, /rememberAppHostDownstreamFrame\(clientId, portId, data, frameSummary && frameSummary\.raw\)/);
   assert.match(wsHubSource, /flushAppHostDownstreamReplay\(ws, clientId, portId, lastServerSeq\)/);
-  assert.match(wsHubSource, /type: "app-host-port-message", portId, data, seq/);
+  assert.match(wsHubSource, /function appHostPortMessagePayload/);
+  assert.match(wsHubSource, /payload\.seq = frame\.seq/);
 
   // 浏览器端记录已收到的 seq，重连 connect 时带回游标，并丢弃重复补发帧。
   assert.match(polyfillSource, /lastServerSeq: 0/);
@@ -257,13 +305,86 @@ test("app-host thread replay keeps cross-client state separate from per-port seq
   assert.match(wsHubSource, /function flushAppHostThreadReplay/);
   assert.match(wsHubSource, /route: "app_host_thread_replay"/);
   assert.match(wsHubSource, /replay: "thread"/);
+  assert.match(wsHubSource, /appHostDownstreamThreadSeqByThreadId/);
+  assert.match(wsHubSource, /threadSeq = appHostThreadNextSeq\(threadId\)/);
+  assert.match(wsHubSource, /payload\.threadSeq = frame\.threadSeq/);
+  assert.match(wsHubSource, /appHostPortMessagePayload\(portId, entry\.data, entry, \{ replay: "thread" \}\)/);
   assert.doesNotMatch(wsHubSource, /type: "app-host-port-message", portId, data: entry\.data, replay: "thread", seq/);
 
-  // 浏览器 connect 帧携带当前路由 threadId；没有 per-port 游标的新客户端才能触发 thread replay。
+  // 浏览器 connect 帧携带当前路由 threadId 和 threadSeq 游标，gateway 只补同 thread 缺失增量。
   assert.match(polyfillSource, /function currentRouteThreadId/);
-  assert.match(polyfillSource, /result\.threadId = currentRouteThreadId\(\)/);
+  assert.match(polyfillSource, /const threadId = currentRouteThreadId\(\)/);
+  assert.match(polyfillSource, /result\.threadId = threadId/);
+  assert.match(polyfillSource, /result\.lastThreadSeq = rememberedAppHostThreadSeq\(threadId\)/);
+  assert.match(polyfillSource, /sessionStorage\.setItem\(appHostThreadSeqStorageKey\(threadId\), String\(seq\)\)/);
+  assert.match(polyfillSource, /app-host-duplicate-thread-frame/);
   assert.match(wsHubSource, /lastServerSeq > 0[\s\S]*flushAppHostDownstreamReplay/);
-  assert.match(wsHubSource, /flushAppHostThreadReplay\(ws, clientId, portId, routeThreadId\)/);
+  assert.match(wsHubSource, /flushAppHostThreadReplay\(ws, clientId, portId, routeThreadId, lastThreadSeq\)/);
+});
+
+test("ws hub replays only app-host thread frames after the client thread cursor", async () => {
+  const { createWsHub } = require("../runtime/ipc/ws-hub.cjs");
+  const server = http.createServer((req, res) => {
+    res.writeHead(404);
+    res.end();
+  });
+  const relays = [];
+  createWsHub(server, {
+    createAppHostRelay(details) {
+      const relay = {
+        clientId: details.clientId,
+        close() {},
+        onMessage: details.onMessage,
+        portId: details.portId,
+        postMessage() {},
+      };
+      relays.push(relay);
+      return relay;
+    },
+    isAuthed: () => true,
+  });
+  const address = await listen(server);
+  const wsUrl = `ws://127.0.0.1:${address.port}/ws`;
+  let wsA = null;
+  let wsB = null;
+
+  try {
+    wsA = await connectClient(wsUrl, "client-thread-replay-a");
+    wsA.send(JSON.stringify({
+      clientId: "client-thread-replay-a",
+      portId: "port-thread-replay-a",
+      threadId: "thread-replay",
+      type: "app-host-connect",
+    }));
+    await wsMessage(wsA, (message) => message.type === "app-host-port-connected");
+    const relayA = relays.find((relay) => relay.clientId === "client-thread-replay-a");
+    assert.ok(relayA);
+
+    // A 端先收到两个同 thread 的官方下行帧，中间层会按 threadSeq 记录可补偿增量。
+    relayA.onMessage(JSON.stringify({ id: "rpc-replay-1", method: "thread/read", result: { threadId: "thread-replay", turnId: "turn-1" } }));
+    await wsMessage(wsA, (message) => message.type === "app-host-port-message" && message.threadSeq === 1);
+    relayA.onMessage(JSON.stringify({ id: "rpc-replay-2", method: "thread/read", result: { threadId: "thread-replay", turnId: "turn-2" } }));
+    await wsMessage(wsA, (message) => message.type === "app-host-port-message" && message.threadSeq === 2);
+
+    wsB = await connectClient(wsUrl, "client-thread-replay-b");
+    wsB.send(JSON.stringify({
+      clientId: "client-thread-replay-b",
+      lastThreadSeq: 1,
+      portId: "port-thread-replay-b",
+      threadId: "thread-replay",
+      type: "app-host-connect",
+    }));
+    // connected 和 replay 会连续到达；一个监听器直接等 replay，避免测试本身漏帧。
+    const replay = await wsMessage(wsB, (message) => message.type === "app-host-port-message" && message.replay === "thread");
+
+    assert.equal(replay.threadId, "thread-replay");
+    assert.equal(replay.threadSeq, 2);
+    assert.match(replay.data, /turn-2/);
+  } finally {
+    if (wsA) wsA.close();
+    if (wsB) wsB.close();
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test("ws lifecycle marks app-host thread clients inactive on disconnect", () => {

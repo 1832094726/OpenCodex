@@ -142,6 +142,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   const appHostDownstreamFramesByRelayKey = new Map();
   const appHostDownstreamFramesByThreadId = new Map();
   const appHostDownstreamSeqByRelayKey = new Map();
+  const appHostDownstreamThreadSeqByThreadId = new Map();
   const appHostFrameState = createAppHostFrameState();
   let lastAuthRejectLogAtMs = 0;
   let suppressedAuthRejectCount = 0;
@@ -171,6 +172,12 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return nextSeq;
   }
 
+  function appHostThreadNextSeq(threadId) {
+    const nextSeq = (Number(appHostDownstreamThreadSeqByThreadId.get(threadId)) || 0) + 1;
+    appHostDownstreamThreadSeqByThreadId.set(threadId, nextSeq);
+    return nextSeq;
+  }
+
   function pruneAppHostDownstreamFrames(clientId, portId, nowMs = Date.now()) {
     const key = appHostRelayKey(clientId, portId);
     const queue = appHostDownstreamFramesByRelayKey.get(key);
@@ -186,6 +193,8 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
 
   function rememberAppHostDownstreamFrame(clientId, portId, data, summary) {
     const seq = appHostDownstreamNextSeq(clientId, portId);
+    let threadSeq = 0;
+    const threadId = summary && typeof summary.threadId === "string" ? summary.threadId : "";
     if (
       !clientId ||
       !portId ||
@@ -193,21 +202,33 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       APP_HOST_DOWNSTREAM_REPLAY_TTL_MS <= 0 ||
       APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES <= 0
     ) {
-      return seq;
+      return { seq, threadId, threadSeq };
     }
     const key = appHostRelayKey(clientId, portId);
     const queue = pruneAppHostDownstreamFrames(clientId, portId);
     queue.push({ atMs: Date.now(), data, seq });
     while (queue.length > APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES) queue.shift();
     appHostDownstreamFramesByRelayKey.set(key, queue);
-    const threadId = summary && typeof summary.threadId === "string" ? summary.threadId : "";
     if (threadId) {
+      threadSeq = appHostThreadNextSeq(threadId);
       const threadQueue = pruneAppHostThreadFrames(threadId);
-      threadQueue.push({ atMs: Date.now(), data, sourceClientId: clientId, sourcePortId: portId, threadId });
+      // threadSeq 是跨端会话级游标；不同客户端可据此只补自己缺失的同 thread 增量。
+      threadQueue.push({ atMs: Date.now(), data, sourceClientId: clientId, sourcePortId: portId, threadId, threadSeq });
       while (threadQueue.length > APP_HOST_DOWNSTREAM_REPLAY_MAX_MESSAGES) threadQueue.shift();
       appHostDownstreamFramesByThreadId.set(threadId, threadQueue);
     }
-    return seq;
+    return { seq, threadId, threadSeq };
+  }
+
+  function appHostPortMessagePayload(portId, data, frame, extra = {}) {
+    const payload = { type: "app-host-port-message", portId, data, ...extra };
+    if (frame && Number(frame.seq) > 0) payload.seq = frame.seq;
+    // 没有 thread 路由信息时不带空字段，避免高频 app-host 帧增加无效字节。
+    if (frame && frame.threadId && Number(frame.threadSeq) > 0) {
+      payload.threadId = frame.threadId;
+      payload.threadSeq = frame.threadSeq;
+    }
+    return payload;
   }
 
   function pruneAppHostThreadFrames(threadId, nowMs = Date.now()) {
@@ -250,20 +271,25 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return sent;
   }
 
-  function flushAppHostThreadReplay(ws, clientId, portId, threadId) {
+  function flushAppHostThreadReplay(ws, clientId, portId, threadId, afterThreadSeq = 0) {
     if (!threadId || !ws || ws.readyState !== ws.OPEN) return 0;
-    const queue = pruneAppHostThreadFrames(threadId).filter((entry) => entry.sourceClientId !== clientId || entry.sourcePortId !== portId);
+    const cursor = Number(afterThreadSeq);
+    const queue = pruneAppHostThreadFrames(threadId).filter((entry) => {
+      if (entry.sourceClientId === clientId && entry.sourcePortId === portId) return false;
+      return !Number.isFinite(cursor) || cursor <= 0 || Number(entry.threadSeq || 0) > cursor;
+    });
     if (!queue.length) return 0;
     let sent = 0;
     for (const entry of queue) {
-      // 跨客户端补发只沿用官方 app-host data，不带新端口 seq，避免影响新端口后续 live 增量游标。
-      if (!safeSend(ws, { type: "app-host-port-message", portId, data: entry.data, replay: "thread" }, { suppressDiagnostic: true, route: "app_host_thread_replay" })) {
+      // 跨客户端补发不带 per-port seq，避免影响当前端口 live 增量；threadSeq 单独用于去重和断点续传。
+      if (!safeSend(ws, appHostPortMessagePayload(portId, entry.data, entry, { replay: "thread" }), { suppressDiagnostic: true, route: "app_host_thread_replay" })) {
         break;
       }
       sent += 1;
     }
     const threadState = recordAppHostThreadReplay(appHostFrameState, { clientId, portId, queued: queue.length, sent, threadId });
     diagnosticLog("ws-hub", "app_host_thread_replay_flushed", {
+      afterThreadSeq: Number.isFinite(cursor) && cursor > 0 ? cursor : 0,
       clientId: shortId(clientId),
       knownClients: threadState ? threadState.clientCount : 0,
       knownPorts: threadState ? threadState.portCount : 0,
@@ -1225,8 +1251,8 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       onMessage(data) {
         const frameSummary = observeAppHostPortFrame(ws, "official-to-browser", portId, data);
         maybeHandleAppHostReadOnlyResponse(ws, portId, relay, data);
-        const seq = rememberAppHostDownstreamFrame(clientId, portId, data, frameSummary && frameSummary.raw);
-        safeSend(ws, { type: "app-host-port-message", portId, data, seq }, { suppressDiagnostic: true });
+        const frame = rememberAppHostDownstreamFrame(clientId, portId, data, frameSummary && frameSummary.raw);
+        safeSend(ws, appHostPortMessagePayload(portId, data, frame), { suppressDiagnostic: true });
       },
     });
     relays.set(portId, relay);
@@ -1240,6 +1266,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     const clientId = normalizedWsClientId(ws, message);
     const portId = message && typeof message.portId === "string" ? message.portId : "";
     const lastServerSeq = Number(message && message.lastServerSeq);
+    const lastThreadSeq = Number(message && message.lastThreadSeq);
     const routeThreadId = typeof (message && message.threadId) === "string" ? message.threadId.slice(0, 160) : "";
     if (!clientId || ws.__codexWebClientId !== clientId || !validAppHostPortId(portId)) {
       diagnosticWarn("ws-hub", "app_host_connect_rejected", {
@@ -1302,17 +1329,16 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
         onMessage(data) {
           const frameSummary = observeAppHostPortFrame(ws, "official-to-browser", portId, data);
           maybeHandleAppHostReadOnlyResponse(ws, portId, relay, data);
-          const seq = rememberAppHostDownstreamFrame(clientId, portId, data, frameSummary && frameSummary.raw);
-          safeSend(ws, { type: "app-host-port-message", portId, data, seq }, { suppressDiagnostic: true });
+          const frame = rememberAppHostDownstreamFrame(clientId, portId, data, frameSummary && frameSummary.raw);
+          safeSend(ws, appHostPortMessagePayload(portId, data, frame), { suppressDiagnostic: true });
         },
       });
       relays.set(portId, relay);
       safeSend(ws, { type: "app-host-port-connected", portId }, { suppressDiagnostic: true });
       if (lastServerSeq > 0) {
         flushAppHostDownstreamReplay(ws, clientId, portId, lastServerSeq);
-      } else {
-        flushAppHostThreadReplay(ws, clientId, portId, routeThreadId);
       }
+      flushAppHostThreadReplay(ws, clientId, portId, routeThreadId, lastThreadSeq);
       flushPendingAppHostMessages(ws, clientId, portId, relay);
       if (DEBUG_LOGS) {
         // app-host 端口连接/关闭是前端组件生命周期的一部分，默认只保留失败日志。

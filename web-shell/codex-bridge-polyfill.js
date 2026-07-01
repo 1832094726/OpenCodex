@@ -347,6 +347,7 @@
   const terminalMessageQueues = new Map();
   // 每个官方 connect-app-host MessagePort 对应一条 relay，key 是仅在当前页面内有效的 portId。
   const appHostPortRelays = new Map();
+  const appHostLastThreadSeqByThreadId = new Map();
   const activeBrowserNotifications = new Map();
   const STATSIG_DEFAULT_FEATURES_CONFIG = "statsig_default_enable_features";
   const STATSIG_I18N_LAYER_CONFIG = "72216192";
@@ -362,6 +363,7 @@
   const OPENCODEX_DISABLED_STATSIG_GATES = ["4261455886"];
   const OPENCODEX_CLIENT_ID_STORAGE_KEY = "opencodex_browser_client_id_v1";
   const OPENCODEX_LAST_ROUTE_STORAGE_KEY = "opencodex_last_thread_route_v1";
+  const OPENCODEX_APP_HOST_THREAD_SEQ_STORAGE_PREFIX = "opencodex_app_host_thread_seq_v1:";
 
   function createBrowserClientId() {
     return w.crypto?.randomUUID?.() || `web-client-${Math.random().toString(36).slice(2)}`;
@@ -2332,6 +2334,37 @@
     }
   }
 
+  function appHostThreadSeqStorageKey(threadId) {
+    return `${OPENCODEX_APP_HOST_THREAD_SEQ_STORAGE_PREFIX}${encodeURIComponent(threadId)}`;
+  }
+
+  function rememberedAppHostThreadSeq(threadId) {
+    if (!threadId) return 0;
+    const cached = Number(appHostLastThreadSeqByThreadId.get(threadId) || 0);
+    if (cached > 0) return cached;
+    try {
+      const stored = Number(sessionStorage.getItem(appHostThreadSeqStorageKey(threadId)) || 0);
+      if (Number.isFinite(stored) && stored > 0) {
+        appHostLastThreadSeqByThreadId.set(threadId, stored);
+        return stored;
+      }
+    } catch {}
+    return 0;
+  }
+
+  function rememberAppHostThreadSeq(threadId, threadSeq) {
+    const seq = Number(threadSeq);
+    if (!threadId || !Number.isFinite(seq) || seq <= 0) return 0;
+    const current = rememberedAppHostThreadSeq(threadId);
+    if (seq <= current) return current;
+    // threadSeq 是中间层维护的会话级游标；放在 sessionStorage，刷新保留且不污染其它标签页。
+    appHostLastThreadSeqByThreadId.set(threadId, seq);
+    try {
+      sessionStorage.setItem(appHostThreadSeqStorageKey(threadId), String(seq));
+    } catch {}
+    return seq;
+  }
+
   function appHostWsPayload(state, payload) {
     // 所有 app-host 控制帧都带 clientId + portId，gateway 据此绑定到正确浏览器页面。
     const result = {
@@ -2341,8 +2374,10 @@
     };
     if (payload && payload.type === "app-host-connect") {
       // connect 帧带回浏览器已收到的官方下行游标，gateway 只补缺失增量。
+      const threadId = currentRouteThreadId();
       result.lastServerSeq = Number(state.lastServerSeq || 0);
-      result.threadId = currentRouteThreadId();
+      result.lastThreadSeq = rememberedAppHostThreadSeq(threadId);
+      result.threadId = threadId;
     }
     return result;
   }
@@ -2558,6 +2593,17 @@
     }
     const data = Object.prototype.hasOwnProperty.call(message, "data") ? message.data : undefined;
     const serverSeq = Number(message.seq || 0);
+    const threadId = typeof message.threadId === "string" ? message.threadId.slice(0, 160) : "";
+    const threadSeq = Number(message.threadSeq || 0);
+    if (message.replay === "thread" && threadId && Number.isFinite(threadSeq) && threadSeq > 0 && threadSeq <= rememberedAppHostThreadSeq(threadId)) {
+      clientDiagnostic("app-host-duplicate-thread-frame", {
+        lastThreadSeq: rememberedAppHostThreadSeq(threadId),
+        portId,
+        threadId: shortThreadId(threadId),
+        threadSeq,
+      });
+      return true;
+    }
     if (Number.isFinite(serverSeq) && serverSeq > 0 && serverSeq <= Number(state.lastServerSeq || 0)) {
       clientDiagnostic("app-host-duplicate-server-frame", {
         lastServerSeq: state.lastServerSeq,
@@ -2578,6 +2624,7 @@
     try {
       state.port.postMessage(data);
       if (Number.isFinite(serverSeq) && serverSeq > 0) state.lastServerSeq = serverSeq;
+      if (threadId && Number.isFinite(threadSeq) && threadSeq > 0) rememberAppHostThreadSeq(threadId, threadSeq);
       if (data === null) closeAppHostRelay(state, "official_closed", false);
     } catch (error) {
       clientDiagnostic("app-host-port-post-failed", {
