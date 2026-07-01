@@ -528,6 +528,11 @@ test("ws hub replays cached app-host thread frames before snapshot nudge reload"
     assert.ok(relayA);
     relayA.onMessage(JSON.stringify({ id: "rpc-nudge-replay", method: "thread/read", result: { threadId: "thread-nudge-replay", turnId: "turn-new" } }));
     await wsMessage(wsA, (message) => message.type === "app-host-port-message" && message.threadSeq === 1);
+    const beforeNudge = hub.snapshotThreads({ threadId: "thread-nudge-replay" }).threads[0];
+    assert.equal(beforeNudge.cachedThreadFrameCount, 1);
+    assert.equal(beforeNudge.oldestThreadSeq, 1);
+    assert.equal(beforeNudge.latestThreadSeq, 1);
+    assert.ok(beforeNudge.latestThreadFrameAtMs > 0);
 
     const replayPromise = wsMessage(wsB, (message) => message.type === "app-host-port-message" && message.replay === "thread");
     const nudgePromise = wsMessage(wsB, (message) => message.type === "opencodex:sync-nudge");

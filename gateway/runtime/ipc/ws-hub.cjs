@@ -244,6 +244,26 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return fresh;
   }
 
+  function appHostThreadReplayStats(threadId) {
+    // 只暴露回放队列水位，避免把 app-host 帧正文带进诊断接口。
+    const queue = pruneAppHostThreadFrames(threadId);
+    let oldestThreadSeq = 0;
+    let latestThreadSeq = 0;
+    let latestThreadFrameAtMs = 0;
+    for (const entry of queue) {
+      const seq = Number(entry && entry.threadSeq) || 0;
+      if (seq > 0 && (oldestThreadSeq === 0 || seq < oldestThreadSeq)) oldestThreadSeq = seq;
+      if (seq > latestThreadSeq) latestThreadSeq = seq;
+      latestThreadFrameAtMs = Math.max(latestThreadFrameAtMs, Number(entry && entry.atMs) || 0);
+    }
+    return {
+      cachedThreadFrameCount: queue.length,
+      latestThreadFrameAtMs,
+      latestThreadSeq,
+      oldestThreadSeq,
+    };
+  }
+
   function flushAppHostDownstreamReplay(ws, clientId, portId, afterSeq) {
     const cursor = Number(afterSeq);
     if (!Number.isFinite(cursor) || cursor <= 0) return 0;
@@ -1104,9 +1124,15 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   }
 
   function snapshotThreads(options = {}) {
+    const snapshot = listAppHostThreadStateSnapshots(appHostFrameState, options);
+    const threads = snapshot.threads.map((thread) => ({
+      ...thread,
+      ...appHostThreadReplayStats(thread.threadId),
+    }));
     return {
       ok: true,
-      ...listAppHostThreadStateSnapshots(appHostFrameState, options),
+      ...snapshot,
+      threads,
     };
   }
 
