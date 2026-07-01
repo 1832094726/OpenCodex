@@ -162,17 +162,18 @@ test("thread detail nudge skips hard reload when app-host replay was delivered",
   const decisionBody = sourceBetween(source, "function threadSnapshotNudgeDecision", "function refreshCurrentThreadRouteFromSnapshotNudge");
   const refreshBody = sourceBetween(source, "function refreshCurrentThreadRouteFromSnapshotNudge", "function scheduleCrossClientSyncRefresh");
 
-  assert.match(decisionBody, /Number\(message && message\.replaySent \|\| 0\) > 0 && message\.replayGap !== true/);
+  assert.match(decisionBody, /OpenCodexSnapshotRepairState/);
+  assert.match(decisionBody, /decideSnapshotRepair/);
   assert.match(refreshBody, /thread-detail-snapshot-replay-applied/);
   assert.match(refreshBody, /return true/);
 });
 
 test("thread detail nudge keeps refresh fallback when app-host replay has a gap", () => {
   const source = readPolyfillSource();
-  const refreshBody = sourceBetween(source, "function refreshCurrentThreadRouteFromSnapshotNudge", "function scheduleCrossClientSyncRefresh");
   const appHostBody = sourceBetween(source, "function handleAppHostGatewayMessage", "function installAppHostMessagePortBridge");
+  const staticAssetsSource = fs.readFileSync(path.join(repoRoot, "gateway", "runtime", "http", "static-assets.cjs"), "utf8");
 
-  assert.match(refreshBody, /message\.replayGap !== true/);
+  assert.match(staticAssetsSource, /snapshot-repair-state\.js/);
   assert.match(appHostBody, /app-host-thread-replay-gap/);
 });
 
@@ -182,10 +183,9 @@ test("thread detail nudge uses an explicit repair decision state", () => {
   const refreshBody = sourceBetween(source, "function refreshCurrentThreadRouteFromSnapshotNudge", "function scheduleCrossClientSyncRefresh");
 
   assert.match(source, /function threadSnapshotNudgeDecision/);
-  assert.match(decisionBody, /action: "incremental-replay"/);
-  assert.match(decisionBody, /action: "snapshot-preload"/);
-  assert.match(decisionBody, /action: "route-refresh"/);
-  assert.match(decisionBody, /action: "ignored"/);
+  assert.match(decisionBody, /stateMachine\.decideSnapshotRepair/);
+  assert.match(decisionBody, /editing: hasEditableFocus\(\)/);
+  assert.match(decisionBody, /visible: document\.visibilityState === "visible"/);
   assert.match(refreshBody, /const decision = threadSnapshotNudgeDecision\(message\)/);
   assert.match(refreshBody, /thread-detail-snapshot-decision/);
   assert.match(refreshBody, /decision\.action === "incremental-replay"/);

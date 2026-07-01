@@ -22,6 +22,7 @@ const { OPENCODEX_VERSION_LABEL } = require("../../../shared/app-version.cjs");
 const OPENCODEX_PLUGIN_LOADER_PATH = "/opencodex-plugin-loader.js";
 const OPENCODEX_PLUGIN_SYSTEM_PATH = "/opencodex-plugin-system.js";
 const OPENCODEX_FAST_SYNC_PATH = "/opencodex-fast-sync.js";
+const OPENCODEX_SNAPSHOT_REPAIR_STATE_PATH = "/snapshot-repair-state.js";
 const OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH = "/codex-token-usage-capability.js";
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH = "/codex-window-controls-overlay.css";
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH = "/codex-window-controls-overlay.js";
@@ -36,6 +37,7 @@ const WEB_SHELL_STATIC_FILES = new Map([
   [PWA_MANIFEST_PATH, path.join(WEB_SHELL_DIR, "manifest.webmanifest")],
   [OPENCODEX_PLUGIN_SYSTEM_PATH, path.join(WEB_SHELL_DIR, "opencodex-plugin-system.js")],
   [OPENCODEX_FAST_SYNC_PATH, path.join(WEB_SHELL_DIR, "opencodex-fast-sync.js")],
+  [OPENCODEX_SNAPSHOT_REPAIR_STATE_PATH, path.join(WEB_SHELL_DIR, "snapshot-repair-state.js")],
   [OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH, path.join(WEB_SHELL_DIR, "codex-token-usage-capability.js")],
   [OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.css")],
   [OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.js")],
@@ -132,6 +134,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       `<script src="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH}"></script>`,
       // fast-sync store 必须早于 bridge polyfill 初始化，后续 polyfill 才能首屏读取本地快照。
       `<script src="${OPENCODEX_FAST_SYNC_PATH}?v=${webShellStaticVersion(OPENCODEX_FAST_SYNC_PATH)}"></script>`,
+      `<script src="${OPENCODEX_SNAPSHOT_REPAIR_STATE_PATH}?v=${webShellStaticVersion(OPENCODEX_SNAPSHOT_REPAIR_STATE_PATH)}"></script>`,
       `<script src="${CODEX_BRIDGE_POLYFILL_PATH}?v=${webShellStaticVersion(CODEX_BRIDGE_POLYFILL_PATH)}"></script>`,
       `<script src="${CODEX_TOOLTIP_DISMISS_GUARD_PATH}"></script>`,
     ].join("\n    ");

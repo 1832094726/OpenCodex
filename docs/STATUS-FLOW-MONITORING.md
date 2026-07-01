@@ -253,6 +253,17 @@ pnpm run observe:weak-network
 
 然后在手机端访问同一个 OpenCodex 地址，执行后台 30 秒、切换 Wi-Fi/蜂窝、重新进入同一 thread、发送一条测试消息。observer 会把 health、flow、relay 状态、thread lag 和 repair counters 写入 JSONL，作为判断“是否真的多端流畅”的证据。
 
+## Snapshot Repair 状态机
+
+浏览器收到 `thread-detail-snapshot` nudge 后，不再直接散落 if/else 判断，而是调用 `snapshot-repair-state.js`：
+
+- `incremental-replay`：gateway 已补发连续 app-host 增量，页面不刷新。
+- `snapshot-preload`：replay 有 gap，先预读 gateway memory snapshot，再刷新当前 thread route。
+- `route-refresh`：普通 thread snapshot nudge，没有明确 replay 兜底，刷新当前 thread route。
+- `ignored`：页面不可恢复、隐藏或正在编辑，避免打断用户输入。
+
+这和 relay lifecycle 是互补关系：relay lifecycle 解释“通道是否恢复”，snapshot repair 解释“页面状态如何追平”。
+
 ## 传输层选型
 
 OpenCodex 优先复用成熟传输层。当前 gateway 同时支持：

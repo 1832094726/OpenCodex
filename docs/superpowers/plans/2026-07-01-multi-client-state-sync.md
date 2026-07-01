@@ -447,6 +447,49 @@ OPENCODEX_WEAK_OBSERVER_OUTPUT=/tmp/opencodex-weak-network.jsonl
 
 电脑端运行 observer，手机端执行后台、切网、重进 thread 和发送消息，最后用 JSONL 里的 health、flow、relay、lag 和 repair counters 判断真机弱网恢复是否成立。
 
+### 任务 17：Snapshot Repair 状态机
+
+**文件：**
+- 新建：`web-shell/snapshot-repair-state.js`
+- 新建：`web-shell/test/snapshot-repair-state.test.cjs`
+- 修改：`web-shell/codex-bridge-polyfill.js`
+- 修改：`web-shell/test/codex-bridge-fast-sync.test.cjs`
+- 修改：`gateway/runtime/http/static-assets.cjs`
+- 修改：`package.json`
+- 修改：`docs/MULTI-CLIENT-STATE-SYNC.md`
+- 修改：`docs/STATUS-FLOW-MONITORING.md`
+
+- [x] **步骤 1：新增失败测试**
+
+覆盖 snapshot repair 决策动作：
+
+- `ignored`
+- `incremental-replay`
+- `snapshot-preload`
+- `route-refresh`
+
+- [x] **步骤 2：实现浏览器状态机模块**
+
+新增 `snapshot-repair-state.js`，同时支持 Node test `require()` 和浏览器 `window.OpenCodexSnapshotRepairState`。
+
+- [x] **步骤 3：接入 polyfill**
+
+`threadSnapshotNudgeDecision()` 只收集页面上下文：
+
+- route
+- visibility
+- editing focus
+- nudge message
+
+然后调用 `OpenCodexSnapshotRepairState.decideSnapshotRepair()` 得到标准决策。
+
+- [x] **步骤 4：验证**
+
+```bash
+rtk node --test web-shell/test/snapshot-repair-state.test.cjs
+rtk node --test web-shell/test/codex-bridge-fast-sync.test.cjs
+```
+
 ## 验收标准
 
 - 手机前台恢复时优先使用 Socket.IO，只有 Socket.IO 不可用时才回退 raw `/ws`。

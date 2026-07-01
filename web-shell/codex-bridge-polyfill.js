@@ -2478,15 +2478,19 @@
 
   function threadSnapshotNudgeDecision(message) {
     const route = currentRestorableRoute();
-    const threadId = (message && message.threadId) || "";
-    if (!route) return { action: "ignored", reason: "no-route", route: "", threadId };
-    if (document.visibilityState !== "visible") return { action: "ignored", reason: "hidden", route, threadId };
-    if (hasEditableFocus()) return { action: "ignored", reason: "editing", route, threadId };
-    if (Number(message && message.replaySent || 0) > 0 && message.replayGap !== true) {
-      return { action: "incremental-replay", reason: "replay-complete", replaySent: Number(message && message.replaySent || 0), route, threadId };
+    const stateMachine = w.OpenCodexSnapshotRepairState;
+    if (stateMachine && typeof stateMachine.decideSnapshotRepair === "function") {
+      return stateMachine.decideSnapshotRepair({
+        editing: hasEditableFocus(),
+        message,
+        route,
+        visible: document.visibilityState === "visible",
+      });
     }
-    if (message && message.replayGap === true) return { action: "snapshot-preload", reason: "replay-gap", route, threadId };
-    return { action: "route-refresh", reason: "snapshot-nudge", route, threadId };
+    const threadId = (message && message.threadId) || "";
+    // 极早期脚本加载异常时保留原始兜底，真正决策逻辑由 snapshot-repair-state.js 维护。
+    if (!route) return { action: "ignored", reason: "no-route", replaySent: 0, route: "", threadId };
+    return { action: "route-refresh", reason: "snapshot-state-missing", replaySent: 0, route, threadId };
   }
 
   function refreshCurrentThreadRouteFromSnapshotNudge(message) {

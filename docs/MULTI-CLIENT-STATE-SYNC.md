@@ -54,7 +54,7 @@
 | Replicache/Electric/PowerSync | 本地优先数据库、pull/push/cookie、可见视图同步 | app-host 私有帧的低层转发 | 如果未来把 thread 列表/消息视图落成本地 DB，再评估 |
 | XState | relay 生命周期、恢复分支、错误状态收敛 | 事件持久化和网络传输 | 适合把 relay 重建和 snapshot repair 决策从散落 if/else 中抽出来 |
 
-近期不要继续扩大自研范围：短断线交给 Socket.IO，单机持久回放使用 SQLite adapter。OpenCodex 当前按单机运行，Redis Streams 和 JetStream 暂不作为近期目标；relay 生命周期用本地状态机收敛，repair 决策后续继续模块化。OpenCodex 自己只维护 `thread/read`、`thread/turns/list`、app-host port、snapshot ack 这些官方协议和标准同步抽象之间的翻译。
+近期不要继续扩大自研范围：短断线交给 Socket.IO，单机持久回放使用 SQLite adapter。OpenCodex 当前按单机运行，Redis Streams 和 JetStream 暂不作为近期目标；relay 生命周期和 snapshot repair 决策都用本地状态机收敛。OpenCodex 自己只维护 `thread/read`、`thread/turns/list`、app-host port、snapshot ack 这些官方协议和标准同步抽象之间的翻译。
 
 ### 推荐演进顺序
 
@@ -62,7 +62,7 @@
 2. `threadSeq + queue + cursor + gap` 已抽成 `ThreadEventLog` 接口，gateway 默认使用内存实现。
 3. `ws-hub` 支持注入替换 `threadEventLog`，并可通过 opt-in JSONL adapter 做进程重启后的短窗口恢复验证。
 4. 单机持久回放使用 opt-in SQLite adapter；Redis Streams/JetStream 只留作未来多进程部署候选。
-5. relay 生命周期已经抽成状态机；继续把 snapshot repair 决策抽成状态机，避免浏览器和 gateway 各自散落判断。
+5. relay 生命周期和 snapshot repair 决策都已抽成状态机，避免浏览器和 gateway 各自散落判断。
 6. 如果未来把 thread 可见状态落成本地数据库，再评估 Replicache/Electric 这类 local-first sync。
 
 ## ThreadEventLog 边界
@@ -314,3 +314,4 @@ pnpm run test:multi-client-recovery
 - replay queue 连续时，B 只收到缺失增量，不重新拉完整 thread。
 - replay queue 不连续时，B 读取 gateway memory snapshot，并发送 snapshot ack。
 - diagnostics 中每个客户端的 `threadCursor` 和 `snapshotAckThreadSeq` 能解释当前 UI 是否落后。
+- snapshot repair 状态机能解释当前恢复动作：`incremental-replay`、`snapshot-preload`、`route-refresh` 或 `ignored`。
