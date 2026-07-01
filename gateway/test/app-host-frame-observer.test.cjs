@@ -405,13 +405,15 @@ test("app-host thread replay keeps cross-client state separate from per-port seq
   const wsHubSource = fs.readFileSync(path.join(repoRoot, "gateway", "runtime", "ipc", "ws-hub.cjs"), "utf8");
   const polyfillSource = fs.readFileSync(path.join(repoRoot, "web-shell", "codex-bridge-polyfill.js"), "utf8");
 
-  // Gateway 额外按 threadId 索引官方下行帧，给新客户端接同一会话时补缺失增量。
-  assert.match(wsHubSource, /appHostDownstreamFramesByThreadId/);
+  // Gateway 通过 thread 事件日志索引官方下行帧，给新客户端接同一会话时补缺失增量。
+  assert.match(wsHubSource, /createThreadEventLog/);
+  assert.match(wsHubSource, /appHostThreadEventLog\.append/);
+  assert.match(wsHubSource, /appHostThreadEventLog\.readAfter/);
   assert.match(wsHubSource, /function flushAppHostThreadReplay/);
   assert.match(wsHubSource, /route: "app_host_thread_replay"/);
   assert.match(wsHubSource, /replay: "thread"/);
-  assert.match(wsHubSource, /appHostDownstreamThreadSeqByThreadId/);
-  assert.match(wsHubSource, /threadSeq = appHostThreadNextSeq\(threadId\)/);
+  assert.doesNotMatch(wsHubSource, /appHostDownstreamFramesByThreadId/);
+  assert.doesNotMatch(wsHubSource, /appHostDownstreamThreadSeqByThreadId/);
   assert.match(wsHubSource, /payload\.threadSeq = frame\.threadSeq/);
   assert.match(wsHubSource, /appHostPortMessagePayload\(portId, entry\.data, entry, \{ replay: "thread", replayGap \}\)/);
   assert.doesNotMatch(wsHubSource, /type: "app-host-port-message", portId, data: entry\.data, replay: "thread", seq/);
