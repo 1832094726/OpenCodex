@@ -174,10 +174,11 @@ function nonCriticalStatsigBodyForPathname(pathname) {
     route === "/v1/rgstr" ||
     route === "/v1/log_event" ||
     route === "/v1/sdk_exception" ||
+    route === "/v1/download_config_specs" ||
     route === "/ces/v1/rgstr" ||
     route === "/ces/v1/log_event" ||
     route === "/ces/v1/m" ||
-    route === "/statsigapi/v1/sdk_exception" ||
+    route.startsWith("/statsigapi/v1/") ||
     route.startsWith("/segment/v1/")
   ) {
     return {};

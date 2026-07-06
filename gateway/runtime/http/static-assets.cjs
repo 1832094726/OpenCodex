@@ -548,13 +548,23 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
 
   /** 官方 Statsig/遥测外链在弱网会拖慢首屏；响应期改到同源 no-op 路由，避免等待外网超时。 */
   function patchStatsigNetworkEndpoints(source) {
-    if (!/https:\/\/(?:ab\.chatgpt\.com|chatgpt\.com\/ces|statsigapi\.net|api\.segment\.io)|api\.segment\.io\/v1/.test(source)) return source;
+    if (
+      !/https:\/\/(?:ab\.chatgpt\.com|chatgpt\.com\/ces|statsigapi\.net|prodregistryv2\.org|featureassets\.org|api\.statsigcdn\.com|api\.segment\.io)|api\.segment\.io\/v1/.test(
+        source
+      )
+    ) {
+      return source;
+    }
     // 官方代码会对部分 endpoint 执行 new URL(endpoint)，因此不能改成相对路径；普通字符串字面量要改成表达式。
     let patched = source
       .replace(/([A-Za-z_$][\w$]*)=`\$\{this\.protocol\}:\/\/\$\{this\.host\}\/m`/g, "$1=`${location.origin}/api/noncritical/statsig/segment/v1/m`");
     patched = replaceEndpointStringLiterals(patched, "https://ab.chatgpt.com", "/api/noncritical/statsig", "origin");
     patched = replaceEndpointStringLiterals(patched, "https://chatgpt.com/ces", "/api/noncritical/statsig/ces", "origin");
     patched = replaceEndpointStringLiterals(patched, "https://statsigapi.net", "/api/noncritical/statsig/statsigapi", "origin");
+    // Statsig v3 默认域名会在不同官方构建间切换；统一收敛到本地非关键 no-op，弱网下不再等外链超时。
+    patched = replaceEndpointStringLiterals(patched, "https://prodregistryv2.org", "/api/noncritical/statsig", "origin");
+    patched = replaceEndpointStringLiterals(patched, "https://featureassets.org", "/api/noncritical/statsig", "origin");
+    patched = replaceEndpointStringLiterals(patched, "https://api.statsigcdn.com", "/api/noncritical/statsig", "origin");
     patched = replaceEndpointStringLiterals(patched, "https://api.segment.io", "/api/noncritical/statsig/segment", "origin");
     patched = replaceEndpointStringLiterals(patched, "api.segment.io/v1", "/api/noncritical/statsig/segment/v1", "host");
     return patched;

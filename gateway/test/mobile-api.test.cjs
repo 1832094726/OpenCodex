@@ -1607,6 +1607,7 @@ test("patched official chunks rewrite statsig endpoints to local no-op routes", 
         // 官方 SDK 会把这些 endpoint 缓存在 chunk 作用域；响应期改写比运行时 monkey patch 更早生效。
         "const api=`https://ab.chatgpt.com/v1`,exception=`https://ab.chatgpt.com/v1/sdk_exception`;",
         "const logEvent=`https://chatgpt.com/ces/v1/rgstr`,sdkException=`https://statsigapi.net/v1/sdk_exception`;",
+        "const prodRegistry=`https://prodregistryv2.org/v1`,featureAssets=`https://featureassets.org/v1/initialize`,configSpecs=`https://api.statsigcdn.com/v1/download_config_specs`;",
         // 当前官方 bundle 也会把 Statsig/Segment endpoint 放在普通字符串里，不能只覆盖模板字符串。
         "const quotedApi=\"https://ab.chatgpt.com/v1\",quotedRgstr='https://chatgpt.com/ces/v1/rgstr';",
         "const segmentTrack=`https://api.segment.io/v1/t`,segmentHost=`api.segment.io/v1`;function flush(){let n=`${this.protocol}://${this.host}/m`;return n}",
@@ -1628,6 +1629,7 @@ test("patched official chunks rewrite statsig endpoints to local no-op routes", 
     assert.match(response.body, /`\$\{location\.origin\}\/api\/noncritical\/statsig\/v1\/sdk_exception`/);
     assert.match(response.body, /`\$\{location\.origin\}\/api\/noncritical\/statsig\/ces\/v1\/rgstr`/);
     assert.match(response.body, /`\$\{location\.origin\}\/api\/noncritical\/statsig\/statsigapi\/v1\/sdk_exception`/);
+    assert.match(response.body, /`\$\{location\.origin\}\/api\/noncritical\/statsig\/v1\/download_config_specs`/);
     assert.match(response.body, /`\$\{location\.origin\}\/api\/noncritical\/statsig\/segment\/v1\/t`/);
     assert.match(response.body, /`\$\{location\.host\}\/api\/noncritical\/statsig\/segment\/v1`/);
     assert.match(response.body, /`\$\{location\.origin\}\/api\/noncritical\/statsig\/segment\/v1\/m`/);
@@ -1636,6 +1638,9 @@ test("patched official chunks rewrite statsig endpoints to local no-op routes", 
     assert.doesNotMatch(response.body, /https:\/\/ab\.chatgpt\.com/);
     assert.doesNotMatch(response.body, /https:\/\/chatgpt\.com\/ces/);
     assert.doesNotMatch(response.body, /https:\/\/statsigapi\.net/);
+    assert.doesNotMatch(response.body, /https:\/\/prodregistryv2\.org/);
+    assert.doesNotMatch(response.body, /https:\/\/featureassets\.org/);
+    assert.doesNotMatch(response.body, /https:\/\/api\.statsigcdn\.com/);
     assert.doesNotMatch(response.body, /api\.segment\.io/);
     assert.doesNotMatch(response.body, /const api=`\/api\/noncritical/);
   } finally {
@@ -1888,6 +1893,18 @@ test("request handler serves rewritten statsig telemetry locally", async () => {
     socket: { remoteAddress: "127.0.0.1" },
     url: "/api/noncritical/statsig/ces/v1/m",
   });
+  const configSpecs = await collectResponse(handler, {
+    headers: { host: "127.0.0.1:3737" },
+    method: "POST",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/api/noncritical/statsig/v1/download_config_specs?k=client",
+  });
+  const statsigApiException = await collectResponse(handler, {
+    headers: { host: "127.0.0.1:3737" },
+    method: "POST",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/api/noncritical/statsig/statsigapi/v1/sdk_exception",
+  });
   const segmentTrack = await collectResponse(handler, {
     headers: { host: "127.0.0.1:3737" },
     method: "POST",
@@ -1910,6 +1927,8 @@ test("request handler serves rewritten statsig telemetry locally", async () => {
   assert.equal(initialize.statusCode, 200);
   assert.equal(rgstr.statusCode, 200);
   assert.equal(metrics.statusCode, 200);
+  assert.equal(configSpecs.statusCode, 200);
+  assert.equal(statsigApiException.statusCode, 200);
   assert.equal(segmentTrack.statusCode, 200);
   assert.equal(segmentMetrics.statusCode, 200);
   assert.equal(segmentSettings.statusCode, 200);
@@ -1917,6 +1936,8 @@ test("request handler serves rewritten statsig telemetry locally", async () => {
   assert.deepEqual(JSON.parse(initialize.body).feature_gates, {});
   assert.deepEqual(JSON.parse(rgstr.body), {});
   assert.deepEqual(JSON.parse(metrics.body), {});
+  assert.deepEqual(JSON.parse(configSpecs.body), {});
+  assert.deepEqual(JSON.parse(statsigApiException.body), {});
   assert.deepEqual(JSON.parse(segmentTrack.body), {});
   assert.deepEqual(JSON.parse(segmentMetrics.body), {});
   assert.deepEqual(JSON.parse(segmentSettings.body).integrations, {});

@@ -154,8 +154,10 @@ test("web shell clears unavailable last-route before renderer handoff", () => {
   assert.match(html, /function threadIdFromRoute/);
   assert.match(html, /async function readThreadCatalogBeforeRenderer/);
   assert.match(catalogBody, /currentThreadRouteBeforeRenderer\(\)/);
-  assert.match(catalogBody, /if \(!hasCurrentThreadRoute && !hasLastThreadRoute\) return null/);
-  assert.match(catalogBody, /const timeoutMs = hasCurrentThreadRoute \? 350 : 1200/);
+  assert.match(catalogBody, /if \(hasCurrentThreadRoute\) \{/);
+  assert.match(catalogBody, /return null/);
+  assert.match(catalogBody, /if \(!hasLastThreadRoute\) return null/);
+  assert.match(catalogBody, /const timeoutMs = 1200/);
   assert.match(catalogBody, /\/api\/mobile\/bootstrap\?limit=200&catalog=1/);
   assert.match(lastRouteBody, /localStorage\.removeItem\(lastThreadRouteKey\)/);
   assert.match(lastRouteBody, /sessionStorage\.setItem\(skipLastRouteRestoreKey,\s*"1"\)/);
@@ -169,13 +171,14 @@ test("web shell skips archived direct local routes before renderer handoff", () 
   const archivedBody = sourceBetween(html, "function clearArchivedInitialRouteBeforeRenderer", "async function authStatus");
   const bootBody = sourceBetween(html, "async function bootRenderer", "function utf8Bytes");
 
-  // 明确归档的 /local/:id 不能继续交给官方恢复链路，否则会停在列表或只剩链路控件。
-  // 最近 catalog 可能不包含旧归档会话，直达深链需要再用详情接口做一次短探测。
+  // 明确缓存为归档的 /local/:id 不能继续交给官方恢复链路，否则会停在列表或只剩链路控件。
+  // 未缓存的直达深链不再等待详情探测，避免热启动进会话多出一段空白时间。
   assert.match(html, /function readArchivedThreadIdsBeforeRenderer/);
   assert.match(html, /function currentThreadRouteBeforeRenderer/);
   assert.match(html, /function catalogThreadById/);
   assert.match(html, /function rememberArchivedThreadIdBeforeRenderer/);
   assert.match(html, /async function readInitialThreadDetailBeforeRenderer/);
+  assert.match(detailBody, /if \(!catalog\) return null/);
   assert.match(detailBody, /catalogThreadById\(catalog, threadId\)/);
   assert.match(detailBody, /\/api\/mobile\/thread\/\$\{encodeURIComponent\(threadId\)\}\?limit=1/);
   assert.match(detailBody, /String\(detail\.thread\.id \|\| ""\) !== threadId/);

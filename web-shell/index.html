@@ -823,14 +823,18 @@
         async function readThreadCatalogBeforeRenderer() {
           const hasCurrentThreadRoute = !!threadIdFromRoute(currentThreadRouteBeforeRenderer());
           let hasLastThreadRoute = false;
+          if (hasCurrentThreadRoute) {
+            // 直达 /local/:id 的主目标是尽快切入官方 renderer；归档兜底只用本地缓存同步判断，不再阻塞 catalog 探测。
+            return null;
+          }
           if (!hasCurrentThreadRoute && location.pathname === "/" && !location.search && !location.hash) {
             try {
               hasLastThreadRoute = !!threadIdFromRoute(normalizeThreadRoute(localStorage.getItem(lastThreadRouteKey) || ""));
             } catch {}
           }
-          if (!hasCurrentThreadRoute && !hasLastThreadRoute) return null;
-          // direct route 只做短探测，不能为了判断归档拖慢所有正常会话；首页 last-route 清理可以多等一点。
-          const timeoutMs = hasCurrentThreadRoute ? 350 : 1200;
+          if (!hasLastThreadRoute) return null;
+          // 首页 last-route 清理可以等一点；直达深链不在这里阻塞，避免热启动进会话出现额外空等。
+          const timeoutMs = 1200;
           const catalog = await withTimeout(
             (async () => {
               const res = await fetch(`/api/mobile/bootstrap?limit=200&catalog=1&_=${Date.now()}`, {
@@ -853,6 +857,7 @@
           const threadId = threadIdFromRoute(route);
           if (!threadId) return null;
           if (readArchivedThreadIdsBeforeRenderer().has(threadId)) return null;
+          if (!catalog) return null;
           if (catalogThreadById(catalog, threadId)) return null;
           // 最近 catalog 为了首屏速度可能没覆盖旧归档会话；直达深链再做一次短详情探测，避免交给官方 renderer 后半挂。
           const detail = await withTimeout(
