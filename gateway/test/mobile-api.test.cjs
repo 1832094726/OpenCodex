@@ -1538,6 +1538,8 @@ test("official renderer injects initial route for deep linked local threads", ()
     assert.match(html, /\/v1\/rgstr/);
     assert.match(html, /\/ces\/v1\/log_event/);
     assert.match(html, /XMLHttpRequest/);
+    const csp = html.match(/Content-Security-Policy"\s+content="([^"]+)/)?.[1] || "";
+    assert.doesNotMatch(csp, /connect-src[^;]*https:\/\/ab\.chatgpt\.com/);
   } finally {
     fs.rmSync(tempRoot, { force: true, recursive: true });
   }

@@ -194,6 +194,8 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
         .replace("&#39;wasm-unsafe-eval&#39;", "&#39;wasm-unsafe-eval&#39; &#39;unsafe-eval&#39;")
         .replace("'wasm-unsafe-eval'", "'wasm-unsafe-eval' 'unsafe-eval'");
     }
+    // ab.chatgpt.com 只承载 Statsig/遥测；弱网下直连会卡 10s，CSP 层直接禁掉，fetch/XHR patch 仍做本地空响应兜底。
+    html = html.replace(/\s+https:\/\/ab\.chatgpt\.com(?=[\s;])/g, "");
     return html;
   }
 

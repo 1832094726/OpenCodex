@@ -488,6 +488,9 @@
     <script>
       (() => {
         const forceLoginKey = "codex_web_force_login";
+        const lastThreadRouteKey = "opencodex_last_thread_route_v1";
+        const skipLastRouteRestoreKey = "opencodex_skip_last_route_restore";
+        const nonRestorableRouteParams = ["__opencodex_renderer", "full", "mobile", "probe", "_probe", "_deep", "_tail"];
         const pluginSystem = window.OpenCodexPluginSystem || window.__OpenCodexPluginSystem || null;
         const runtimeConfig = window.__CODEX_WEB_CONFIG__ || {};
         const locale = runtimeConfig.locale || "zh-CN";
@@ -763,6 +766,66 @@
           });
         }
 
+        function normalizeThreadRoute(value) {
+          const text = typeof value === "string" ? value.trim() : "";
+          if (!text || text === "/" || text.startsWith("//")) return "";
+          try {
+            const parsed = new URL(text, location.origin);
+            if (parsed.origin !== location.origin) return "";
+            for (const param of nonRestorableRouteParams) parsed.searchParams.delete(param);
+            const route = `${parsed.pathname || "/"}${parsed.search || ""}${parsed.hash || ""}`;
+            return /^\/(?:local|thread|conversation|remote)\/[^/?#]+/.test(route) ? route : "";
+          } catch {
+            return /^\/(?:local|thread|conversation|remote)\/[^/?#]+/.test(text) ? text : "";
+          }
+        }
+
+        function threadIdFromRoute(route) {
+          try {
+            const parsed = new URL(String(route || ""), location.origin);
+            const match = parsed.pathname.match(/^\/(?:local|thread|conversation|remote)\/([^/?#]+)/);
+            return match ? decodeURIComponent(match[1]) : "";
+          } catch {
+            const match = String(route || "").match(/^\/(?:local|thread|conversation|remote)\/([^/?#]+)/);
+            return match ? decodeURIComponent(match[1]) : "";
+          }
+        }
+
+        async function clearUnavailableLastRouteBeforeRenderer() {
+          if (location.pathname !== "/" || location.search || location.hash) return;
+          let route = "";
+          try {
+            route = normalizeThreadRoute(localStorage.getItem(lastThreadRouteKey) || "");
+          } catch {}
+          const threadId = threadIdFromRoute(route);
+          if (!threadId) return;
+          const catalog = await withTimeout(
+            (async () => {
+              const res = await fetch(`/api/mobile/bootstrap?limit=200&catalog=1&_=${Date.now()}`, {
+                cache: "no-store",
+                credentials: "same-origin",
+                headers: authHeaders({ accept: "application/json" }),
+              });
+              if (!res.ok) return null;
+              return res.json();
+            })(),
+            1200,
+            null
+          );
+          if (!catalog || !Array.isArray(catalog.threads)) return;
+          const available = catalog.threads.some((thread) => thread && String(thread.id || "") === threadId && thread.archived !== true);
+          if (available) return;
+          try {
+            // 不可用的 last-route 会让官方 renderer 先进入旧会话再恢复失败；入口层提前清掉，首页才能稳定冷启动。
+            localStorage.removeItem(lastThreadRouteKey);
+            sessionStorage.setItem(skipLastRouteRestoreKey, "1");
+          } catch {}
+          console.info("[opencodex] skipped unavailable last route before renderer", {
+            route,
+            threadId: `${threadId.slice(0, 10)}...${threadId.slice(-4)}`,
+          });
+        }
+
         async function authStatus() {
           const res = await fetch("/api/auth/status", {
             cache: "no-store",
@@ -773,9 +836,10 @@
           return res.json();
         }
 
-       async function bootRenderer() {
-         showBoot(t("web.auth.starting"));
-         // 短暂等待 SW 预缓存：命中缓存可加速冷启动，但弱网/DERP 下不能为了预缓存阻塞首屏。
+        async function bootRenderer() {
+          showBoot(t("web.auth.starting"));
+          await clearUnavailableLastRouteBeforeRenderer();
+          // 短暂等待 SW 预缓存：命中缓存可加速冷启动，但弱网/DERP 下不能为了预缓存阻塞首屏。
          // 缓存未就绪时继续加载 renderer，缺失资源仍会由 SW cache-first 按需补齐。
         if ("serviceWorker" in navigator && location.protocol === "https:") {
           try {

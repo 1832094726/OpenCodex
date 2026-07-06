@@ -117,6 +117,21 @@ test("restored local thread routes skip archived catalog entries", () => {
   assert.match(catalogBody, /archived: thread\.archived === true/);
 });
 
+test("web shell clears unavailable last-route before renderer handoff", () => {
+  const html = fs.readFileSync(path.join(repoRoot, "web-shell", "index.html"), "utf8");
+
+  // 壳页比官方 renderer 更早运行；在这里清理不可用 last-route，避免 renderer 已挂载后再改路由导致白屏或只剩链路控件。
+  assert.match(html, /const lastThreadRouteKey = "opencodex_last_thread_route_v1"/);
+  assert.match(html, /const skipLastRouteRestoreKey = "opencodex_skip_last_route_restore"/);
+  assert.match(html, /function normalizeThreadRoute/);
+  assert.match(html, /function threadIdFromRoute/);
+  assert.match(html, /async function clearUnavailableLastRouteBeforeRenderer/);
+  assert.match(html, /\/api\/mobile\/bootstrap\?limit=200&catalog=1/);
+  assert.match(html, /localStorage\.removeItem\(lastThreadRouteKey\)/);
+  assert.match(html, /sessionStorage\.setItem\(skipLastRouteRestoreKey,\s*"1"\)/);
+  assert.match(html, /await clearUnavailableLastRouteBeforeRenderer\(\)/);
+});
+
 test("active local thread changes update route without full page navigation", () => {
   const source = readPolyfillSource();
   const navigateBody = sourceBetween(source, "function navigateToLocalThreadRouteInPlace", "function preloadGatewaySnapshotFromNudge");
