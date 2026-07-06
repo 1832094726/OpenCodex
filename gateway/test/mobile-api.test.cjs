@@ -1559,8 +1559,10 @@ test("request handler keeps the official shell for mobile browsers and enables t
   assert.doesNotMatch(response.body, /data-opencodex-mobile-lite/);
   assert.match(response.body, /mobileTrafficMode":true/);
   assert.match(deepLink.body, /mobileTrafficMode":true/);
-  assert.match(response.body, /opencodex-plugin-system/);
+  assert.doesNotMatch(response.body, /opencodex-plugin-system/);
+  assert.doesNotMatch(deepLink.body, /opencodex-plugin-system/);
   assert.doesNotMatch(response.body, /opencodex-plugin-loader\.js/);
+  assert.match(response.body, /跳过插件系统脚本/);
   assert.doesNotMatch(response.body, /codex-window-controls-overlay\.(?:js|css)/);
   assert.doesNotMatch(deepLink.body, /codex-window-controls-overlay\.(?:js|css)/);
 });

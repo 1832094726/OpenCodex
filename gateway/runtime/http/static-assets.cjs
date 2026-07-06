@@ -380,6 +380,10 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       .replace(
         /\n\s*<script src="\/codex-window-controls-overlay\.js"><\/script>/i,
         "\n    <!-- OpenCodex 手机流量模式跳过 window controls overlay 脚本。 -->"
+      )
+      .replace(
+        /\n\s*<script src="\/opencodex-plugin-system\.js"><\/script>/i,
+        "\n    <!-- OpenCodex 手机流量模式跳过插件系统脚本；壳页只负责认证和 renderer handoff。 -->"
       );
   }
 
