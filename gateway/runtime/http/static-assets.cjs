@@ -146,7 +146,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       `<script src="${OPENCODEX_PLUGIN_SYSTEM_PATH}"></script>`,
       options.mobileTrafficMode === true
         ? "<!-- OpenCodex 手机流量模式跳过插件 loader，减少首屏脚本和后台状态请求。 -->"
-        : `<script src="${OPENCODEX_PLUGIN_LOADER_PATH}"></script>`,
+        : createDeferredPluginLoaderScript(),
       options.mobileTrafficMode === true
         ? "<!-- OpenCodex 手机流量模式跳过 token usage capability，避免进会话后逐条补统计阻塞渲染。 -->"
         : `<script src="${OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH}"></script>`,
@@ -166,6 +166,11 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   function createRendererHandoffCleanupScript() {
     const params = JSON.stringify(RENDERER_HANDOFF_CLEANUP_QUERY_PARAMS);
     return `<script>(function(){try{var u=new URL(location.href),p=${params},changed=false;for(var i=0;i<p.length;i++){if(u.searchParams.has(p[i])){u.searchParams.delete(p[i]);changed=true}}if(changed){history.replaceState(history.state,"",u.pathname+u.search+u.hash)}}catch(e){}})();</script>`;
+  }
+
+  function createDeferredPluginLoaderScript() {
+    // 插件是增强能力，不应阻塞官方 renderer 首屏和本地会话恢复；等 load/idle 后再加载，注册后仍会被插件系统立即激活。
+    return `<script>(function(){try{var w=window;if(w.__opencodexDeferredPluginLoaderInstalled)return;w.__opencodexDeferredPluginLoaderInstalled=true;function load(){try{if(w.__opencodexPluginLoaderLoaded)return;w.__opencodexPluginLoaderLoaded=true;var s=document.createElement("script");s.src="${OPENCODEX_PLUGIN_LOADER_PATH}";s.async=false;(document.head||document.documentElement).appendChild(s)}catch(e){console.warn("[opencodex-plugin] deferred loader failed",e)}}function schedule(){if("requestIdleCallback"in w)w.requestIdleCallback(load,{timeout:2500});else w.setTimeout(load,1200)}if(document.readyState==="complete")schedule();else w.addEventListener("load",schedule,{once:true})}catch(e){}})();</script>`;
   }
 
   function createEarlyTelemetryPatchScript() {

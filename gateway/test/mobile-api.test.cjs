@@ -1495,7 +1495,7 @@ test("request handler keeps the official shell for mobile browsers and enables t
   assert.match(response.body, /mobileTrafficMode":true/);
   assert.match(deepLink.body, /mobileTrafficMode":true/);
   assert.match(response.body, /opencodex-plugin-system/);
-  assert.match(response.body, /config\.mobileTrafficMode\) return/);
+  assert.doesNotMatch(response.body, /opencodex-plugin-loader\.js/);
 });
 
 test("official renderer skips token usage capability only for mobile traffic mode", () => {
@@ -1515,8 +1515,14 @@ test("official renderer skips token usage capability only for mobile traffic mod
     const mobile = staticAssets.createRendererResponse({ mobileTrafficMode: true });
 
     assert.match(desktop, /codex-token-usage-capability\.js/);
+    assert.match(desktop, /__opencodexDeferredPluginLoaderInstalled/);
+    assert.match(desktop, /requestIdleCallback/);
+    assert.match(desktop, /opencodex-plugin-loader\.js/);
     assert.doesNotMatch(mobile, /codex-token-usage-capability\.js/);
+    assert.doesNotMatch(mobile, /__opencodexDeferredPluginLoaderInstalled/);
+    assert.doesNotMatch(mobile, /opencodex-plugin-loader\.js/);
     assert.match(mobile, /跳过 token usage capability/);
+    assert.match(mobile, /跳过插件 loader/);
     assert.match(mobile, /mobileTrafficMode:true/);
     assert.match(mobile, /__OPENCODEX_MOBILE_TRAFFIC_MODE__=true/);
   } finally {
@@ -2118,7 +2124,8 @@ test("request handler no longer serves a standalone mobile-lite shell at /m", as
 
   assert.equal(response.statusCode, 200);
   assert.doesNotMatch(response.body, /data-opencodex-mobile-lite/);
-  assert.match(response.body, /opencodex-plugin-loader/);
+  assert.match(response.body, /opencodex-plugin-system/);
+  assert.doesNotMatch(response.body, /opencodex-plugin-loader\.js/);
 });
 
 test("request handler keeps desktop and explicit mobile full mode on the full extension profile", async () => {
@@ -2156,6 +2163,8 @@ test("request handler keeps desktop and explicit mobile full mode on the full ex
   assert.doesNotMatch(explicitFull.body, /data-opencodex-mobile-lite/);
   assert.doesNotMatch(desktop.body, /mobileTrafficMode":true/);
   assert.doesNotMatch(explicitFull.body, /mobileTrafficMode":true/);
-  assert.match(desktop.body, /opencodex-plugin-loader/);
-  assert.match(explicitFull.body, /opencodex-plugin-loader/);
+  assert.match(desktop.body, /opencodex-plugin-system/);
+  assert.match(explicitFull.body, /opencodex-plugin-system/);
+  assert.doesNotMatch(desktop.body, /opencodex-plugin-loader\.js/);
+  assert.doesNotMatch(explicitFull.body, /opencodex-plugin-loader\.js/);
 });

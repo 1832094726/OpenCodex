@@ -29,3 +29,11 @@ test("entry handoff does not prefetch renderer html or block on service worker c
   assert.doesNotMatch(bootRendererBody, /await\s+new Promise\(\(resolve\).*cache-status/s);
   assert.doesNotMatch(bootRendererBody, /fetch\(rendererUrl/);
 });
+
+test("entry shell does not load desktop plugins before renderer handoff", () => {
+  const source = readEntryHtml();
+
+  // 入口壳很快会切到官方 renderer；插件只应在 renderer 里延后加载，避免这页先做一轮即将被销毁的脚本请求。
+  assert.match(source, /opencodex-plugin-system\.js/);
+  assert.doesNotMatch(source, /opencodex-plugin-loader\.js/);
+});

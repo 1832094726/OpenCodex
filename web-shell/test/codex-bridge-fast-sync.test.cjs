@@ -152,8 +152,10 @@ test("web shell clears unavailable last-route before renderer handoff", () => {
   assert.match(html, /const skipLastRouteRestoreKey = "opencodex_skip_last_route_restore"/);
   assert.match(html, /function normalizeThreadRoute/);
   assert.match(html, /function threadIdFromRoute/);
+  assert.match(html, /function coldHomeRouteBeforeRenderer/);
   assert.match(html, /async function readThreadCatalogBeforeRenderer/);
   assert.match(catalogBody, /currentThreadRouteBeforeRenderer\(\)/);
+  assert.match(catalogBody, /coldHomeRouteBeforeRenderer\(\)/);
   assert.match(catalogBody, /if \(hasCurrentThreadRoute\) \{/);
   assert.match(catalogBody, /return null/);
   assert.match(catalogBody, /if \(!hasLastThreadRoute\) return null/);
@@ -161,6 +163,7 @@ test("web shell clears unavailable last-route before renderer handoff", () => {
   assert.match(catalogBody, /\/api\/mobile\/bootstrap\?limit=200&catalog=1/);
   assert.match(lastRouteBody, /localStorage\.removeItem\(lastThreadRouteKey\)/);
   assert.match(lastRouteBody, /sessionStorage\.setItem\(skipLastRouteRestoreKey,\s*"1"\)/);
+  assert.match(lastRouteBody, /if \(!coldHomeRouteBeforeRenderer\(\)\) return/);
   assert.match(html, /const catalog = await readThreadCatalogBeforeRenderer\(\)/);
   assert.match(html, /clearUnavailableLastRouteBeforeRenderer\(catalog\)/);
 });
@@ -193,6 +196,26 @@ test("web shell skips archived direct local routes before renderer handoff", () 
   assert.match(archivedBody, /skipped archived initial route before renderer/);
   assert.match(bootBody, /const initialThreadDetail = await readInitialThreadDetailBeforeRenderer\(catalog\)/);
   assert.match(bootBody, /clearArchivedInitialRouteBeforeRenderer\(catalog, initialThreadDetail\)/);
+});
+
+test("web shell restores last local route as the renderer handoff URL", () => {
+  const html = fs.readFileSync(path.join(repoRoot, "web-shell", "index.html"), "utf8");
+  const restoreBody = sourceBetween(html, "function lastThreadRouteForRendererHandoff", "async function authStatus");
+  const bootBody = sourceBetween(html, "async function bootRenderer", "function utf8Bytes");
+
+  // 首页恢复会话必须发生在 official renderer 首次请求前；只改地址栏不会触发官方 thread/read。
+  assert.match(html, /function lastThreadRouteForRendererHandoff/);
+  assert.match(restoreBody, /coldHomeRouteBeforeRenderer\(\)/);
+  assert.match(restoreBody, /skipLastRouteRestoreKey/);
+  assert.match(restoreBody, /readArchivedThreadIdsBeforeRenderer\(\)\.has\(threadId\)/);
+  assert.match(restoreBody, /catalogThreadById\(catalog, threadId\)/);
+  assert.match(bootBody, /const lastRoute = lastThreadRouteForRendererHandoff\(catalog\)/);
+  assert.match(bootBody, /new URL\(lastRoute \|\| location\.href, location\.origin\)/);
+  assert.match(bootBody, /restored last route before renderer handoff/);
+  assert.match(bootBody, /currentQueryParamBeforeRenderer\("full"\) === "1"/);
+  assert.match(bootBody, /rendererUrl\.searchParams\.set\("full", "1"\)/);
+  assert.match(bootBody, /rendererUrl\.searchParams\.set\("mobile", "1"\)/);
+  assert.match(bootBody, /rendererUrl\.searchParams\.set\("__opencodex_renderer", "1"\)/);
 });
 
 test("active local thread changes update route without full page navigation", () => {
