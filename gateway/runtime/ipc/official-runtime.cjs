@@ -87,6 +87,20 @@ const APP_SERVER_STALE_READ_ONLY_METHODS = new Set([
 const APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS = Number(
   process.env.OPENCODEX_APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS || 24 * 60 * 60 * 1000
 );
+const FETCH_RESPONSE_CACHE_TTL_MS = Number(process.env.OPENCODEX_FETCH_RESPONSE_CACHE_TTL_MS || 2 * 60 * 1000);
+const FETCH_RESPONSE_STALE_CACHE_MAX_AGE_MS = Number(
+  process.env.OPENCODEX_FETCH_RESPONSE_STALE_CACHE_MAX_AGE_MS || 60 * 60 * 1000
+);
+const FETCH_RESPONSE_CACHE_BODY_LIMIT_BYTES = Number(
+  process.env.OPENCODEX_FETCH_RESPONSE_CACHE_BODY_LIMIT_BYTES || 512 * 1024
+);
+// 这些官方启动期 wham fetch 只影响账号菜单、用量提示和实验配置；缓存真实回包可避免弱网重复拖慢会话进入。
+const FETCH_RESPONSE_CACHEABLE_PATHS = new Set([
+  "/wham/accounts/check",
+  "/wham/profiles/me",
+  "/wham/statsig/bootstrap",
+  "/wham/usage",
+]);
 const APP_SERVER_READ_ONLY_CACHE_FILE = path.join(RUNTIME_DIR, "cache", "app-server-read-only-cache.json");
 const DEFAULT_BROWSER_USE_AVAILABLE_BACKENDS = "chrome";
 const CODEX_RUNTIME_WATCH_FILENAMES = new Set(["auth.json"]);
@@ -104,6 +118,7 @@ const CODEX_APP_SERVER_KILL_GRACE_MS = Math.max(
   Number(process.env.OPENCODEX_CODEX_APP_SERVER_KILL_GRACE_MS || 2500)
 );
 const appServerReadOnlyCache = new Map();
+const fetchResponseCache = new Map();
 const fastSyncCache = createFastSyncCache({
   dir: path.join(RUNTIME_DIR, "cache", "fast-sync"),
 });
@@ -1761,6 +1776,91 @@ function cloneCacheableResponseArgs(args) {
   }
 }
 
+function normalizedFetchResponseCachePath(url) {
+  try {
+    const parsed = new URL(String(url || ""), "https://chatgpt.com");
+    const pathname = parsed.pathname.replace(/\/+$/, "") || "/";
+    return FETCH_RESPONSE_CACHEABLE_PATHS.has(pathname) ? pathname : "";
+  } catch {
+    return "";
+  }
+}
+
+function fetchResponseCacheKeyForMessage(message) {
+  if (!message || typeof message !== "object" || message.type !== "fetch") return "";
+  const pathname = normalizedFetchResponseCachePath(message.url);
+  if (!pathname) return "";
+  const method = String(message.method || "GET").toUpperCase();
+  if (method !== "GET" && !(method === "POST" && pathname === "/wham/statsig/bootstrap")) return "";
+  try {
+    const parsed = new URL(String(message.url || ""), "https://chatgpt.com");
+    const search = method === "GET" ? parsed.search || "" : "";
+    const locale =
+      (message.headers && typeof message.headers === "object" && String(message.headers["OAI-Language"] || "")) || "";
+    // requestId、sid 等易变字段不能进入 key；这里按真实接口语义保留 path/search/locale。
+    return JSON.stringify({ kind: "fetch-response", method, pathname, search, locale });
+  } catch {
+    return `${method}:${pathname}`;
+  }
+}
+
+function fetchResponseCacheKeyForSummary(summary) {
+  if (!summary || summary.sourceType !== "fetch") return "";
+  return fetchResponseCacheKeyForMessage({
+    headers: summary.headers || null,
+    method: summary.method || "GET",
+    type: "fetch",
+    url: summary.url || "",
+  });
+}
+
+function canServeStaleFetchResponseCache(entry, nowMs = Date.now()) {
+  if (!entry || typeof entry.expiresAtMs !== "number") return false;
+  // 账号/用量/Statsig 是启动辅助数据；短期旧值比远程页面卡住几十秒更可接受。
+  return entry.expiresAtMs + FETCH_RESPONSE_STALE_CACHE_MAX_AGE_MS > nowMs;
+}
+
+function maybeServeCachedFetchResponse(channel, invokeArgs, context, requestSummary) {
+  if (channel !== MESSAGE_FROM_VIEW_CHANNEL || !wsHub || !context || !context.clientId) return false;
+  const message = fetchMessageFromIpcArgs(invokeArgs);
+  const cacheKey = fetchResponseCacheKeyForMessage(message);
+  if (!cacheKey) return false;
+  const entry = fetchResponseCache.get(cacheKey);
+  const nowMs = Date.now();
+  const fresh = entry && entry.expiresAtMs > nowMs;
+  if (!fresh && !canServeStaleFetchResponseCache(entry, nowMs)) return false;
+  const requestId = stringRouteId(message && message.requestId);
+  if (!requestId || !entry || !entry.response || !Array.isArray(entry.response.args)) return false;
+  const responseArgs = cloneWithReplacement(entry.response.args, entry.response.requestId, requestId);
+  diagnosticLog("official-runtime", "fetch_response_cache_hit", {
+    requestId: shortId(requestId),
+    stale: !fresh,
+    url: requestSummary && requestSummary.url,
+  });
+  return routeOfficialWebContentsSend(entry.response.channel || MESSAGE_FOR_VIEW_CHANNEL, responseArgs);
+}
+
+function rememberCacheableFetchResponse(channel, args, requestSummary, requestId) {
+  const cacheKey = fetchResponseCacheKeyForSummary(requestSummary);
+  if (!cacheKey || !requestId) return;
+  const payload = payloadFromArgs(args);
+  if (!payload || typeof payload !== "object") return;
+  if (payload.type !== "fetch-response" || payload.responseType !== "success") return;
+  if (Number(payload.status || 0) < 200 || Number(payload.status || 0) >= 300) return;
+  const bodyJsonString = typeof payload.bodyJsonString === "string" ? payload.bodyJsonString : "";
+  if (Buffer.byteLength(bodyJsonString, "utf8") > FETCH_RESPONSE_CACHE_BODY_LIMIT_BYTES) return;
+  const cacheableArgs = cloneCacheableResponseArgs(args);
+  if (!cacheableArgs) return;
+  fetchResponseCache.set(cacheKey, {
+    expiresAtMs: Date.now() + FETCH_RESPONSE_CACHE_TTL_MS,
+    response: {
+      args: cacheableArgs,
+      channel,
+      requestId,
+    },
+  });
+}
+
 function maybeServeReadOnlyAppServerCache(channel, invokeArgs, context, summary, cacheKey) {
   if (!cacheKey || !wsHub || !context || !context.clientId) return false;
   loadReadOnlyAppServerCache();
@@ -2380,6 +2480,8 @@ function routeOfficialWebContentsSend(channel, args) {
   };
   // 这些 app-server 列表是只读初始化数据；成功回包落盘后，重启网关也能先用热缓存撑住弱网首屏。
   rememberReadOnlyAppServerResponse(channel, args, requestSummary, requestId);
+  // 官方启动期 wham fetch 只缓存真实成功回包；后续弱网重复打开时可直接复用，不伪造账号/用量数据。
+  rememberCacheableFetchResponse(channel, args, requestSummary, requestId);
   // fast-sync 快照只记录 allowlist 的官方成功只读回包，供浏览器首屏独立读取。
   rememberFastSyncSnapshot(channel, args, requestSummary, valueFromFastSyncFetchResponsePayload(payload), {
     clientId: mappedClientId || targetClientId,
@@ -2655,6 +2757,7 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   rememberRequestRoute(channel, invokeArgs, context.clientId || "", requestSummary);
   // 会话列表保持官方原生链路，避免跨环境实验影响 Win/Mac 本地历史显示。
   if (maybeHandleDomainIsolationGlobalStateFetch(channel, invokeArgs)) return true;
+  if (maybeServeCachedFetchResponse(channel, invokeArgs, context, requestSummary)) return true;
   if (maybeHandleNonCriticalFetch(channel, invokeArgs)) return true;
   if (maybeHandleLocaleInfoFetch(channel, invokeArgs)) return true;
   if (maybeHandleBrowserUseWebShimLifecycle(channel, invokeArgs)) return true;

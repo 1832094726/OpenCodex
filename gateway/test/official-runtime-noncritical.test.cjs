@@ -20,6 +20,33 @@ test("account usage fetch is not treated as non-critical", () => {
   assert.doesNotMatch(body, /pathname\s*===\s*["']\/wham\/usage["']/);
 });
 
+test("startup wham fetches can reuse cached real responses", () => {
+  const cacheBody = officialRuntimeFunctionSource("fetchResponseCacheKeyForMessage", "fetchResponseCacheKeyForSummary");
+  const serveBody = officialRuntimeFunctionSource("maybeServeCachedFetchResponse", "rememberCacheableFetchResponse");
+  const rememberBody = officialRuntimeFunctionSource("rememberCacheableFetchResponse", "maybeServeReadOnlyAppServerCache");
+  const invokeBody = officialRuntimeFunctionSource("invokeOfficialIpc", "connectOfficialAppHostPort");
+  const routeBody = officialRuntimeFunctionSource("routeOfficialWebContentsSend", "shouldSuppressHiddenRendererSend");
+
+  // 这些接口是官方 UI 启动辅助数据；只能缓存真实成功回包，不能像遥测一样编造空对象。
+  for (const pathname of ["/wham/accounts/check", "/wham/profiles/me", "/wham/statsig/bootstrap", "/wham/usage"]) {
+    assert.match(source, new RegExp(JSON.stringify(pathname).replace("/", "\\/")));
+  }
+  assert.match(source, /FETCH_RESPONSE_CACHEABLE_PATHS/);
+  assert.match(cacheBody, /message\.type !== "fetch"/);
+  assert.match(cacheBody, /method !== "GET"/);
+  assert.match(cacheBody, /pathname === "\/wham\/statsig\/bootstrap"/);
+  assert.match(serveBody, /fetch_response_cache_hit/);
+  assert.match(serveBody, /routeOfficialWebContentsSend/);
+  assert.match(rememberBody, /payload\.type !== "fetch-response"/);
+  assert.match(rememberBody, /payload\.responseType !== "success"/);
+  assert.match(rememberBody, /FETCH_RESPONSE_CACHE_BODY_LIMIT_BYTES/);
+  assert.match(routeBody, /rememberCacheableFetchResponse\(channel, args, requestSummary, requestId\)/);
+  assert.ok(
+    invokeBody.indexOf("maybeServeCachedFetchResponse") < invokeBody.indexOf("maybeHandleNonCriticalFetch"),
+    "real-response cache should be checked before non-critical fetch shortcuts"
+  );
+});
+
 test("codex runtime watcher refreshes hidden official app-server on config changes", () => {
   const watcherBody = officialRuntimeFunctionSource("installCodexRuntimeWatcher", "setWsHub");
   const signatureBody = officialRuntimeFunctionSource("runtimeRestartSignatureForFile", "rememberRuntimeRestartSignature");
