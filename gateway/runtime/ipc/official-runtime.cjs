@@ -40,6 +40,7 @@ const {
   valueFromFastSyncFetchResponsePayload,
 } = require("../core/fast-sync-cache.cjs");
 const { resolveOpenCodexI18n } = require("../../../shared/i18n/index.cjs");
+const { OPENCODEX_VERSION_LABEL } = require("../../../shared/app-version.cjs");
 const { withPluginI18nMessages } = require("../core/plugin-assets.cjs");
 const {
   handleOfficialNotificationEvent,
@@ -3959,6 +3960,31 @@ function officialBundleStatus() {
     : null;
 }
 
+function readGitRefText(relPath) {
+  try {
+    const file = path.join(PROJECT_ROOT, ".git", relPath);
+    return fs.readFileSync(file, "utf-8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function gatewaySourceStatus() {
+  const head = readGitRefText("HEAD");
+  if (!head) return { version: OPENCODEX_VERSION_LABEL };
+  if (!head.startsWith("ref:")) {
+    return { version: OPENCODEX_VERSION_LABEL, branch: "detached", commit: head.slice(0, 40) || null };
+  }
+  const ref = head.slice(4).trim();
+  const commit = ref ? readGitRefText(ref) : "";
+  return {
+    version: OPENCODEX_VERSION_LABEL,
+    // health 只展示当前源码定位信息，便于判断运行态是否已经重启到最新提交。
+    branch: ref.replace(/^refs\/heads\//, "") || null,
+    commit: commit.slice(0, 40) || null,
+  };
+}
+
 function buildGatewayStatus() {
   const listenUrl = `http://${HOST}:${PORT}`;
   const localUrl = `http://127.0.0.1:${PORT}`;
@@ -3973,6 +3999,7 @@ function buildGatewayStatus() {
       pid: process.pid,
       projectRoot: PROJECT_ROOT,
       webShellDir: WEB_SHELL_DIR,
+      source: gatewaySourceStatus(),
       nodeVersion: process.version,
       electronVersion: process.versions && process.versions.electron ? process.versions.electron : null,
     },
