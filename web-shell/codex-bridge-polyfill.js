@@ -34,6 +34,15 @@
  let wsFirstConnectDone = false;
   const CLIENT_DIAGNOSTIC_FLUSH_DELAY_MS = 120;
   const CLIENT_DIAGNOSTIC_MAX_BATCH = 40;
+  const OPENCODEX_TRACE_MAX_EVENTS = Math.max(240, Math.min(5000, Number(cfg.traceMaxEvents || 2000) || 2000));
+  const OPENCODEX_IMPORTANT_TRACE_MAX_EVENTS = Math.max(
+    120,
+    Math.min(1000, Number(cfg.importantTraceMaxEvents || 400) || 400)
+  );
+  const CLIENT_DIAGNOSTIC_SLOW_UPLOAD_MS = Math.max(
+    250,
+    Math.min(10000, Number(cfg.clientDiagnosticSlowUploadMs || 1200) || 1200)
+  );
   const LOW_PRIORITY_IPC_CONCURRENCY = 2;
   const LOW_PRIORITY_IPC_LOG_EVERY = 25;
   const READ_ONLY_APP_SERVER_CACHE_TTL_MS = 15000;
@@ -45,6 +54,15 @@
   // debugWs 由 gateway 的 OPENCODEX_DEBUG_WS 注入；默认关闭，避免每条 WS 消息都额外计时/算长度。
   const WS_DEBUG_ENABLED = cfg.debugWs === true || cfg.debugWs === "1";
   const CLIENT_DIAGNOSTIC_UPLOAD_ENABLED = cfg.debugClientDiagnostics === true || cfg.debugClientDiagnostics === "1";
+  const IMPORTANT_DIAGNOSTIC_METHODS = new Set([
+    "account/read",
+    "maybe-resume-conversation",
+    "send-cli-request-for-host",
+    "thread/read",
+    "thread/resume",
+    "thread/turns/list",
+    "turn/start",
+  ]);
   // 下面三个阈值只在 debugWs 开启时生效，用来定位“远端首个会话打开慢”的浏览器侧瓶颈。
   const WS_INBOUND_LARGE_CHARS = Number(cfg.wsInboundLargeChars || 256 * 1024);
   const WS_INBOUND_PARSE_SLOW_MS = Number(cfg.wsInboundParseSlowMs || 30);
@@ -731,12 +749,58 @@
     }
   }
 
+  function diagnosticMethodFromData(data) {
+    if (!data || typeof data !== "object") return "";
+    return String(data.appServerMethod || data.requestMethod || data.method || data.payloadMethod || data.type || "");
+  }
+
+  function isImportantDiagnosticUpload(event, data) {
+    const eventName = typeof event === "string" ? event : "";
+    const method = diagnosticMethodFromData(data);
+    if (
+      eventName === "fast-sync-flow" ||
+      eventName === "ws-transport-selected" ||
+      eventName === "ws-hello-ack" ||
+      eventName === "ipc-important-method" ||
+      eventName.startsWith("local-thread-catalog-") ||
+      eventName.startsWith("app-host-")
+    ) {
+      return true;
+    }
+    if (
+      eventName === "ipc-invoke-failed" ||
+      eventName === "ipc-http-error" ||
+      eventName === "ipc-ws-fallback" ||
+      eventName === "fast-sync-refresh-failed"
+    ) {
+      return true;
+    }
+    if (IMPORTANT_DIAGNOSTIC_METHODS.has(method)) return true;
+    const elapsedMs = data && typeof data.elapsedMs === "number" ? data.elapsedMs : 0;
+    // 慢请求保留到 gateway 诊断里，方便定位弱网下真正拖首屏的 IPC。
+    return elapsedMs >= CLIENT_DIAGNOSTIC_SLOW_UPLOAD_MS;
+  }
+
   function pushOpenCodexTrace(event, data) {
     try {
-      // 轻量环形缓冲区直接挂在页面上，方便浏览器控制台第一时间确认官方请求走到哪一层。
+      // 完整环形缓冲区留在页面内，不默认上传；关键缓冲区保证 thread/read 等早期事件不会被图片/Git 噪声挤掉。
       const trace = (w.__opencodexTrace = Array.isArray(w.__opencodexTrace) ? w.__opencodexTrace : []);
-      trace.push({ event, data, at: new Date().toISOString(), ageMs: Date.now() - bridgeStartedAtMs });
-      while (trace.length > 240) trace.shift();
+      const entry = { event, data, at: new Date().toISOString(), ageMs: Date.now() - bridgeStartedAtMs };
+      trace.push(entry);
+      while (trace.length > OPENCODEX_TRACE_MAX_EVENTS) trace.shift();
+      if (isImportantDiagnosticUpload(event, data)) {
+        const importantTrace = (w.__opencodexImportantTrace = Array.isArray(w.__opencodexImportantTrace)
+          ? w.__opencodexImportantTrace
+          : []);
+        importantTrace.push(entry);
+        while (importantTrace.length > OPENCODEX_IMPORTANT_TRACE_MAX_EVENTS) importantTrace.shift();
+      }
+      w.__opencodexTraceMeta = {
+        importantMaxEvents: OPENCODEX_IMPORTANT_TRACE_MAX_EVENTS,
+        importantSize: Array.isArray(w.__opencodexImportantTrace) ? w.__opencodexImportantTrace.length : 0,
+        maxEvents: OPENCODEX_TRACE_MAX_EVENTS,
+        size: trace.length,
+      };
     } catch {}
   }
 
@@ -801,21 +865,9 @@
     clientDiagnosticFlushTimer = w.setTimeout(flushClientDiagnostics, CLIENT_DIAGNOSTIC_FLUSH_DELAY_MS);
   }
 
-  function shouldUploadClientDiagnostic(event) {
+  function shouldUploadClientDiagnostic(event, data) {
     // gateway 默认只消费发送链路和传输选择诊断；其它前端诊断留在本页面板，避免首屏制造额外 POST 洪峰。
-    const eventName = typeof event === "string" ? event : "";
-    return (
-      CLIENT_DIAGNOSTIC_UPLOAD_ENABLED ||
-      eventName === "ipc-invoke-start" ||
-      eventName === "ipc-invoke-success" ||
-      eventName === "ipc-invoke-failed" ||
-      eventName === "ipc-important-method" ||
-      eventName.startsWith("app-host-") ||
-      eventName === "fast-sync-flow" ||
-      eventName === "ws-transport-selected" ||
-      eventName === "ws-hello-ack" ||
-      eventName.startsWith("local-thread-catalog-")
-    );
+    return CLIENT_DIAGNOSTIC_UPLOAD_ENABLED || isImportantDiagnosticUpload(event, data);
   }
 
   function clientDiagnostic(event, data) {
@@ -832,7 +884,7 @@
           if (sanitized !== undefined) diagnosticData[key] = sanitized;
         }
       }
-      if (shouldUploadClientDiagnostic(event)) {
+      if (shouldUploadClientDiagnostic(event, diagnosticData)) {
         clientDiagnosticQueue.push({ event, data: diagnosticData });
       }
       recentClientDiagnostics.push({ event, data: diagnosticData });
@@ -3403,6 +3455,16 @@
     "update-diff-if-open",
     "worker-request",
   ]);
+  const AUXILIARY_HTTP_FIRST_FETCH_PATHS = new Set([
+    "/gh-cli-status",
+    "/git-origins",
+    "/read-file-binary",
+  ]);
+  const CONVERSATION_ENTRY_HTTP_FIRST_FETCH_PATHS = new Set([
+    ...AUXILIARY_HTTP_FIRST_FETCH_PATHS,
+    "/get-global-state",
+    "/set-remote-wsl-connections-enabled",
+  ]);
 
   /** 提取官方 app-server 只读方法名；这些方法多次并发调用时结果可短时间复用。 */
   function readOnlyAppServerMethod(payload) {
@@ -3451,8 +3513,15 @@
     if (method === "thread/read" || method === "thread/turns/list" || method === "turn/start") return false;
     if (method && CONVERSATION_ENTRY_HTTP_FIRST_METHODS.has(method)) return true;
     const type = typeof payload.type === "string" ? payload.type : "";
+    if (type === "fetch" && CONVERSATION_ENTRY_HTTP_FIRST_FETCH_PATHS.has(fetchUrlPath(payload))) return true;
     // 会话入口期这些都是辅助同步/worker 状态；HTTP 独立请求比半开 WS 更快失败和恢复，不应拖住正文挂载。
     return CONVERSATION_ENTRY_HTTP_FIRST_TYPES.has(type);
+  }
+
+  function shouldPreferHttpForAuxiliaryFetch(payload) {
+    if (!payload || typeof payload !== "object" || payload.type !== "fetch") return false;
+    // 文件读取和 Git/CLI 状态是非实时辅助请求；全生命周期走 HTTP，避免长耗时请求占用 app-host/会话事件 WS。
+    return AUXILIARY_HTTP_FIRST_FETCH_PATHS.has(fetchUrlPath(payload));
   }
 
   function hasThreadStartUserContent(value, depth = 0, seen = new WeakSet()) {
@@ -4205,6 +4274,7 @@
     const suppressRoutineDiagnostic = shouldSuppressRoutineIpcDiagnostic(payload);
     const preferHttp =
       options.preferHttp === true ||
+      shouldPreferHttpForAuxiliaryFetch(payload) ||
       (shouldWaitForWsBeforeInvoke(channel) && shouldPreferHttpForConversationEntry(payload));
     if (!suppressRoutineDiagnostic) {
       clientDiagnostic("ipc-invoke-start", {

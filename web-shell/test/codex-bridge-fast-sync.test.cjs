@@ -415,11 +415,33 @@ test("client diagnostics upload only flow events by default", () => {
   const source = readPolyfillSource();
   // 服务端默认只消费发送链路和传输选择诊断，普通诊断不上报可以避免进入会话时出现大量 /api/client-log。
   assert.match(source, /CLIENT_DIAGNOSTIC_UPLOAD_ENABLED/);
+  assert.match(source, /CLIENT_DIAGNOSTIC_SLOW_UPLOAD_MS/);
+  assert.match(source, /IMPORTANT_DIAGNOSTIC_METHODS/);
+  assert.match(source, /function isImportantDiagnosticUpload\(event, data\)/);
   assert.match(source, /eventName === "fast-sync-flow"/);
   assert.match(source, /eventName === "ws-transport-selected"/);
   assert.match(source, /eventName === "ws-hello-ack"/);
+  assert.match(source, /eventName === "ipc-invoke-failed"/);
   assert.match(source, /eventName\.startsWith\("local-thread-catalog-"\)/);
-  assert.match(source, /shouldUploadClientDiagnostic\(event\)/);
+  assert.match(source, /IMPORTANT_DIAGNOSTIC_METHODS\.has\(method\)/);
+  assert.match(source, /elapsedMs >= CLIENT_DIAGNOSTIC_SLOW_UPLOAD_MS/);
+  assert.match(source, /shouldUploadClientDiagnostic\(event, diagnosticData\)/);
+  assert.doesNotMatch(source, /eventName === "ipc-invoke-start" \|\|/);
+  assert.doesNotMatch(source, /eventName === "ipc-invoke-success" \|\|/);
+});
+
+test("client trace keeps a larger local ring and a protected important ring", () => {
+  const source = readPolyfillSource();
+  const traceBody = sourceBetween(source, "function pushOpenCodexTrace", "function websocketStateName");
+
+  // 普通请求可以留在浏览器本地排障，但 thread/read 等关键事件要放进独立缓冲，避免被图片和插件请求冲掉。
+  assert.match(source, /OPENCODEX_TRACE_MAX_EVENTS/);
+  assert.match(source, /OPENCODEX_IMPORTANT_TRACE_MAX_EVENTS/);
+  assert.match(traceBody, /w\.__opencodexTrace/);
+  assert.match(traceBody, /w\.__opencodexImportantTrace/);
+  assert.match(traceBody, /isImportantDiagnosticUpload\(event, data\)/);
+  assert.match(traceBody, /w\.__opencodexTraceMeta/);
+  assert.doesNotMatch(traceBody, /trace\.length > 240/);
 });
 
 test("ipc diagnostics summarize resume payload shape without values", () => {
@@ -507,10 +529,17 @@ test("conversation entry auxiliary ipc prefers http while critical thread reads 
   assert.match(source, /CONVERSATION_ENTRY_HTTP_FIRST_WINDOW_MS = 15000/);
   assert.match(policyBody, /CONVERSATION_ENTRY_HTTP_FIRST_METHODS/);
   assert.match(policyBody, /CONVERSATION_ENTRY_HTTP_FIRST_TYPES/);
+  assert.match(policyBody, /CONVERSATION_ENTRY_HTTP_FIRST_FETCH_PATHS/);
+  assert.match(policyBody, /AUXILIARY_HTTP_FIRST_FETCH_PATHS/);
+  assert.match(source, /function shouldPreferHttpForAuxiliaryFetch\(payload\)/);
+  for (const pathName of ["/git-origins", "/read-file-binary", "/gh-cli-status"]) {
+    assert.match(source, new RegExp(JSON.stringify(pathName)));
+  }
   assert.match(policyBody, /method === "thread\/read"/);
   assert.match(policyBody, /method === "thread\/turns\/list"/);
   assert.match(policyBody, /method === "turn\/start"/);
   assert.match(invokeBody, /const preferHttp =/);
+  assert.match(invokeBody, /shouldPreferHttpForAuxiliaryFetch\(payload\)/);
   assert.match(invokeBody, /shouldPreferHttpForConversationEntry\(payload\)/);
   assert.match(invokeBody, /!wsFirstConnectDone && !preferHttp/);
   assert.match(invokeBody, /canUseWsForIpc\(\) && !preferHttp/);
