@@ -186,6 +186,7 @@ test("successful thread resume responses survive app-server exits when session f
   assert.match(routeBody, /rememberThreadResumeSuccess\(channel, args, requestSummary, requestId\)/);
   assert.match(childBody, /appServerChildEpoch \+= 1/);
   assert.doesNotMatch(childBody, /clearThreadResumeSuccessCache\("app_server_child_exit"\)/);
+  assert.match(childBody, /clearThreadResumeInFlight\("app_server_child_exit"\)/);
   assert.match(validateBody, /same_app_server_lifecycle/);
   assert.match(validateBody, /missing_session_fingerprint/);
   assert.match(validateBody, /session_fingerprint_match/);
@@ -197,6 +198,7 @@ test("successful thread resume responses survive app-server exits when session f
   assert.match(validateBody, /contentHash/);
   assert.match(validateBody, /session_file_changed/);
   assert.match(refreshBody, /clearThreadResumeSuccessCache\("official_runtime_refresh"\)/);
+  assert.match(refreshBody, /clearThreadResumeInFlight\("official_runtime_refresh"\)/);
   assert.ok(
     invokeBody.indexOf("maybeServeTerminalThreadResumeError") < invokeBody.indexOf("maybeServeThreadResumeSuccessCache"),
     "archived terminal errors should stay higher priority than successful resume cache"
@@ -204,6 +206,31 @@ test("successful thread resume responses survive app-server exits when session f
   assert.ok(
     invokeBody.indexOf("maybeServeThreadResumeSuccessCache") < invokeBody.indexOf("maybeHandleDomainIsolationGlobalStateFetch"),
     "successful resume cache should short-circuit before official handlers"
+  );
+});
+
+test("duplicate thread resume requests are coalesced while the first resume is in flight", () => {
+  const coalesceBody = officialRuntimeFunctionSource("maybeCoalesceThreadResumeInFlight", "dispatchThreadResumeInFlightResponses");
+  const dispatchBody = officialRuntimeFunctionSource("dispatchThreadResumeInFlightResponses", "rememberTerminalThreadResumeError");
+  const routeBody = officialRuntimeFunctionSource("routeOfficialWebContentsSend", "shouldSuppressHiddenRendererSend");
+  const invokeBody = officialRuntimeFunctionSource("invokeOfficialIpc", "connectOfficialAppHostPort");
+
+  // 首个 thread/resume 仍走官方 app-server；同一 thread 的重复 resume 等真实回包后按 requestId 复制，避免弱网下并发慢恢复。
+  assert.match(source, /threadResumeInFlight/);
+  assert.match(source, /THREAD_RESUME_IN_FLIGHT_TTL_MS/);
+  assert.match(coalesceBody, /thread_resume_inflight_coalesced/);
+  assert.match(coalesceBody, /duplicateRequestIds\.add\(requestId\)/);
+  assert.match(dispatchBody, /thread_resume_inflight_replayed/);
+  assert.match(dispatchBody, /cloneWithReplacement\(args, requestId, duplicateRequestId\)/);
+  assert.match(dispatchBody, /routeOfficialWebContentsSend\(channel, responseArgs\)/);
+  assert.match(routeBody, /dispatchThreadResumeInFlightResponses\(channel, args, requestSummary, requestId\)/);
+  assert.ok(
+    invokeBody.indexOf("maybeServeThreadResumeSuccessCache") < invokeBody.indexOf("maybeCoalesceThreadResumeInFlight"),
+    "successful resume cache should be used before in-flight coalescing"
+  );
+  assert.ok(
+    invokeBody.indexOf("maybeCoalesceThreadResumeInFlight") < invokeBody.indexOf("maybeHandleDomainIsolationGlobalStateFetch"),
+    "duplicate in-flight resume should stop before official handler dispatch"
   );
 });
 

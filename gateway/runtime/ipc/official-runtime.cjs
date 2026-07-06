@@ -102,6 +102,10 @@ const THREAD_RESUME_TERMINAL_ERROR_TTL_MS = Number(
 const THREAD_RESUME_SUCCESS_CACHE_TTL_MS = Number(
   process.env.OPENCODEX_THREAD_RESUME_SUCCESS_CACHE_TTL_MS || 5 * 60 * 1000
 );
+const THREAD_RESUME_IN_FLIGHT_TTL_MS = Math.max(
+  1000,
+  Number(process.env.OPENCODEX_THREAD_RESUME_IN_FLIGHT_TTL_MS || 45 * 1000)
+);
 const THREAD_RESUME_SESSION_FINGERPRINT_RECENT_FILE_LIMIT = Math.max(
   1,
   Number(process.env.OPENCODEX_THREAD_RESUME_SESSION_FINGERPRINT_RECENT_FILE_LIMIT || 800)
@@ -140,6 +144,7 @@ const fetchResponseCache = new Map();
 const threadResumeTerminalErrorCache = new Map();
 const threadResumeSuccessCache = new Map();
 const threadResumeSessionFileCache = new Map();
+const threadResumeInFlight = new Map();
 const fastSyncCache = createFastSyncCache({
   dir: path.join(RUNTIME_DIR, "cache", "fast-sync"),
 });
@@ -451,6 +456,7 @@ function trackHiddenAppServerChild(child, launcher) {
   function rememberExit(event, code, signal, error) {
     appServerSpawnHook.activeChildren.delete(child);
     appServerChildEpoch += 1;
+    clearThreadResumeInFlight("app_server_child_exit");
     const pid = typeof child.pid === "number" ? child.pid : null;
     const expected = pid != null ? appServerSpawnHook.expectedTerminations.get(pid) : null;
     if (pid != null) appServerSpawnHook.expectedTerminations.delete(pid);
@@ -675,6 +681,7 @@ function refreshHiddenOfficialRuntime(reason, changedPath) {
   appServerSpawnHook.lastRestartChangedPath = changedPath || null;
   const childrenBeforeReload = Array.from(appServerSpawnHook.activeChildren);
   clearThreadResumeSuccessCache("official_runtime_refresh");
+  clearThreadResumeInFlight("official_runtime_refresh");
   // 只读缓存不含账号/配置；刷新隐藏 runtime 时保留它，避免线程列表冷扫再次阻塞首屏和进会话。
   const closedRelays = wsHub && typeof wsHub.closeAllAppHostRelays === "function"
     ? wsHub.closeAllAppHostRelays("official_runtime_refresh")
@@ -2433,6 +2440,16 @@ function clearThreadResumeSuccessCache(reason) {
   });
 }
 
+function clearThreadResumeInFlight(reason) {
+  if (threadResumeInFlight.size <= 0) return;
+  const count = threadResumeInFlight.size;
+  threadResumeInFlight.clear();
+  diagnosticLog("official-runtime", "thread_resume_inflight_cleared", {
+    count,
+    reason,
+  });
+}
+
 function isSuccessfulThreadResumePayload(payload) {
   if (!payload || typeof payload !== "object") return false;
   if (payload.error || Number(payload.status || 0) >= 400) return false;
@@ -2483,6 +2500,59 @@ function maybeServeThreadResumeSuccessCache(channel, invokeArgs, context, reques
     threadId: shortId(cacheKey),
   });
   return routeOfficialWebContentsSend(entry.response.channel || MESSAGE_FOR_VIEW_CHANNEL, responseArgs);
+}
+
+function maybeCoalesceThreadResumeInFlight(channel, invokeArgs, context, requestSummary) {
+  if (channel !== MESSAGE_FROM_VIEW_CHANNEL || !wsHub || !context || !context.clientId) return false;
+  const requestId = requestRouteIdFromIncoming(channel, invokeArgs);
+  if (!requestId || !isThreadResumeMethod(requestSummary)) return false;
+  const cacheKey = threadResumeSuccessCacheKey(requestSummary, payloadFromArgs(invokeArgs));
+  if (!cacheKey) return false;
+  const nowMs = Date.now();
+  const entry = threadResumeInFlight.get(cacheKey);
+  if (!entry || entry.expiresAtMs <= nowMs) {
+    threadResumeInFlight.set(cacheKey, {
+      duplicateRequestIds: new Set(),
+      expiresAtMs: nowMs + THREAD_RESUME_IN_FLIGHT_TTL_MS,
+      primaryRequestId: requestId,
+      startedAtMs: nowMs,
+    });
+    requestSummary.resumeInFlightPrimary = true;
+    return false;
+  }
+  if (entry.primaryRequestId === requestId || entry.duplicateRequestIds.has(requestId)) return true;
+  entry.duplicateRequestIds.add(requestId);
+  entry.expiresAtMs = Math.max(entry.expiresAtMs, nowMs + THREAD_RESUME_IN_FLIGHT_TTL_MS);
+  requestSummary.resumeInFlightCoalesced = true;
+  diagnosticLog("official-runtime", "thread_resume_inflight_coalesced", {
+    ageMs: nowMs - entry.startedAtMs,
+    duplicateCount: entry.duplicateRequestIds.size,
+    primaryRequestId: shortId(entry.primaryRequestId),
+    requestId: shortId(requestId),
+    threadId: shortId(cacheKey),
+  });
+  return true;
+}
+
+function dispatchThreadResumeInFlightResponses(channel, args, requestSummary, requestId) {
+  if (!requestId || !isThreadResumeMethod(requestSummary)) return;
+  const payload = payloadFromArgs(args);
+  const cacheKey = threadResumeSuccessCacheKey(requestSummary, payload) || terminalThreadResumeErrorKey(requestSummary, payload);
+  if (!cacheKey) return;
+  const entry = threadResumeInFlight.get(cacheKey);
+  if (!entry) return;
+  const duplicateRequestIds = [...entry.duplicateRequestIds].filter((duplicateRequestId) => duplicateRequestId !== requestId);
+  threadResumeInFlight.delete(cacheKey);
+  if (duplicateRequestIds.length === 0) return;
+  diagnosticLog("official-runtime", "thread_resume_inflight_replayed", {
+    duplicateCount: duplicateRequestIds.length,
+    requestId: shortId(requestId),
+    threadId: shortId(cacheKey),
+  });
+  for (const duplicateRequestId of duplicateRequestIds) {
+    const responseArgs = cloneWithReplacement(args, requestId, duplicateRequestId);
+    routeOfficialWebContentsSend(channel, responseArgs);
+  }
 }
 
 function rememberTerminalThreadResumeError(channel, args, requestSummary, requestId) {
@@ -3163,6 +3233,8 @@ function routeOfficialWebContentsSend(channel, args) {
   rememberTerminalThreadResumeError(channel, args, requestSummary, requestId);
   // 短期复用真实成功 resume 回包；跨 app-server 重启时必须先确认本地 session JSONL 指纹未变化。
   rememberThreadResumeSuccess(channel, args, requestSummary, requestId);
+  // 同一会话恢复期间的重复 resume 不需要并发打 app-server；首个真实回包回来后复制给等待的 requestId。
+  dispatchThreadResumeInFlightResponses(channel, args, requestSummary, requestId);
   // fast-sync 快照只记录 allowlist 的官方成功只读回包，供浏览器首屏独立读取。
   rememberFastSyncSnapshot(channel, args, requestSummary, valueFromFastSyncFetchResponsePayload(payload), {
     clientId: mappedClientId || targetClientId,
@@ -3442,6 +3514,7 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   rememberRequestRoute(channel, invokeArgs, context.clientId || "", requestSummary);
   if (maybeServeTerminalThreadResumeError(channel, invokeArgs, context, requestSummary)) return true;
   if (maybeServeThreadResumeSuccessCache(channel, invokeArgs, context, requestSummary)) return true;
+  if (maybeCoalesceThreadResumeInFlight(channel, invokeArgs, context, requestSummary)) return true;
   // 会话列表保持官方原生链路，避免跨环境实验影响 Win/Mac 本地历史显示。
   if (maybeHandleDomainIsolationGlobalStateFetch(channel, invokeArgs)) return true;
   if (maybeServeCachedFetchResponse(channel, invokeArgs, context, requestSummary)) return true;
