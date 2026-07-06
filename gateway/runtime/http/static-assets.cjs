@@ -487,6 +487,11 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     );
   }
 
+  function localConversationResumeOnceExpression(conversationIdName = "e") {
+    // 这个表达式会被注入官方 renderer 主世界；不能依赖 Web preload/polyfill 的全局函数跨上下文可见。
+    return `${conversationIdName}!=null&&!((window.__opencodexLocalResumeOnce||(window.__opencodexLocalResumeOnce=new Set)).has(${conversationIdName}))&&!!window.__opencodexLocalResumeOnce.add(${conversationIdName})`;
+  }
+
   /** 官方目录状态在 Web 桥下可能缺少 needs-resume 标记；本地会话页必须先触发 resume 才会拉正文。 */
   function patchLocalConversationResumeTrigger(source) {
     if (!source.includes("maybe-resume-conversation")) return source;
@@ -495,7 +500,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     if (source.includes(marker)) {
       patched = patched.replace(
         marker,
-        "function yS(e){let t=ht(oe),n=xr(),{activeMode:i}=Ua(e),{data:a}=k(Bn),o=a?.roots,c=e!=null;Y(s,e);"
+        `function yS(e){let t=ht(oe),n=xr(),{activeMode:i}=Ua(e),{data:a}=k(Bn),o=a?.roots,c=(${localConversationResumeOnceExpression("e")});Y(s,e);`
       );
     } else {
       if (!source.includes("localConversation.loadingThread")) return source;
@@ -505,7 +510,10 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
         console.warn("[gateway] local conversation resume loader patch skipped: current bundle shape did not match");
         return source;
       }
-      patched = patched.replace(localConversationResumeState, "$1e!=null$3");
+      patched = patched.replace(
+        localConversationResumeState,
+        `$1(${localConversationResumeOnceExpression("e")})$3`
+      );
     }
     // 本地会话恢复只需要 conversationId/hostId/workspaceRoots；省略 serviceTier，避免慢网预取阻塞或 null 被新版 app-server 判成非法请求。
     patched = patched.replace(/,serviceTier:await [A-Za-z_$][\w$]*\([^)]*\?\.settings\.model\?\?null\)/g, "");

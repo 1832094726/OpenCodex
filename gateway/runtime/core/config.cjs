@@ -50,7 +50,7 @@ const IPC_SLOW_LOG_MS = Number(process.env.CODEX_WEB_SLOW_LOG_MS || 750);
 const LOCAL_FILE_TOKEN_TTL_MS = Math.max(1_000, Number(process.env.CODEX_WEB_LOCAL_FILE_TOKEN_TTL_MS || 5 * 60 * 1000));
 // 路径版本是响应期 patch 的缓存破坏位：官方文件 hash 不变，但 gateway 注入逻辑可能变化。
 // v21 强制绕开旧 Service Worker 里缓存的 v20 chunk，确保 sendBeacon 遥测短路和普通字符串端点改写生效。
-const PATCHED_OFFICIAL_PREFIX = "/official-patched-v21/";
+const PATCHED_OFFICIAL_PREFIX = "/official-patched-v22/";
 // 这两个 channel 是官方桌面 renderer/main 的主消息桥，gateway 通过 hook 复用它们。
 const MESSAGE_FROM_VIEW_CHANNEL = "codex_desktop:message-from-view";
 const MESSAGE_FOR_VIEW_CHANNEL = "codex_desktop:message-for-view";

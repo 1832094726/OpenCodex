@@ -114,6 +114,10 @@ const THREAD_RESUME_SESSION_FINGERPRINT_RECENT_FILE_LIMIT = Math.max(
   1,
   Number(process.env.OPENCODEX_THREAD_RESUME_SESSION_FINGERPRINT_RECENT_FILE_LIMIT || 800)
 );
+const THREAD_RESUME_LARGE_SESSION_BYTES = Math.max(
+  0,
+  Number(process.env.OPENCODEX_THREAD_RESUME_LARGE_SESSION_BYTES || 64 * 1024 * 1024)
+);
 const THREAD_RESUME_SESSION_FINGERPRINT_HEAD_BYTES = 64 * 1024;
 const THREAD_RESUME_SESSION_FINGERPRINT_HASH_BYTES = 16 * 1024;
 // 这些官方启动期 wham fetch 只影响账号菜单、用量提示和实验配置；缓存真实回包可避免弱网重复拖慢会话进入。
@@ -2610,6 +2614,49 @@ function maybeServeThreadResumeSuccessCache(channel, invokeArgs, context, reques
   return routeOfficialWebContentsSend(entry.response.channel || MESSAGE_FOR_VIEW_CHANNEL, responseArgs);
 }
 
+function maybeServeLargeSessionThreadResumeFastPath(channel, invokeArgs, context, requestSummary) {
+  if (channel !== MESSAGE_FROM_VIEW_CHANNEL || !wsHub || !context || !context.clientId) return false;
+  if (THREAD_RESUME_LARGE_SESSION_BYTES <= 0) return false;
+  const requestId = requestRouteIdFromIncoming(channel, invokeArgs);
+  if (!requestId || !isThreadResumeMethod(requestSummary)) return false;
+  const incoming = payloadFromArgs(invokeArgs);
+  const threadId = threadResumeSuccessCacheKey(requestSummary, incoming);
+  if (!threadId) return false;
+  const sessionFingerprint = findThreadResumeSessionFingerprint(threadId);
+  if (!sessionFingerprint || sessionFingerprint.archived) return false;
+  if (Number(sessionFingerprint.size || 0) < THREAD_RESUME_LARGE_SESSION_BYTES) return false;
+  const snapshot = memoryFastSyncCache.readSnapshot({ method: "thread/read", threadId });
+  if (!snapshot) return false;
+  // 超大活动 JSONL 的首次 resume 可能长时间阻塞官方前端；已有 thread/read 全量快照时先放行 UI。
+  const responseArgs = [
+    {
+      type: "mcp-response",
+      hostId: (incoming && typeof incoming === "object" && incoming.hostId) || "local",
+      message: {
+        id: requestId,
+        result: {
+          ok: true,
+          skipped: "large-session-thread-read-snapshot-ready",
+          threadId,
+        },
+      },
+    },
+  ];
+  requestSummary.resumeLargeSessionFastPath = true;
+  const storedSummary = requestRouteSummaries.get(requestId);
+  if (storedSummary) storedSummary.resumeLargeSessionFastPath = true;
+  diagnosticLog("official-runtime", "thread_resume_large_session_fast_path", {
+    requestId: shortId(requestId),
+    sessionSizeBytes: sessionFingerprint.size,
+    snapshotAgeMs: Date.now() - Number(snapshot.capturedAtMs || 0),
+    snapshotSource: snapshot.source || "",
+    snapshotThreadSeq: Math.max(0, Number(snapshot.threadSeq) || 0),
+    threadId: shortId(threadId),
+    thresholdBytes: THREAD_RESUME_LARGE_SESSION_BYTES,
+  });
+  return routeOfficialWebContentsSend(MESSAGE_FOR_VIEW_CHANNEL, responseArgs);
+}
+
 function maybeCoalesceThreadResumeInFlight(channel, invokeArgs, context, requestSummary) {
   if (channel !== MESSAGE_FROM_VIEW_CHANNEL || !wsHub || !context || !context.clientId) return false;
   const requestId = requestRouteIdFromIncoming(channel, invokeArgs);
@@ -3723,6 +3770,7 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   if (maybeCoalesceReadOnlyAppServerInFlight(channel, invokeArgs, context, requestSummary, readOnlyCacheKey)) return true;
   if (maybeServeTerminalThreadResumeError(channel, invokeArgs, context, requestSummary)) return true;
   if (maybeServeThreadResumeSuccessCache(channel, invokeArgs, context, requestSummary)) return true;
+  if (maybeServeLargeSessionThreadResumeFastPath(channel, invokeArgs, context, requestSummary)) return true;
   if (maybeCoalesceThreadResumeInFlight(channel, invokeArgs, context, requestSummary)) return true;
   // 会话列表保持官方原生链路，避免跨环境实验影响 Win/Mac 本地历史显示。
   if (maybeHandleDomainIsolationGlobalStateFetch(channel, invokeArgs)) return true;

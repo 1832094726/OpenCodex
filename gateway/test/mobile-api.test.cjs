@@ -1724,7 +1724,7 @@ test("patched official chunks trigger local conversation resume without service 
     );
 
     assert.equal(response.statusCode, 200);
-    assert.match(response.body, /o=a\?\.roots,c=e!=null;Y\(s,e\);/);
+    assert.match(response.body, /o=a\?\.roots,c=\(e!=null&&!\(\(window\.__opencodexLocalResumeOnce\|\|\(window\.__opencodexLocalResumeOnce=new Set\)\)\.has\(e\)\)&&!!window\.__opencodexLocalResumeOnce\.add\(e\)\);Y\(s,e\);/);
     assert.doesNotMatch(response.body, /serviceTier:/);
     assert.doesNotMatch(response.body, /c=Y\(In,e\)/);
     assert.doesNotMatch(response.body, /await Js\(t,n,i\?\.settings\.model\?\?null\)/);
@@ -1760,7 +1760,7 @@ test("patched official chunks trigger local conversation resume for newer loader
     );
 
     assert.equal(response.statusCode, 200);
-    assert.match(response.body, /o=a\?\.roots,c=e!=null;K\(Pe,e\);/);
+    assert.match(response.body, /o=a\?\.roots,c=\(e!=null&&!\(\(window\.__opencodexLocalResumeOnce\|\|\(window\.__opencodexLocalResumeOnce=new Set\)\)\.has\(e\)\)&&!!window\.__opencodexLocalResumeOnce\.add\(e\)\);K\(Pe,e\);/);
     assert.doesNotMatch(response.body, /serviceTier:/);
     assert.doesNotMatch(response.body, /c=K\(Ce,e\)/);
     assert.doesNotMatch(response.body, /await Js\(t,n,i\?\.settings\.model\?\?null\)/);

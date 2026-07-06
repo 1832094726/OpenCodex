@@ -277,6 +277,33 @@ test("duplicate thread resume requests are coalesced while the first resume is i
   );
 });
 
+test("large local sessions can skip blocking resume after thread detail snapshot", () => {
+  const fastPathBody = officialRuntimeFunctionSource("maybeServeLargeSessionThreadResumeFastPath", "maybeCoalesceThreadResumeInFlight");
+  const invokeBody = officialRuntimeFunctionSource("invokeOfficialIpc", "connectOfficialAppHostPort");
+  const routeBody = officialRuntimeFunctionSource("routeOfficialWebContentsSend", "shouldSuppressHiddenRendererSend");
+
+  // 超大活动 session 首次 resume 会被官方 app-server 读完整 JSONL 拖慢；已有 thread/read 快照时先放行 UI。
+  assert.match(source, /THREAD_RESUME_LARGE_SESSION_BYTES/);
+  assert.match(source, /OPENCODEX_THREAD_RESUME_LARGE_SESSION_BYTES/);
+  assert.match(fastPathBody, /isThreadResumeMethod\(requestSummary\)/);
+  assert.match(fastPathBody, /findThreadResumeSessionFingerprint\(threadId\)/);
+  assert.match(fastPathBody, /sessionFingerprint\.archived/);
+  assert.match(fastPathBody, /sessionFingerprint\.size/);
+  assert.match(fastPathBody, /memoryFastSyncCache\.readSnapshot\(\{ method: "thread\/read", threadId \}\)/);
+  assert.match(fastPathBody, /large-session-thread-read-snapshot-ready/);
+  assert.match(fastPathBody, /thread_resume_large_session_fast_path/);
+  assert.match(fastPathBody, /routeOfficialWebContentsSend\(MESSAGE_FOR_VIEW_CHANNEL, responseArgs\)/);
+  assert.match(routeBody, /rememberThreadResumeSuccess\(channel, args, requestSummary, requestId\)/);
+  assert.ok(
+    invokeBody.indexOf("maybeServeThreadResumeSuccessCache") < invokeBody.indexOf("maybeServeLargeSessionThreadResumeFastPath"),
+    "real successful resume cache should stay higher priority than synthetic large-session fast path"
+  );
+  assert.ok(
+    invokeBody.indexOf("maybeServeLargeSessionThreadResumeFastPath") < invokeBody.indexOf("maybeCoalesceThreadResumeInFlight"),
+    "large-session fast path should stop before creating a slow in-flight resume"
+  );
+});
+
 test("codex runtime watcher refreshes hidden official app-server on config changes", () => {
   const watcherBody = officialRuntimeFunctionSource("installCodexRuntimeWatcher", "setWsHub");
   const signatureBody = officialRuntimeFunctionSource("runtimeRestartSignatureForFile", "rememberRuntimeRestartSignature");
