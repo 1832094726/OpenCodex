@@ -12,7 +12,10 @@
   // 语言只信任 gateway 启动配置；浏览器侧不自行读配置或按平台猜测。
   const OPENCODEX_LOCALE = cfg.locale || "zh-CN";
   const OPENCODEX_MESSAGES = cfg.messages && typeof cfg.messages === "object" ? cfg.messages : {};
-  const MOBILE_TRAFFIC_MODE = cfg.mobileTrafficMode === true || cfg.mobileTrafficMode === "1";
+  // renderer handoff 会清理 mobile=1 诊断参数；备用全局标志可让 bridge 继续识别手机瘦身模式。
+  const MOBILE_TRAFFIC_MODE =
+    cfg.mobileTrafficMode === true || cfg.mobileTrafficMode === "1" || w.__OPENCODEX_MOBILE_TRAFFIC_MODE__ === true;
+  if (MOBILE_TRAFFIC_MODE && cfg.mobileTrafficMode !== true) cfg.mobileTrafficMode = true;
   function t(key, values) {
     const template = OPENCODEX_MESSAGES[key] || key;
     if (!values || typeof values !== "object") return template;

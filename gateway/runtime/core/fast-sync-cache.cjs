@@ -87,18 +87,30 @@ function parseFastSyncSnapshotArgsJson(argsJson) {
 
 function valueFromFastSyncFetchResponsePayload(payload) {
   if (!payload || typeof payload !== "object") return { ok: false };
-  if (payload.type !== "fetch-response") return { ok: false };
-  if (payload.responseType !== "success") return { ok: false };
-  // 只有明确 2xx 的成功响应才写快照；缺失 status、重定向和错误响应都交给官方实时链路处理。
-  if (!Number.isFinite(payload.status) || payload.status < 200 || payload.status >= 300) return { ok: false };
-  const raw = typeof payload.bodyJsonString === "string" ? payload.bodyJsonString : "";
-  if (!raw) return { ok: false };
-  try {
-    // null 是合法 JSON 响应，不能和“不可缓存”共用同一个 sentinel。
-    return { ok: true, value: JSON.parse(raw) };
-  } catch {
-    return { ok: false };
+  if (payload.type === "fetch-response") {
+    if (payload.responseType !== "success") return { ok: false };
+    // 只有明确 2xx 的成功响应才写快照；缺失 status、重定向和错误响应都交给官方实时链路处理。
+    if (!Number.isFinite(payload.status) || payload.status < 200 || payload.status >= 300) return { ok: false };
+    const raw = typeof payload.bodyJsonString === "string" ? payload.bodyJsonString : "";
+    if (!raw) return { ok: false };
+    try {
+      // null 是合法 JSON 响应，不能和“不可缓存”共用同一个 sentinel。
+      return { ok: true, value: JSON.parse(raw) };
+    } catch {
+      return { ok: false };
+    }
   }
+  if (payload.type !== "mcp-response") return { ok: false };
+  const message =
+    payload.message && typeof payload.message === "object"
+      ? payload.message
+      : payload.response && typeof payload.response === "object"
+        ? payload.response
+        : payload;
+  // 官方 app-server 的 thread/read 等详情请求走 MCP 回包；成功 result 要进入内存快照供弱网补偿。
+  if (!message || typeof message !== "object" || Object.prototype.hasOwnProperty.call(message, "error")) return { ok: false };
+  if (Object.prototype.hasOwnProperty.call(message, "result")) return { ok: true, value: safeClone(message.result) };
+  return { ok: false };
 }
 
 function safeClone(value) {

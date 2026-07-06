@@ -1478,10 +1478,22 @@ test("request handler keeps the official shell for mobile browsers and enables t
     socket: { remoteAddress: "127.0.0.1" },
     url: "/",
   });
+  const deepLink = await collectResponse(handler, {
+    headers: {
+      accept: "text/html",
+      host: "127.0.0.1:8080",
+      "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1",
+    },
+    method: "GET",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/local/thread-1",
+  });
 
   assert.equal(response.statusCode, 200);
+  assert.equal(deepLink.statusCode, 200);
   assert.doesNotMatch(response.body, /data-opencodex-mobile-lite/);
   assert.match(response.body, /mobileTrafficMode":true/);
+  assert.match(deepLink.body, /mobileTrafficMode":true/);
   assert.match(response.body, /opencodex-plugin-system/);
   assert.match(response.body, /config\.mobileTrafficMode\) return/);
 });
@@ -1505,6 +1517,8 @@ test("official renderer skips token usage capability only for mobile traffic mod
     assert.match(desktop, /codex-token-usage-capability\.js/);
     assert.doesNotMatch(mobile, /codex-token-usage-capability\.js/);
     assert.match(mobile, /跳过 token usage capability/);
+    assert.match(mobile, /mobileTrafficMode:true/);
+    assert.match(mobile, /__OPENCODEX_MOBILE_TRAFFIC_MODE__=true/);
   } finally {
     fs.rmSync(tempRoot, { force: true, recursive: true });
   }
@@ -1816,12 +1830,28 @@ test("request handler serves rewritten statsig telemetry locally", async () => {
     socket: { remoteAddress: "127.0.0.1" },
     url: "/api/noncritical/statsig/ces/v1/rgstr?k=client",
   });
+  const metrics = await collectResponse(handler, {
+    headers: { host: "127.0.0.1:3737" },
+    method: "POST",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/api/noncritical/statsig/ces/v1/m",
+  });
+  const segmentSettings = await collectResponse(handler, {
+    headers: { host: "127.0.0.1:3737" },
+    method: "GET",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/api/noncritical/statsig/ces/v1/v1/projects/oai/settings",
+  });
 
   assert.equal(initialize.statusCode, 200);
   assert.equal(rgstr.statusCode, 200);
+  assert.equal(metrics.statusCode, 200);
+  assert.equal(segmentSettings.statusCode, 200);
   assert.equal(initialize.headers["cache-control"], "no-store");
   assert.deepEqual(JSON.parse(initialize.body).feature_gates, {});
   assert.deepEqual(JSON.parse(rgstr.body), {});
+  assert.deepEqual(JSON.parse(metrics.body), {});
+  assert.deepEqual(JSON.parse(segmentSettings.body).integrations, {});
 });
 
 test("request handler serves official renderer for shell handoff routes", async () => {

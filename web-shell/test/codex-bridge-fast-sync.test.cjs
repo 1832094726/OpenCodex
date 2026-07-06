@@ -298,6 +298,8 @@ test("mobile traffic mode keeps official shell while localizing noncritical app 
 
   assert.match(source, /MOBILE_TRAFFIC_MODE/);
   assert.match(source, /cfg\.mobileTrafficMode/);
+  assert.match(source, /__OPENCODEX_MOBILE_TRAFFIC_MODE__/);
+  assert.match(source, /cfg\.mobileTrafficMode = true/);
   assert.match(localBlock, /"app\/list"/);
   assert.match(localBlock, /"mcpServerStatus\/list"/);
   assert.match(localBlock, /"skills\/list"/);

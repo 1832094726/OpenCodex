@@ -139,6 +139,10 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       '<meta name="apple-mobile-web-app-status-bar-style" content="default">',
       `<link id="codex-web-window-controls-overlay-styles" rel="stylesheet" href="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH}">`,
       '<script src="/codex-web-config.js"></script>',
+      // mobile=1 是桌面调试手机链路的入口参数；cleanup 擦掉 query 后仍要把瘦身标志留给 bridge。
+      options.mobileTrafficMode === true
+        ? '<script>window.__OPENCODEX_MOBILE_TRAFFIC_MODE__=true;window.__CODEX_WEB_CONFIG__=Object.assign({},window.__CODEX_WEB_CONFIG__||{},{mobileTrafficMode:true});</script>'
+        : "",
       `<script src="${OPENCODEX_PLUGIN_SYSTEM_PATH}"></script>`,
       options.mobileTrafficMode === true
         ? "<!-- OpenCodex 手机流量模式跳过插件 loader，减少首屏脚本和后台状态请求。 -->"

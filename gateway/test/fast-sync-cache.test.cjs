@@ -112,6 +112,42 @@ test("only successful fetch responses produce fast-sync snapshot values", () => 
   }
 });
 
+test("successful mcp responses produce fast-sync snapshot values", () => {
+  const result = { threadId: "thread-1", turns: [{ id: "turn-1", message: "会话正文只进入内存快照" }] };
+
+  assert.deepEqual(
+    valueFromFastSyncFetchResponsePayload({
+      hostId: "local",
+      message: {
+        id: "request-1",
+        result,
+      },
+      type: "mcp-response",
+    }),
+    { ok: true, value: result }
+  );
+  assert.deepEqual(
+    valueFromFastSyncFetchResponsePayload({
+      response: {
+        id: "request-2",
+        result: null,
+      },
+      type: "mcp-response",
+    }),
+    { ok: true, value: null }
+  );
+  assert.deepEqual(
+    valueFromFastSyncFetchResponsePayload({
+      message: {
+        error: { message: "not found" },
+        id: "request-3",
+      },
+      type: "mcp-response",
+    }),
+    { ok: false }
+  );
+});
+
 test("cache keys handle non-json args without throwing", () => {
   const args = [{ threadId: 1n }];
   args[0].self = args[0];

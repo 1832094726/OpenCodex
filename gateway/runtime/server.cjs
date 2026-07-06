@@ -81,13 +81,13 @@ function gatewayUrl(req) {
 
 function isMobileHtmlRequest(req, pathname, url) {
   if (!req || req.method !== "GET") return false;
-  if (pathname !== "/" && pathname !== "") return false;
   if (url && url.searchParams.get("full") === "1") return false;
   if (url && url.searchParams.get("mobile") === "1") return true;
   const accept = String(req.headers.accept || "");
   if (accept && !accept.includes("text/html") && !accept.includes("*/*")) return false;
   const userAgent = String(req.headers["user-agent"] || "");
-  // 手机裸域名访问默认进入官方外观的瘦身模式，避免完整状态流压垮弱网首屏。
+  // 手机页面入口默认进入官方外观的瘦身模式，避免完整状态流压垮弱网首屏。
+  // 从桌面/历史记录直接打开 /local/:id 也要瘦身，否则壳页会先按桌面模式加载插件和辅助统计。
   return /Android|iPhone|iPad|iPod|Mobile|Windows Phone|Mobi/i.test(userAgent);
 }
 
@@ -176,9 +176,18 @@ function nonCriticalStatsigBodyForPathname(pathname) {
     route === "/v1/sdk_exception" ||
     route === "/ces/v1/rgstr" ||
     route === "/ces/v1/log_event" ||
+    route === "/ces/v1/m" ||
     route === "/statsigapi/v1/sdk_exception"
   ) {
     return {};
+  }
+  if (route.startsWith("/ces/v1/v1/projects/") && route.endsWith("/settings")) {
+    // Segment/Statsig 的项目配置同样只影响埋点加载；返回空配置即可让 SDK 停止重试外链。
+    return {
+      integrations: {},
+      middlewareSettings: {},
+      plan: {},
+    };
   }
   return null;
 }
