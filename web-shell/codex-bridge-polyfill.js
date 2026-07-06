@@ -1206,9 +1206,30 @@
       if (payload.request && typeof payload.request === "object") {
         if (payload.request.id != null) summary.requestId = String(payload.request.id);
         if (typeof payload.request.method === "string") summary.requestMethod = payload.request.method;
+        if (payload.request.params && typeof payload.request.params === "object") {
+          summary.requestParamKeys = objectKeySummary(payload.request.params);
+        }
       }
+      if (payload.params && typeof payload.params === "object") summary.paramKeys = objectKeySummary(payload.params);
+      const serviceTierType = serviceTierTypeFromPayload(payload);
+      if (serviceTierType) summary.serviceTierType = serviceTierType;
     }
     return summary;
+  }
+
+  function objectKeySummary(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+    // 只记录 key 名，避免把 prompt、正文或鉴权类字段写入诊断。
+    return Object.keys(value).sort().slice(0, 24).join(",");
+  }
+
+  function serviceTierTypeFromPayload(payload) {
+    if (!payload || typeof payload !== "object") return "";
+    for (const target of [payload, payload.params, payload.request, payload.request?.params]) {
+      if (!target || typeof target !== "object" || Array.isArray(target)) continue;
+      if (Object.prototype.hasOwnProperty.call(target, "serviceTier")) return payloadShape(target.serviceTier);
+    }
+    return "";
   }
 
   function rawWsMessageChars(value) {

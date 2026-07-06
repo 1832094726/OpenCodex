@@ -278,6 +278,18 @@ test("client diagnostics upload only flow events by default", () => {
   assert.match(source, /shouldUploadClientDiagnostic\(event\)/);
 });
 
+test("ipc diagnostics summarize resume payload shape without values", () => {
+  const source = readPolyfillSource();
+  const summaryBody = sourceBetween(source, "function ipcDiagnosticSummary", "function rawWsMessageChars");
+
+  // 进入本地会话的问题第一现场在浏览器 IPC；只记录 key 和类型，不能把正文参数值写进日志。
+  assert.match(summaryBody, /objectKeySummary\(payload\.request\.params\)/);
+  assert.match(summaryBody, /objectKeySummary\(payload\.params\)/);
+  assert.match(summaryBody, /serviceTierTypeFromPayload\(payload\)/);
+  assert.match(summaryBody, /Object\.keys\(value\)\.sort\(\)\.slice\(0, 24\)\.join\(","\)/);
+  assert.match(summaryBody, /return payloadShape\(target\.serviceTier\)/);
+});
+
 test("network status widget surfaces thread watermarks and repair counters", () => {
   const source = readPolyfillSource();
   const refreshBody = sourceBetween(source, "async function refreshThreadDiagnosticsSnapshot", "function ensureNetworkStatusWidget");

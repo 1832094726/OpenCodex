@@ -472,8 +472,8 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       }
       patched = patched.replace(localConversationResumeState, "$1e!=null$3");
     }
-    // 本地会话恢复只需要 conversationId/hostId/workspaceRoots；serviceTier 的账号侧计算在 Web 桥下可能卡住首屏。
-    patched = patched.replace(/serviceTier:await [A-Za-z_$][\w$]*\([^)]*\?\.settings\.model\?\?null\)/g, "serviceTier:null");
+    // 本地会话恢复只需要 conversationId/hostId/workspaceRoots；省略 serviceTier，避免慢网预取阻塞或 null 被新版 app-server 判成非法请求。
+    patched = patched.replace(/,serviceTier:await [A-Za-z_$][\w$]*\([^)]*\?\.settings\.model\?\?null\)/g, "");
     return patched;
   }
 

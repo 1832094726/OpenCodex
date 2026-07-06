@@ -47,6 +47,49 @@ test("startup wham fetches can reuse cached real responses", () => {
   );
 });
 
+test("local resume omits null service tier before official ipc", () => {
+  const methodBody = officialRuntimeFunctionSource("localResumeMethodFromPayload", "removeNullServiceTier");
+  const removeBody = officialRuntimeFunctionSource("removeNullServiceTier", "normalizeLocalResumeServiceTier");
+  const normalizeBody = officialRuntimeFunctionSource("normalizeLocalResumeServiceTier", "valueStringAtKeys");
+  const invokeBody = officialRuntimeFunctionSource("invokeOfficialIpc", "connectOfficialAppHostPort");
+
+  // 旧 chunk 或浏览器缓存可能仍发 serviceTier:null；转交官方 app-server 前必须删除，避免 thread/resume 返回 -32600。
+  assert.match(methodBody, /maybe-resume-conversation/);
+  assert.match(methodBody, /thread\/resume/);
+  assert.match(removeBody, /delete target\.serviceTier/);
+  assert.match(normalizeBody, /local_resume_null_service_tier_removed/);
+  assert.ok(
+    invokeBody.indexOf("normalizeLocalResumeServiceTier") < invokeBody.indexOf("incomingIpcDiagnosticSummary"),
+    "local resume payload should be normalized before routing summary and official handler invocation"
+  );
+});
+
+test("archived thread resume errors are cooled down with official response shape", () => {
+  const serveBody = officialRuntimeFunctionSource("maybeServeTerminalThreadResumeError", "rememberTerminalThreadResumeError");
+  const rememberBody = officialRuntimeFunctionSource("rememberTerminalThreadResumeError", "maybeServeReadOnlyAppServerCache");
+  const invokeBody = officialRuntimeFunctionSource("invokeOfficialIpc", "connectOfficialAppHostPort");
+  const routeBody = officialRuntimeFunctionSource("routeOfficialWebContentsSend", "shouldSuppressHiddenRendererSend");
+
+  // 归档 session 的 thread/resume 是终态错误；重复请求要复用官方真实错误回包，不再每轮慢打 app-server。
+  assert.match(source, /THREAD_RESUME_TERMINAL_ERROR_TTL_MS/);
+  assert.match(source, /threadResumeTerminalErrorCache/);
+  assert.match(source, /isArchivedThreadResumeError/);
+  assert.match(source, /is archived\|codex unarchive/);
+  assert.match(serveBody, /thread_resume_terminal_error_cache_hit/);
+  assert.match(serveBody, /cloneWithReplacement/);
+  assert.match(rememberBody, /thread_resume_terminal_error_cached/);
+  assert.match(rememberBody, /cloneCacheableResponseArgs/);
+  assert.match(routeBody, /rememberTerminalThreadResumeError\(channel, args, requestSummary, requestId\)/);
+  assert.ok(
+    invokeBody.indexOf("rememberRequestRoute") < invokeBody.indexOf("maybeServeTerminalThreadResumeError"),
+    "cached terminal resume errors should be served after request routing is registered"
+  );
+  assert.ok(
+    invokeBody.indexOf("maybeServeTerminalThreadResumeError") < invokeBody.indexOf("maybeHandleDomainIsolationGlobalStateFetch"),
+    "terminal resume cache should short-circuit before official handlers"
+  );
+});
+
 test("codex runtime watcher refreshes hidden official app-server on config changes", () => {
   const watcherBody = officialRuntimeFunctionSource("installCodexRuntimeWatcher", "setWsHub");
   const signatureBody = officialRuntimeFunctionSource("runtimeRestartSignatureForFile", "rememberRuntimeRestartSignature");

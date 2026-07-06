@@ -1652,7 +1652,7 @@ test("patched official chunks trigger local conversation resume without service 
 
     assert.equal(response.statusCode, 200);
     assert.match(response.body, /o=a\?\.roots,c=e!=null;Y\(s,e\);/);
-    assert.match(response.body, /serviceTier:null/);
+    assert.doesNotMatch(response.body, /serviceTier:/);
     assert.doesNotMatch(response.body, /c=Y\(In,e\)/);
     assert.doesNotMatch(response.body, /await Js\(t,n,i\?\.settings\.model\?\?null\)/);
   } finally {
@@ -1688,7 +1688,7 @@ test("patched official chunks trigger local conversation resume for newer loader
 
     assert.equal(response.statusCode, 200);
     assert.match(response.body, /o=a\?\.roots,c=e!=null;K\(Pe,e\);/);
-    assert.match(response.body, /serviceTier:null/);
+    assert.doesNotMatch(response.body, /serviceTier:/);
     assert.doesNotMatch(response.body, /c=K\(Ce,e\)/);
     assert.doesNotMatch(response.body, /await Js\(t,n,i\?\.settings\.model\?\?null\)/);
   } finally {

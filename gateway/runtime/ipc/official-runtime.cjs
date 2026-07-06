@@ -94,6 +94,9 @@ const FETCH_RESPONSE_STALE_CACHE_MAX_AGE_MS = Number(
 const FETCH_RESPONSE_CACHE_BODY_LIMIT_BYTES = Number(
   process.env.OPENCODEX_FETCH_RESPONSE_CACHE_BODY_LIMIT_BYTES || 512 * 1024
 );
+const THREAD_RESUME_TERMINAL_ERROR_TTL_MS = Number(
+  process.env.OPENCODEX_THREAD_RESUME_TERMINAL_ERROR_TTL_MS || 5 * 60 * 1000
+);
 // 这些官方启动期 wham fetch 只影响账号菜单、用量提示和实验配置；缓存真实回包可避免弱网重复拖慢会话进入。
 const FETCH_RESPONSE_CACHEABLE_PATHS = new Set([
   "/wham/accounts/check",
@@ -119,6 +122,7 @@ const CODEX_APP_SERVER_KILL_GRACE_MS = Math.max(
 );
 const appServerReadOnlyCache = new Map();
 const fetchResponseCache = new Map();
+const threadResumeTerminalErrorCache = new Map();
 const fastSyncCache = createFastSyncCache({
   dir: path.join(RUNTIME_DIR, "cache", "fast-sync"),
 });
@@ -1496,6 +1500,58 @@ function incomingIpcDiagnosticSummary(channel, payload) {
   return summary;
 }
 
+function localResumeMethodFromPayload(message) {
+  if (!message || typeof message !== "object") return "";
+  const directMethod =
+    typeof message.type === "string"
+      ? message.type
+      : typeof message.method === "string"
+        ? message.method
+        : "";
+  if (directMethod === "maybe-resume-conversation" || directMethod === "thread/resume") return directMethod;
+  const requestMethod =
+    message.request && typeof message.request === "object" && typeof message.request.method === "string"
+      ? message.request.method
+      : "";
+  if (requestMethod === "thread/resume") return requestMethod;
+  const paramsMethod =
+    message.params && typeof message.params === "object" && typeof message.params.method === "string"
+      ? message.params.method
+      : "";
+  return paramsMethod === "thread/resume" ? paramsMethod : "";
+}
+
+function removeNullServiceTier(target) {
+  if (!target || typeof target !== "object" || Array.isArray(target)) return false;
+  if (!Object.prototype.hasOwnProperty.call(target, "serviceTier") || target.serviceTier !== null) return false;
+  delete target.serviceTier;
+  return true;
+}
+
+function normalizeLocalResumeServiceTier(channel, args) {
+  if (channel !== MESSAGE_FROM_VIEW_CHANNEL) return;
+  const message = payloadFromArgs(args);
+  const method = localResumeMethodFromPayload(message);
+  if (!method || !message || typeof message !== "object") return;
+  // serviceTier:null 会被新版官方 app-server 视为非法请求；省略字段则沿用官方默认恢复逻辑。
+  let removed = removeNullServiceTier(message);
+  if (message.params && typeof message.params === "object") removed = removeNullServiceTier(message.params) || removed;
+  if (message.request && typeof message.request === "object") {
+    removed = removeNullServiceTier(message.request) || removed;
+    if (message.request.params && typeof message.request.params === "object") {
+      removed = removeNullServiceTier(message.request.params) || removed;
+    }
+  }
+  if (!removed) return;
+  const threadId = flowThreadIdFromPayload(message);
+  if (hasFreshTerminalThreadResumeError(threadId)) return;
+  diagnosticLog("official-runtime", "local_resume_null_service_tier_removed", {
+    method,
+    requestId: shortId(requestRouteIdFromIncoming(channel, args)),
+    threadId: shortId(threadId),
+  });
+}
+
 function valueStringAtKeys(value, keys, depth = 0, seen = new WeakSet()) {
   if (!value || typeof value !== "object" || depth > 5) return "";
   if (seen.has(value)) return "";
@@ -1858,6 +1914,81 @@ function rememberCacheableFetchResponse(channel, args, requestSummary, requestId
       channel,
       requestId,
     },
+  });
+}
+
+function isThreadResumeMethod(summary) {
+  return summary && String(summary.method || summary.requestMethod || "") === "thread/resume";
+}
+
+function recursiveStringMatches(value, pattern, depth = 0, seen = new WeakSet()) {
+  if (value == null || depth > 8) return false;
+  if (typeof value === "string") return pattern.test(value);
+  if (typeof value !== "object") return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((item) => recursiveStringMatches(item, pattern, depth + 1, seen));
+  for (const nested of Object.values(value)) {
+    if (recursiveStringMatches(nested, pattern, depth + 1, seen)) return true;
+  }
+  return false;
+}
+
+function terminalThreadResumeErrorKey(summary, payload) {
+  if (!isThreadResumeMethod(summary)) return "";
+  return flowThreadIdFromPayload(summary) || flowThreadIdFromPayload(payload);
+}
+
+function hasFreshTerminalThreadResumeError(threadId, nowMs = Date.now()) {
+  const entry = threadId ? threadResumeTerminalErrorCache.get(threadId) : null;
+  if (!entry) return false;
+  if (entry.expiresAtMs > nowMs) return true;
+  threadResumeTerminalErrorCache.delete(threadId);
+  return false;
+}
+
+function isArchivedThreadResumeError(payload) {
+  // 官方 app-server 对已归档 session 会返回 invalid request；这个错误在同一页面中会被前端循环重试。
+  return recursiveStringMatches(payload, /\b(?:is archived|codex unarchive)\b/i);
+}
+
+function maybeServeTerminalThreadResumeError(channel, invokeArgs, context, requestSummary) {
+  if (channel !== MESSAGE_FROM_VIEW_CHANNEL || !wsHub || !context || !context.clientId) return false;
+  const requestId = requestRouteIdFromIncoming(channel, invokeArgs);
+  if (!requestId) return false;
+  const cacheKey = terminalThreadResumeErrorKey(requestSummary, payloadFromArgs(invokeArgs));
+  if (!cacheKey) return false;
+  const entry = threadResumeTerminalErrorCache.get(cacheKey);
+  if (!hasFreshTerminalThreadResumeError(cacheKey)) return false;
+  const responseArgs = cloneWithReplacement(entry.response.args, entry.response.requestId, requestId);
+  requestSummary.terminalResumeErrorCacheHit = true;
+  diagnosticLog("official-runtime", "thread_resume_terminal_error_cache_hit", {
+    requestId: shortId(requestId),
+    threadId: shortId(cacheKey),
+  });
+  return routeOfficialWebContentsSend(entry.response.channel || MESSAGE_FOR_VIEW_CHANNEL, responseArgs);
+}
+
+function rememberTerminalThreadResumeError(channel, args, requestSummary, requestId) {
+  if (requestSummary && requestSummary.terminalResumeErrorCacheHit) return;
+  if (!requestId || !isThreadResumeMethod(requestSummary)) return;
+  const payload = payloadFromArgs(args);
+  if (!isArchivedThreadResumeError(payload)) return;
+  const cacheKey = terminalThreadResumeErrorKey(requestSummary, payload);
+  if (!cacheKey) return;
+  const cacheableArgs = cloneCacheableResponseArgs(args);
+  if (!cacheableArgs) return;
+  threadResumeTerminalErrorCache.set(cacheKey, {
+    expiresAtMs: Date.now() + THREAD_RESUME_TERMINAL_ERROR_TTL_MS,
+    response: {
+      args: cacheableArgs,
+      channel,
+      requestId,
+    },
+  });
+  diagnosticLog("official-runtime", "thread_resume_terminal_error_cached", {
+    requestId: shortId(requestId),
+    threadId: shortId(cacheKey),
   });
 }
 
@@ -2482,6 +2613,8 @@ function routeOfficialWebContentsSend(channel, args) {
   rememberReadOnlyAppServerResponse(channel, args, requestSummary, requestId);
   // 官方启动期 wham fetch 只缓存真实成功回包；后续弱网重复打开时可直接复用，不伪造账号/用量数据。
   rememberCacheableFetchResponse(channel, args, requestSummary, requestId);
+  // 归档会话的 thread/resume 是终态错误；缓存真实错误回包，避免官方前端循环慢打 app-server。
+  rememberTerminalThreadResumeError(channel, args, requestSummary, requestId);
   // fast-sync 快照只记录 allowlist 的官方成功只读回包，供浏览器首屏独立读取。
   rememberFastSyncSnapshot(channel, args, requestSummary, valueFromFastSyncFetchResponsePayload(payload), {
     clientId: mappedClientId || targetClientId,
@@ -2747,6 +2880,7 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   const invokeArgs = normalizeIpcArgs(args);
   normalizeOfficialI18nFetchRequest(channel, invokeArgs);
   normalizeDesktopFeatureAvailabilityForBundledPlugins(channel, invokeArgs);
+  normalizeLocalResumeServiceTier(channel, invokeArgs);
   const requestSummary = incomingIpcDiagnosticSummary(channel, invokeArgs);
   if (maybeHandleDeprecatedFeatureEnablement(channel, invokeArgs)) return true;
   const readOnlyCacheKey = readOnlyAppServerCacheKey(channel, invokeArgs, requestSummary);
@@ -2755,6 +2889,7 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   if (maybeServeReadOnlyAppServerCache(channel, invokeArgs, context, requestSummary, readOnlyCacheKey)) return true;
   // 先记录请求归属，再调用官方 handler，这样同步和异步回包都能找到目标 client。
   rememberRequestRoute(channel, invokeArgs, context.clientId || "", requestSummary);
+  if (maybeServeTerminalThreadResumeError(channel, invokeArgs, context, requestSummary)) return true;
   // 会话列表保持官方原生链路，避免跨环境实验影响 Win/Mac 本地历史显示。
   if (maybeHandleDomainIsolationGlobalStateFetch(channel, invokeArgs)) return true;
   if (maybeServeCachedFetchResponse(channel, invokeArgs, context, requestSummary)) return true;
