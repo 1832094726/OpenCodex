@@ -3969,6 +3969,20 @@ function readGitRefText(relPath) {
   }
 }
 
+function readGitRefCommit(ref) {
+  const looseCommit = ref ? readGitRefText(ref) : "";
+  if (looseCommit) return looseCommit;
+  try {
+    const packedRefs = readGitRefText("packed-refs");
+    for (const line of packedRefs.split(/\r?\n/)) {
+      if (!line || line.startsWith("#") || line.startsWith("^")) continue;
+      const [commit, packedRef] = line.trim().split(/\s+/);
+      if (packedRef === ref) return commit || "";
+    }
+  } catch {}
+  return "";
+}
+
 function gatewaySourceStatus() {
   const head = readGitRefText("HEAD");
   if (!head) return { version: OPENCODEX_VERSION_LABEL };
@@ -3976,12 +3990,28 @@ function gatewaySourceStatus() {
     return { version: OPENCODEX_VERSION_LABEL, branch: "detached", commit: head.slice(0, 40) || null };
   }
   const ref = head.slice(4).trim();
-  const commit = ref ? readGitRefText(ref) : "";
+  const commit = readGitRefCommit(ref);
   return {
     version: OPENCODEX_VERSION_LABEL,
-    // health 只展示当前源码定位信息，便于判断运行态是否已经重启到最新提交。
     branch: ref.replace(/^refs\/heads\//, "") || null,
     commit: commit.slice(0, 40) || null,
+  };
+}
+
+const GATEWAY_LOADED_SOURCE_STATUS = gatewaySourceStatus();
+
+function sourceRevisionKey(source) {
+  if (!source || typeof source !== "object") return "";
+  return [source.version || "", source.branch || "", source.commit || ""].join("\0");
+}
+
+function gatewaySourceHealthStatus() {
+  const current = gatewaySourceStatus();
+  return {
+    // loaded 是当前进程启动时加载的源码版本；current 是磁盘上当前 checkout 的版本。
+    loaded: GATEWAY_LOADED_SOURCE_STATUS,
+    current,
+    restartRequired: sourceRevisionKey(GATEWAY_LOADED_SOURCE_STATUS) !== sourceRevisionKey(current),
   };
 }
 
@@ -3999,7 +4029,7 @@ function buildGatewayStatus() {
       pid: process.pid,
       projectRoot: PROJECT_ROOT,
       webShellDir: WEB_SHELL_DIR,
-      source: gatewaySourceStatus(),
+      source: gatewaySourceHealthStatus(),
       nodeVersion: process.version,
       electronVersion: process.versions && process.versions.electron ? process.versions.electron : null,
     },

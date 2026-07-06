@@ -68,15 +68,21 @@ test("non-critical statsig telemetry is short-circuited locally", () => {
 });
 
 test("health status reports gateway source revision", () => {
+  const packedRefBody = officialRuntimeFunctionSource("readGitRefCommit", "gatewaySourceStatus");
   const sourceBody = officialRuntimeFunctionSource("gatewaySourceStatus", "buildGatewayStatus");
   const healthBody = officialRuntimeFunctionSource("buildGatewayStatus", "webConfigScript");
 
   // Win/Mac 远程调试时需要知道当前 gateway 是否已经重启到最新代码，避免把旧进程误判成新逻辑失败。
+  assert.match(packedRefBody, /packed-refs/);
   assert.match(sourceBody, /OPENCODEX_VERSION_LABEL/);
   assert.match(sourceBody, /readGitRefText\("HEAD"\)/);
   assert.match(sourceBody, /refs\\\/heads\\\//);
   assert.match(sourceBody, /commit: commit\.slice\(0, 40\)/);
-  assert.match(healthBody, /source: gatewaySourceStatus\(\)/);
+  assert.match(sourceBody, /GATEWAY_LOADED_SOURCE_STATUS = gatewaySourceStatus\(\)/);
+  assert.match(sourceBody, /function gatewaySourceHealthStatus/);
+  assert.match(sourceBody, /loaded: GATEWAY_LOADED_SOURCE_STATUS/);
+  assert.match(sourceBody, /restartRequired:/);
+  assert.match(healthBody, /source: gatewaySourceHealthStatus\(\)/);
 });
 
 test("local resume omits null service tier before official ipc", () => {
