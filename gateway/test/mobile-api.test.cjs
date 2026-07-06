@@ -1552,10 +1552,12 @@ test("official renderer injects initial route for deep linked local threads", ()
     assert.match(html, /\/v1\/initialize/);
     assert.match(html, /4261455886/);
     assert.match(html, /567837310/);
-    assert.match(html, /\/v1\/rgstr/);
-    assert.match(html, /\/ces\/v1\/log_event/);
+    assert.match(html, /x\.indexOf\("\/v1\/"\)===0/);
+    assert.match(html, /x\.indexOf\("\/ces\/v1\/"\)===0/);
     assert.match(html, /api\.segment\.io/);
     assert.match(html, /XMLHttpRequest/);
+    assert.match(html, /sendBeacon/);
+    assert.match(html, /__opencodexEarlyBeaconTelemetryPatched/);
     const csp = html.match(/Content-Security-Policy"\s+content="([^"]+)/)?.[1] || "";
     assert.doesNotMatch(csp, /connect-src[^;]*https:\/\/ab\.chatgpt\.com/);
   } finally {
@@ -1604,6 +1606,8 @@ test("patched official chunks rewrite statsig endpoints to local no-op routes", 
         // 官方 SDK 会把这些 endpoint 缓存在 chunk 作用域；响应期改写比运行时 monkey patch 更早生效。
         "const api=`https://ab.chatgpt.com/v1`,exception=`https://ab.chatgpt.com/v1/sdk_exception`;",
         "const logEvent=`https://chatgpt.com/ces/v1/rgstr`,sdkException=`https://statsigapi.net/v1/sdk_exception`;",
+        // 当前官方 bundle 也会把 Statsig/Segment endpoint 放在普通字符串里，不能只覆盖模板字符串。
+        "const quotedApi=\"https://ab.chatgpt.com/v1\",quotedRgstr='https://chatgpt.com/ces/v1/rgstr';",
         "const segmentTrack=`https://api.segment.io/v1/t`,segmentHost=`api.segment.io/v1`;function flush(){let n=`${this.protocol}://${this.host}/m`;return n}",
       ].join(""),
       "utf8"
@@ -1626,6 +1630,8 @@ test("patched official chunks rewrite statsig endpoints to local no-op routes", 
     assert.match(response.body, /`\$\{location\.origin\}\/api\/noncritical\/statsig\/segment\/v1\/t`/);
     assert.match(response.body, /`\$\{location\.host\}\/api\/noncritical\/statsig\/segment\/v1`/);
     assert.match(response.body, /`\$\{location\.origin\}\/api\/noncritical\/statsig\/segment\/v1\/m`/);
+    assert.match(response.body, /quotedApi=\(location\.origin\+"\/api\/noncritical\/statsig\/v1"\)/);
+    assert.match(response.body, /quotedRgstr=\(location\.origin\+"\/api\/noncritical\/statsig\/ces\/v1\/rgstr"\)/);
     assert.doesNotMatch(response.body, /https:\/\/ab\.chatgpt\.com/);
     assert.doesNotMatch(response.body, /https:\/\/chatgpt\.com\/ces/);
     assert.doesNotMatch(response.body, /https:\/\/statsigapi\.net/);

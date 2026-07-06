@@ -193,7 +193,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       exposures: {},
       sdk_flags: {},
     });
-    return `<script>(function(){try{var w=window;if(w.__opencodexEarlyTelemetryPatched)return;w.__opencodexEarlyTelemetryPatched=true;var init=${initializeBody};function b(v){try{var p=new URL(v,location.href),x=p.pathname.replace(/\\/+$/,"");if(p.hostname==="api.segment.io"&&x.indexOf("/v1/")===0)return{};if(p.hostname==="ab.chatgpt.com"&&x==="/v1/initialize")return init;if(p.hostname==="chatgpt.com"&&(x==="/ces/v1/rgstr"||x==="/ces/v1/log_event"))return{};if(p.hostname==="ab.chatgpt.com"&&(x==="/v1/rgstr"||x==="/v1/log_event"))return{}}catch(e){}return null}function h(){return{"content-type":"application/json; charset=utf-8"}}function j(v){return JSON.stringify(v&&typeof v==="object"?v:{})}if(typeof w.fetch==="function"&&!w.__opencodexEarlyFetchTelemetryPatched){var f=w.fetch.bind(w);w.fetch=function(i,n){var v=typeof i==="string"?i:i&&typeof i==="object"&&"url"in i?String(i.url||""):"",r=b(v);if(r!==null)return Promise.resolve(new Response(j(r),{status:200,headers:h()}));return f(i,n)};w.__opencodexEarlyFetchTelemetryPatched=true}if(typeof w.XMLHttpRequest==="function"&&!w.__opencodexEarlyXhrTelemetryPatched){var X=w.XMLHttpRequest;w.XMLHttpRequest=function(){var r=new X,t=null,o=r.open,s=r.send;r.open=function(m,v){t=b(String(v||""));if(t!==null)return;return o.apply(r,arguments)};r.send=function(){if(t===null)return s.apply(r,arguments);setTimeout(function(){var v=j(t);try{Object.defineProperty(r,"readyState",{configurable:true,value:4});Object.defineProperty(r,"status",{configurable:true,value:200});Object.defineProperty(r,"responseText",{configurable:true,value:v});Object.defineProperty(r,"response",{configurable:true,value:v})}catch(e){}try{if(typeof r.onreadystatechange==="function")r.onreadystatechange(new Event("readystatechange"));r.dispatchEvent(new Event("readystatechange"));if(typeof r.onload==="function")r.onload(new Event("load"));r.dispatchEvent(new Event("load"));if(typeof r.onloadend==="function")r.onloadend(new Event("loadend"));r.dispatchEvent(new Event("loadend"))}catch(e){}},0)};return r};w.XMLHttpRequest.prototype=X.prototype;w.__opencodexEarlyXhrTelemetryPatched=true}}catch(e){}})();</script>`;
+    return `<script>(function(){try{var w=window;if(w.__opencodexEarlyTelemetryPatched)return;w.__opencodexEarlyTelemetryPatched=true;var init=${initializeBody};function b(v){try{var p=new URL(v,location.href),x=p.pathname.replace(/\\/+$/,""),h=p.hostname;if(h==="api.segment.io"&&x.indexOf("/v1/")===0)return{};if((h==="ab.chatgpt.com"||h==="featureassets.org")&&x==="/v1/initialize")return init;if((h==="chatgpt.com"&&x.indexOf("/ces/v1/")===0)||(h==="ab.chatgpt.com"&&x.indexOf("/v1/")===0)||(h==="statsigapi.net"&&x.indexOf("/v1/")===0)||(h==="prodregistryv2.org"&&x.indexOf("/v1/")===0)||(h==="featureassets.org"&&x.indexOf("/v1/")===0)||(h==="api.statsigcdn.com"&&x.indexOf("/v1/")===0))return{}}catch(e){}return null}function h(){return{"content-type":"application/json; charset=utf-8"}}function j(v){return JSON.stringify(v&&typeof v==="object"?v:{})}if(typeof w.fetch==="function"&&!w.__opencodexEarlyFetchTelemetryPatched){var f=w.fetch.bind(w);w.fetch=function(i,n){var v=typeof i==="string"?i:i&&typeof i==="object"&&"url"in i?String(i.url||""):"",r=b(v);if(r!==null)return Promise.resolve(new Response(j(r),{status:200,headers:h()}));return f(i,n)};w.__opencodexEarlyFetchTelemetryPatched=true}if(typeof navigator==="object"&&typeof navigator.sendBeacon==="function"&&!w.__opencodexEarlyBeaconTelemetryPatched){var B=navigator.sendBeacon.bind(navigator);navigator.sendBeacon=function(u,d){if(b(String(u||""))!==null)return true;return B(u,d)};w.__opencodexEarlyBeaconTelemetryPatched=true}if(typeof w.XMLHttpRequest==="function"&&!w.__opencodexEarlyXhrTelemetryPatched){var X=w.XMLHttpRequest;w.XMLHttpRequest=function(){var r=new X,t=null,o=r.open,s=r.send;r.open=function(m,v){t=b(String(v||""));if(t!==null)return;return o.apply(r,arguments)};r.send=function(){if(t===null)return s.apply(r,arguments);setTimeout(function(){var v=j(t);try{Object.defineProperty(r,"readyState",{configurable:true,value:4});Object.defineProperty(r,"status",{configurable:true,value:200});Object.defineProperty(r,"responseText",{configurable:true,value:v});Object.defineProperty(r,"response",{configurable:true,value:v})}catch(e){}try{if(typeof r.onreadystatechange==="function")r.onreadystatechange(new Event("readystatechange"));r.dispatchEvent(new Event("readystatechange"));if(typeof r.onload==="function")r.onload(new Event("load"));r.dispatchEvent(new Event("load"));if(typeof r.onloadend==="function")r.onloadend(new Event("loadend"));r.dispatchEvent(new Event("loadend"))}catch(e){}},0)};return r};w.XMLHttpRequest.prototype=X.prototype;w.__opencodexEarlyXhrTelemetryPatched=true}}catch(e){}})();</script>`;
   }
 
   /** 给少量运行时 patch 过的官方 chunk 换路径命名空间，绕开浏览器 immutable 缓存。 */
@@ -520,17 +520,36 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     return source.replace(/\bLU=5e3\b/g, "LU=0");
   }
 
+  function escapeRegExp(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function endpointExpression(quote, pathSuffix, base) {
+    if (quote === "`") {
+      return base === "host" ? "`${location.host}" + pathSuffix + "`" : "`${location.origin}" + pathSuffix + "`";
+    }
+    return base === "host"
+      ? `(location.host+${JSON.stringify(pathSuffix)})`
+      : `(location.origin+${JSON.stringify(pathSuffix)})`;
+  }
+
+  function replaceEndpointStringLiterals(source, endpoint, replacementPath, base) {
+    const pattern = new RegExp(`(["'\`])${escapeRegExp(endpoint)}([^"'\\\`]*?)\\1`, "g");
+    return source.replace(pattern, (_match, quote, suffix) => endpointExpression(quote, `${replacementPath}${suffix || ""}`, base));
+  }
+
   /** 官方 Statsig/遥测外链在弱网会拖慢首屏；响应期改到同源 no-op 路由，避免等待外网超时。 */
   function patchStatsigNetworkEndpoints(source) {
     if (!/https:\/\/(?:ab\.chatgpt\.com|chatgpt\.com\/ces|statsigapi\.net|api\.segment\.io)|api\.segment\.io\/v1/.test(source)) return source;
-    // 官方代码会对部分 endpoint 执行 new URL(endpoint)，因此不能改成相对路径；在模板字符串里拼 location.origin 保持同源绝对 URL。
-    return source
-      .replace(/`https:\/\/ab\.chatgpt\.com/g, "`${location.origin}/api/noncritical/statsig")
-      .replace(/`https:\/\/chatgpt\.com\/ces/g, "`${location.origin}/api/noncritical/statsig/ces")
-      .replace(/`https:\/\/statsigapi\.net/g, "`${location.origin}/api/noncritical/statsig/statsigapi")
-      .replace(/`https:\/\/api\.segment\.io/g, "`${location.origin}/api/noncritical/statsig/segment")
-      .replace(/`api\.segment\.io\/v1`/g, "`${location.host}/api/noncritical/statsig/segment/v1`")
+    // 官方代码会对部分 endpoint 执行 new URL(endpoint)，因此不能改成相对路径；普通字符串字面量要改成表达式。
+    let patched = source
       .replace(/([A-Za-z_$][\w$]*)=`\$\{this\.protocol\}:\/\/\$\{this\.host\}\/m`/g, "$1=`${location.origin}/api/noncritical/statsig/segment/v1/m`");
+    patched = replaceEndpointStringLiterals(patched, "https://ab.chatgpt.com", "/api/noncritical/statsig", "origin");
+    patched = replaceEndpointStringLiterals(patched, "https://chatgpt.com/ces", "/api/noncritical/statsig/ces", "origin");
+    patched = replaceEndpointStringLiterals(patched, "https://statsigapi.net", "/api/noncritical/statsig/statsigapi", "origin");
+    patched = replaceEndpointStringLiterals(patched, "https://api.segment.io", "/api/noncritical/statsig/segment", "origin");
+    patched = replaceEndpointStringLiterals(patched, "api.segment.io/v1", "/api/noncritical/statsig/segment/v1", "host");
+    return patched;
   }
 
   /** 对官方 chunk 做响应期 patch，不落盘改 vendor/官方构建产物。 */
