@@ -121,7 +121,7 @@ class LocalCodexBundleProvider {
       sourceAppPath: sourceInfo.installRoot,
       sourceAsarPath: sourceInfo.asarPath,
       // process.resourcesPath 会对齐到官方 Resources，保证官方代码能找到 codex 二进制等资源。
-      sourceResourcesPath: cache.bundleDir,
+      sourceResourcesPath: sourceInfo.resourcesDir,
       codexBinaryPath: sourceInfo.codexBinaryPath,
       version: sourceInfo.version,
       build: sourceInfo.build,

@@ -285,6 +285,52 @@ function execFileCallbackFromArgs(args, options, callback) {
   return callback;
 }
 
+function executableName(baseName, platform = process.platform) {
+  return platform === "win32" ? `${baseName}.exe` : baseName;
+}
+
+function firstExecutablePath(paths) {
+  for (const item of paths) {
+    if (item && exists(item)) return item;
+  }
+  return "";
+}
+
+function officialInstalledResourcesPath(bundle) {
+  const candidates = [
+    bundle && bundle.sourceResourcesPath,
+    bundle && bundle.manifest && bundle.manifest.sourceResourcesPath,
+    bundle && bundle.sourceAsarPath ? path.dirname(bundle.sourceAsarPath) : "",
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    const nodeReplPath = path.join(String(candidate), "cua_node", "bin", executableName("node_repl"));
+    if (exists(nodeReplPath)) return String(candidate);
+  }
+  return candidates.length > 0 ? String(candidates[0]) : "";
+}
+
+function officialBrowserUseRuntimePaths(bundle) {
+  const resourcesPath = officialInstalledResourcesPath(bundle);
+  if (!resourcesPath) return {};
+  const binDir = path.join(resourcesPath, "cua_node", "bin");
+  const nodePath = firstExecutablePath([path.join(binDir, executableName("node"))]);
+  const nodeReplPath = firstExecutablePath([path.join(binDir, executableName("node_repl"))]);
+  return { nodePath, nodeReplPath, resourcesPath };
+}
+
+function applyOfficialBrowserUseRuntimeEnv(env, bundle) {
+  const runtimePaths = officialBrowserUseRuntimePaths(bundle);
+  if (runtimePaths.nodePath) {
+    // 官方 BrowserUseThreadConfig 先读 CODEX_BROWSER_USE_NODE_PATH，再传给 node_repl 的 NODE_REPL_NODE_PATH。
+    env.CODEX_BROWSER_USE_NODE_PATH = env.CODEX_BROWSER_USE_NODE_PATH || runtimePaths.nodePath;
+    env.NODE_REPL_NODE_PATH = env.NODE_REPL_NODE_PATH || runtimePaths.nodePath;
+  }
+  if (runtimePaths.nodeReplPath) {
+    // 官方 runtimePaths.nodeReplPath 只认 CODEX_NODE_REPL_PATH；缺这个会在 thread/resume 前慢失败。
+    env.CODEX_NODE_REPL_PATH = env.CODEX_NODE_REPL_PATH || runtimePaths.nodeReplPath;
+  }
+}
+
 function appServerSpawnOptions(spawnOptions) {
   /**
    * hidden Electron runtime 需要隔离 TMPDIR 来避免抢官方 Desktop 的 live IPC owner；
@@ -308,6 +354,7 @@ function appServerSpawnOptions(spawnOptions) {
   if (process.env.npm_package_codexBuildNumber && !env.npm_package_codexBuildNumber) {
     env.npm_package_codexBuildNumber = process.env.npm_package_codexBuildNumber;
   }
+  applyOfficialBrowserUseRuntimeEnv(env, officialBundle);
   return { ...(spawnOptions || {}), env };
 }
 
@@ -1071,7 +1118,8 @@ function alignOfficialElectronEnvironment(bundle) {
   if (bundle.build && bundle.build !== "unknown") {
     process.env.npm_package_codexBuildNumber = process.env.npm_package_codexBuildNumber || String(bundle.build);
   }
-  const officialResourcesPath = bundle.sourceResourcesPath || path.dirname(bundle.sourceAsarPath || "");
+  applyOfficialBrowserUseRuntimeEnv(process.env, bundle);
+  const officialResourcesPath = officialInstalledResourcesPath(bundle) || bundle.sourceResourcesPath || path.dirname(bundle.sourceAsarPath || "");
   if (officialResourcesPath) {
     /**
      * 官方 bundled plugin 管理器支持这个 env 作为资源源目录。
