@@ -64,6 +64,22 @@ test("local resume omits null service tier before official ipc", () => {
   );
 });
 
+test("browser use runtime paths are injected from official resources", () => {
+  const appServerEnvBody = officialRuntimeFunctionSource("appServerSpawnOptions", "looksLikeOfficialCodexBinary");
+  const alignBody = officialRuntimeFunctionSource("alignOfficialElectronEnvironment", "addOfficialListener");
+  const runtimeBody = officialRuntimeFunctionSource("officialInstalledResourcesPath", "appServerSpawnOptions");
+
+  // 官方 main 通过 CODEX_BROWSER_USE_NODE_PATH / CODEX_NODE_REPL_PATH 解析 runtimePaths；
+  // 这两个值必须指向已安装 Codex.app 的 cua_node，不能指向不含 cua_node 的 OpenCodex 缓存目录。
+  assert.match(runtimeBody, /manifest\.sourceResourcesPath/);
+  assert.match(runtimeBody, /cua_node/);
+  assert.match(runtimeBody, /CODEX_BROWSER_USE_NODE_PATH/);
+  assert.match(runtimeBody, /CODEX_NODE_REPL_PATH/);
+  assert.match(runtimeBody, /NODE_REPL_NODE_PATH/);
+  assert.match(appServerEnvBody, /applyOfficialBrowserUseRuntimeEnv\(env, officialBundle\)/);
+  assert.match(alignBody, /applyOfficialBrowserUseRuntimeEnv\(process\.env, bundle\)/);
+});
+
 test("archived thread resume errors are cooled down with official response shape", () => {
   const serveBody = officialRuntimeFunctionSource("maybeServeTerminalThreadResumeError", "rememberTerminalThreadResumeError");
   const rememberBody = officialRuntimeFunctionSource("rememberTerminalThreadResumeError", "maybeServeReadOnlyAppServerCache");
@@ -177,11 +193,13 @@ test("conversation entry auxiliary reads can use read-only cache", () => {
   );
   const readOnlyMethodBody = officialRuntimeFunctionSource("readOnlyAppServerMethodFromSummary", "readOnlyAppServerMethodFromCacheKey");
   for (const method of [
+    "app/list",
     "collaborationMode/list",
     "config/read",
     "configRequirements/read",
     "experimentalFeature/list",
     "hooks/list",
+    "mcpServerStatus/list",
     "model/list",
     "permissionProfile/list",
     "plugin/list",
@@ -199,10 +217,12 @@ test("thread list and auxiliary state can use stale read-only cache during conve
     source.indexOf("const APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS")
   );
   for (const method of [
+    "app/list",
     "collaborationMode/list",
     "configRequirements/read",
     "experimentalFeature/list",
     "hooks/list",
+    "mcpServerStatus/list",
     "model/list",
     "permissionProfile/list",
     "plugin/list",
