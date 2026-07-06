@@ -2144,6 +2144,131 @@ function threadResumeSessionContentHash(filePath, stat) {
   }
 }
 
+function readThreadResumeSessionTail(filePath, stat) {
+  if (!filePath || !stat || !Number.isFinite(stat.size) || stat.size <= 0) return "";
+  let fd = null;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const start = Math.max(0, stat.size - THREAD_RESUME_SESSION_VISIBLE_TAIL_BYTES);
+    const length = stat.size - start;
+    const buffer = Buffer.alloc(length);
+    const bytesRead = fs.readSync(fd, buffer, 0, length, start);
+    let text = buffer.subarray(0, bytesRead).toString("utf8");
+    if (start > 0) text = text.replace(/^[^\n]*(?:\n|$)/, "");
+    return text;
+  } catch {
+    return "";
+  } finally {
+    if (fd != null) {
+      try {
+        fs.closeSync(fd);
+      } catch {}
+    }
+  }
+}
+
+function readThreadResumeSessionAppend(filePath, fromSize, stat) {
+  if (!filePath || !stat || !Number.isFinite(stat.size) || !Number.isFinite(fromSize)) return "";
+  if (stat.size <= fromSize) return "";
+  const length = stat.size - fromSize;
+  if (length > THREAD_RESUME_SESSION_VISIBLE_TAIL_BYTES) return "";
+  let fd = null;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const buffer = Buffer.alloc(length);
+    const bytesRead = fs.readSync(fd, buffer, 0, length, fromSize);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } catch {
+    return "";
+  } finally {
+    if (fd != null) {
+      try {
+        fs.closeSync(fd);
+      } catch {}
+    }
+  }
+}
+
+function isThreadResumeAppendRecordSafe(record) {
+  if (!record || typeof record !== "object") return false;
+  const payload = record.payload && typeof record.payload === "object" ? record.payload : {};
+  // token_count 只更新用量统计，不改变会话正文、工具状态或当前 turn 进度。
+  return record.type === "event_msg" && payload.type === "token_count";
+}
+
+function threadResumeAppendIsSafe(filePath, fromSize, stat) {
+  if (!stat || !Number.isFinite(fromSize)) return false;
+  if (stat.size <= fromSize) return true;
+  const text = readThreadResumeSessionAppend(filePath, fromSize, stat);
+  if (!text) return false;
+  for (const line of text.split(/\r?\n/)) {
+    if (!line) continue;
+    let record = null;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      return false;
+    }
+    if (!isThreadResumeAppendRecordSafe(record)) return false;
+  }
+  return true;
+}
+
+function textFromThreadResumeContentParts(content) {
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (!part || typeof part !== "object") return "";
+      return firstNonEmptyString(part.text, part.content, part.value);
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function visibleThreadResumeMessageFromRecord(record) {
+  if (!record || typeof record !== "object") return null;
+  const payload = record.payload && typeof record.payload === "object" ? record.payload : {};
+  if (record.type === "event_msg" && payload.type === "user_message") {
+    const text = firstNonEmptyString(payload.message, payload.text);
+    return text ? { role: "user", text } : null;
+  }
+  if (record.type === "event_msg" && payload.type === "agent_message") {
+    const text = firstNonEmptyString(payload.message, payload.text);
+    return text ? { role: "assistant", text } : null;
+  }
+  if (record.type === "response_item" && payload.type === "message" && (payload.role === "user" || payload.role === "assistant")) {
+    const text = textFromThreadResumeContentParts(payload.content);
+    return text ? { role: payload.role, text } : null;
+  }
+  return null;
+}
+
+function visibleThreadResumeSignature(filePath, stat) {
+  const text = readThreadResumeSessionTail(filePath, stat);
+  if (!text) return "";
+  const messages = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (!line) continue;
+    let record = null;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const message = visibleThreadResumeMessageFromRecord(record);
+    if (!message) continue;
+    // 签名只存 role 和文本 hash，不保存正文；追加记录是否可忽略仍由 threadResumeAppendIsSafe 再判断。
+    messages.push({
+      role: message.role,
+      hash: crypto.createHash("sha1").update(message.text).digest("base64url"),
+    });
+    if (messages.length > THREAD_RESUME_SESSION_VISIBLE_RECORD_LIMIT) messages.shift();
+  }
+  if (messages.length === 0) return "";
+  return crypto.createHash("sha1").update(JSON.stringify(messages)).digest("base64url");
+}
+
 function sessionFingerprintFromMatch(threadId, match) {
   if (!threadId || !match || !match.filePath) return null;
   try {
@@ -2151,12 +2276,14 @@ function sessionFingerprintFromMatch(threadId, match) {
     rememberThreadResumeSessionFile(threadId, match);
     // 不落盘、不打印正文，只用头尾窗口 hash 区分“真实内容变化”和官方 resume 的 mtime touch。
     const contentHash = threadResumeSessionContentHash(match.filePath, stat);
+    const visibleSignature = visibleThreadResumeSignature(match.filePath, stat);
     return {
       archived: Boolean(match.archived),
       contentHash,
       filePath: path.resolve(match.filePath),
       mtimeMs: stat.mtimeMs,
       size: stat.size,
+      visibleSignature,
     };
   } catch {
     threadResumeSessionFileCache.delete(threadId);
@@ -2196,9 +2323,31 @@ function validateThreadResumeSuccessCacheEntry(threadId, entry) {
   if (!current) return { ok: false, reason: "session_file_missing" };
   if (
     current.filePath !== entry.sessionFingerprint.filePath ||
-    current.archived !== entry.sessionFingerprint.archived ||
-    current.size !== entry.sessionFingerprint.size
+    current.archived !== entry.sessionFingerprint.archived
   ) {
+    return { ok: false, reason: "session_file_changed" };
+  }
+  if (current.visibleSignature && entry.sessionFingerprint.visibleSignature) {
+    if (current.visibleSignature !== entry.sessionFingerprint.visibleSignature) {
+      return { ok: false, reason: "session_visible_messages_changed" };
+    }
+    if (current.size !== entry.sessionFingerprint.size) {
+      if (!threadResumeAppendIsSafe(current.filePath, entry.sessionFingerprint.size, current)) {
+        return { ok: false, reason: "session_nonvisible_state_changed" };
+      }
+      entry.sessionFingerprint = current;
+      return { ok: true, reason: "session_nonvisible_append_ignored" };
+    }
+    if (current.contentHash && entry.sessionFingerprint.contentHash && current.contentHash !== entry.sessionFingerprint.contentHash) {
+      return { ok: false, reason: "session_file_changed" };
+    }
+    if (current.mtimeMs !== entry.sessionFingerprint.mtimeMs) {
+      entry.sessionFingerprint = current;
+      return { ok: true, reason: "session_file_touched" };
+    }
+    return { ok: true, reason: "session_fingerprint_match" };
+  }
+  if (current.size !== entry.sessionFingerprint.size) {
     return { ok: false, reason: "session_file_changed" };
   }
   if (current.contentHash && entry.sessionFingerprint.contentHash && current.contentHash !== entry.sessionFingerprint.contentHash) {
@@ -2434,7 +2583,10 @@ function nonCriticalFetchBodyForUrl(url) {
         sdk_flags: {},
       };
     }
-    if (parsed.hostname === "chatgpt.com" && (pathname === "/ces/v1/rgstr" || pathname === "/ces/v1/log_event")) {
+    if (
+      (parsed.hostname === "chatgpt.com" && (pathname === "/ces/v1/rgstr" || pathname === "/ces/v1/log_event")) ||
+      (parsed.hostname === "ab.chatgpt.com" && (pathname === "/v1/rgstr" || pathname === "/v1/log_event"))
+    ) {
       return {};
     }
     if (pathname === "/beacons/home") return {};
@@ -3221,9 +3373,11 @@ async function waitForOfficialBridgeReady(timeoutMs = 20_000) {
 }
 
 async function invokeOfficialIpc(channel, args = [], context = {}) {
+  const invokeArgs = normalizeIpcArgs(args);
+  // 纯本地可回答的遥测/辅助 fetch 不需要官方 hidden renderer；放在 bridge ready 之前避免冷启动排队。
+  if (maybeHandleNonCriticalFetch(channel, invokeArgs)) return true;
   await waitForOfficialBridgeReady();
   const event = createOfficialIpcEvent(context);
-  const invokeArgs = normalizeIpcArgs(args);
   normalizeOfficialI18nFetchRequest(channel, invokeArgs);
   normalizeDesktopFeatureAvailabilityForBundledPlugins(channel, invokeArgs);
   normalizeLocalResumeServiceTier(channel, invokeArgs);
@@ -3240,7 +3394,6 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   // 会话列表保持官方原生链路，避免跨环境实验影响 Win/Mac 本地历史显示。
   if (maybeHandleDomainIsolationGlobalStateFetch(channel, invokeArgs)) return true;
   if (maybeServeCachedFetchResponse(channel, invokeArgs, context, requestSummary)) return true;
-  if (maybeHandleNonCriticalFetch(channel, invokeArgs)) return true;
   if (maybeHandleLocaleInfoFetch(channel, invokeArgs)) return true;
   if (maybeHandleBrowserUseWebShimLifecycle(channel, invokeArgs)) return true;
   // Computer Use 锁屏授权由官方 Installer 决定；这里额外记录同进程直接 status，方便和官方回包对照。

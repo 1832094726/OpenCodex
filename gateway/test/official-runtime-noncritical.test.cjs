@@ -41,9 +41,24 @@ test("startup wham fetches can reuse cached real responses", () => {
   assert.match(rememberBody, /payload\.responseType !== "success"/);
   assert.match(rememberBody, /FETCH_RESPONSE_CACHE_BODY_LIMIT_BYTES/);
   assert.match(routeBody, /rememberCacheableFetchResponse\(channel, args, requestSummary, requestId\)/);
+  assert.match(invokeBody, /maybeServeCachedFetchResponse\(channel, invokeArgs, context, requestSummary\)/);
+});
+
+test("non-critical statsig telemetry is short-circuited locally", () => {
+  const nonCriticalBody = officialRuntimeFunctionSource("nonCriticalFetchBodyForUrl", "sendFetchJsonResponse");
+  const invokeBody = officialRuntimeFunctionSource("invokeOfficialIpc", "connectOfficialAppHostPort");
+
+  // Statsig/telemetry 失败会在弱网下制造 10s timeout；这些请求不影响会话正文，必须本地空响应。
+  assert.match(nonCriticalBody, /ab\.chatgpt\.com/);
+  assert.match(nonCriticalBody, /\/v1\/initialize/);
+  assert.match(nonCriticalBody, /\/v1\/rgstr/);
+  assert.match(nonCriticalBody, /\/v1\/log_event/);
+  assert.match(nonCriticalBody, /chatgpt\.com/);
+  assert.match(nonCriticalBody, /\/ces\/v1\/rgstr/);
+  assert.match(nonCriticalBody, /\/ces\/v1\/log_event/);
   assert.ok(
-    invokeBody.indexOf("maybeServeCachedFetchResponse") < invokeBody.indexOf("maybeHandleNonCriticalFetch"),
-    "real-response cache should be checked before non-critical fetch shortcuts"
+    invokeBody.indexOf("maybeHandleNonCriticalFetch") < invokeBody.indexOf("waitForOfficialBridgeReady"),
+    "non-critical fetches should not wait for the hidden official bridge during cold startup"
   );
 });
 
@@ -122,8 +137,11 @@ test("successful thread resume responses survive app-server exits when session f
   assert.match(source, /THREAD_RESUME_SUCCESS_CACHE_TTL_MS/);
   assert.match(source, /THREAD_RESUME_SESSION_FINGERPRINT_RECENT_FILE_LIMIT/);
   assert.match(source, /THREAD_RESUME_SESSION_FINGERPRINT_HASH_BYTES/);
+  assert.match(source, /THREAD_RESUME_SESSION_VISIBLE_TAIL_BYTES/);
   assert.match(source, /threadResumeSuccessCache/);
   assert.match(source, /threadResumeSessionFileCache/);
+  assert.match(source, /visibleThreadResumeSignature/);
+  assert.match(source, /threadResumeAppendIsSafe/);
   assert.match(source, /clearThreadResumeSuccessCache/);
   assert.match(serveBody, /thread_resume_success_cache_hit/);
   assert.match(serveBody, /validateThreadResumeSuccessCacheEntry\(cacheKey, entry\)/);
@@ -141,6 +159,10 @@ test("successful thread resume responses survive app-server exits when session f
   assert.match(validateBody, /missing_session_fingerprint/);
   assert.match(validateBody, /session_fingerprint_match/);
   assert.match(validateBody, /session_file_touched/);
+  assert.match(validateBody, /session_visible_messages_changed/);
+  assert.match(validateBody, /session_nonvisible_append_ignored/);
+  assert.match(validateBody, /session_nonvisible_state_changed/);
+  assert.match(validateBody, /visibleSignature/);
   assert.match(validateBody, /contentHash/);
   assert.match(validateBody, /session_file_changed/);
   assert.match(refreshBody, /clearThreadResumeSuccessCache\("official_runtime_refresh"\)/);
