@@ -1617,6 +1617,58 @@ test("mobile shell skips official css while desktop shell keeps it", async () =>
   }
 });
 
+test("mobile shell trims bootstrap messages to web keys", async () => {
+  const { createRequestHandler } = require("../runtime/server.cjs");
+  const staticAssets = createStaticAssetService({
+    getI18nSnapshot: () => ({
+      locale: "zh-CN",
+      messages: {
+        "common.save": "保存大文案",
+        "launcher.status.ready": "启动器大文案",
+        "plugin.demo.label": "插件大文案",
+        "web.auth.starting": "手机启动文案",
+      },
+    }),
+    getOfficialBundle: () => null,
+  });
+  const handler = createRequestHandler({
+    localFiles: {},
+    mobileApi: { handleBootstrap: () => assert.fail("mobile bootstrap should not handle shell HTML") },
+    pickedFiles: {},
+    staticAssets,
+  });
+
+  const desktop = await collectResponse(handler, {
+    headers: {
+      accept: "text/html",
+      host: "127.0.0.1:8080",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/537.36 Chrome/126 Safari/537.36",
+    },
+    method: "GET",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/",
+  });
+  const mobile = await collectResponse(handler, {
+    headers: {
+      accept: "text/html",
+      host: "127.0.0.1:8080",
+      "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1",
+    },
+    method: "GET",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/",
+  });
+
+  assert.match(desktop.body, /手机启动文案/);
+  assert.match(desktop.body, /保存大文案/);
+  assert.match(desktop.body, /启动器大文案/);
+  assert.match(desktop.body, /插件大文案/);
+  assert.match(mobile.body, /手机启动文案/);
+  assert.doesNotMatch(mobile.body, /保存大文案/);
+  assert.doesNotMatch(mobile.body, /启动器大文案/);
+  assert.doesNotMatch(mobile.body, /插件大文案/);
+});
+
 test("official renderer skips token usage capability only for mobile traffic mode", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-official-html-"));
   try {

@@ -325,11 +325,13 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   }
 
   function webShellBootstrapScript(i18n, options = {}) {
+    const messages =
+      options.mobileTrafficMode === true ? mobileWebShellMessages(i18n.messages) : i18n.messages;
     const publicConfig = {
       locale: i18n.locale,
       localeSource: i18n.source || "",
       localeMode: i18n.mode || "",
-      messages: i18n.messages,
+      messages,
     };
     if (typeof options.initialRoute === "string" && options.initialRoute.trim()) {
       // 官方 renderer 和 bridge 共用同一份深链信息，防止刷新 /local/:id 时首屏回到 home。
@@ -340,6 +342,15 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       publicConfig.mobileTrafficMode = true;
     }
     return `<script>window.__CODEX_WEB_CONFIG__=Object.assign(window.__CODEX_WEB_CONFIG__||{},${JSON.stringify(publicConfig)});</script>`;
+  }
+
+  function mobileWebShellMessages(messages) {
+    const filtered = {};
+    for (const [key, value] of Object.entries(messages && typeof messages === "object" ? messages : {})) {
+      // 手机壳页只负责认证、错误提示和 renderer handoff；插件/launcher 文案留给真正的 renderer 加载。
+      if (key.startsWith("web.")) filtered[key] = value;
+    }
+    return filtered;
   }
 
   function escapeHtml(value) {
