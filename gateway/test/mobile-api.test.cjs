@@ -1762,6 +1762,42 @@ test("patched official chunks trigger local conversation resume for newer loader
   }
 });
 
+test("patched official chunks remove local thread catalog startup delay", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-official-local-catalog-delay-"));
+  try {
+    const chunk = path.join(tempRoot, "local-catalog-provider.js");
+    fs.writeFileSync(
+      chunk,
+      [
+        // 官方 Provider 会等 LU 毫秒再 requestStartupSync；OpenCodex 已在深链阶段预热目录，不能再固定空等 5 秒。
+        "function MU(){let a=(Xr.localThreadCatalog??window.electronBridge?.localThreadCatalog);return a}",
+        "function NU({service:e}){return globalThis.setTimeout(()=>e.requestStartupSync(),LU)}",
+        "var LU=5e3;",
+        // 同一 chunk 里可能还有别的 5 秒常量，不能被这个 patch 顺手改掉。
+        "var OTHER=5e3;",
+      ].join(""),
+      "utf8"
+    );
+    const staticAssets = createStaticAssetService({
+      getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+      getOfficialBundle: () => null,
+    });
+
+    const response = await collectResponse(
+      (req, res) =>
+        staticAssets.serveFile(req, res, chunk, 200, `${PATCHED_OFFICIAL_PREFIX}assets/local-catalog-provider.js`),
+      { headers: {}, method: "GET", socket: { remoteAddress: "127.0.0.1" }, url: "/asset.js" }
+    );
+
+    assert.equal(response.statusCode, 200);
+    assert.match(response.body, /var LU=0;/);
+    assert.match(response.body, /var OTHER=5e3;/);
+    assert.doesNotMatch(response.body, /LU=5e3/);
+  } finally {
+    fs.rmSync(tempRoot, { force: true, recursive: true });
+  }
+});
+
 test("request handler serves the web shell for app routes", async () => {
   const { createRequestHandler } = require("../runtime/server.cjs");
   const shellCalls = [];

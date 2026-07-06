@@ -512,6 +512,14 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     return patched;
   }
 
+  /** 官方 LocalThreadCatalogProvider 默认延迟 5 秒启动；Web 侧已预热目录，响应期把固定等待压掉。 */
+  function patchLocalThreadCatalogStartupDelay(source) {
+    if (!source.includes("localThreadCatalog") || !source.includes("requestStartupSync") || !source.includes("LU=5e3")) {
+      return source;
+    }
+    return source.replace(/\bLU=5e3\b/g, "LU=0");
+  }
+
   /** 官方 Statsig/遥测外链在弱网会拖慢首屏；响应期改到同源 no-op 路由，避免等待外网超时。 */
   function patchStatsigNetworkEndpoints(source) {
     if (!/https:\/\/(?:ab\.chatgpt\.com|chatgpt\.com\/ces|statsigapi\.net|api\.segment\.io)|api\.segment\.io\/v1/.test(source)) return source;
@@ -536,7 +544,8 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     const tailPatched = patchTailHydrationGate(historyPatched);
     const resumePatched = patchLocalThreadResumeGate(tailPatched);
     const catalogPatched = patchLocalThreadCatalogBridgeFallback(resumePatched);
-    const patched = patchLocalConversationResumeTrigger(catalogPatched);
+    const catalogDelayPatched = patchLocalThreadCatalogStartupDelay(catalogPatched);
+    const patched = patchLocalConversationResumeTrigger(catalogDelayPatched);
     return Buffer.from(patched, "utf-8");
   }
 
