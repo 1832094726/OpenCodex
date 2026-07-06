@@ -3252,6 +3252,7 @@
 
   const READ_ONLY_APP_SERVER_METHODS = new Set([
     "app/list",
+    "collaborationMode/list",
     "config/read",
     "configRequirements/read",
     "experimentalFeature/list",

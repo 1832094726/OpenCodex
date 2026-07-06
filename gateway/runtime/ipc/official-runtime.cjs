@@ -63,6 +63,7 @@ const THREAD_SNAPSHOT_NUDGE_MIN_INTERVAL_MS = Number(process.env.OPENCODEX_THREA
 // 首屏辅助读允许走短 TTL 只读缓存；会话详情和发送链路仍保持官方实时 IPC。
 const APP_SERVER_READ_ONLY_METHODS = new Set([
   "app/list",
+  "collaborationMode/list",
   "config/read",
   "configRequirements/read",
   "experimentalFeature/list",
@@ -75,6 +76,7 @@ const APP_SERVER_READ_ONLY_METHODS = new Set([
 ]);
 const APP_SERVER_STALE_READ_ONLY_METHODS = new Set([
   "app/list",
+  "collaborationMode/list",
   "configRequirements/read",
   "experimentalFeature/list",
   "hooks/list",
@@ -96,6 +98,9 @@ const FETCH_RESPONSE_CACHE_BODY_LIMIT_BYTES = Number(
 );
 const THREAD_RESUME_TERMINAL_ERROR_TTL_MS = Number(
   process.env.OPENCODEX_THREAD_RESUME_TERMINAL_ERROR_TTL_MS || 5 * 60 * 1000
+);
+const THREAD_RESUME_SUCCESS_CACHE_TTL_MS = Number(
+  process.env.OPENCODEX_THREAD_RESUME_SUCCESS_CACHE_TTL_MS || 5 * 60 * 1000
 );
 // 这些官方启动期 wham fetch 只影响账号菜单、用量提示和实验配置；缓存真实回包可避免弱网重复拖慢会话进入。
 const FETCH_RESPONSE_CACHEABLE_PATHS = new Set([
@@ -123,6 +128,7 @@ const CODEX_APP_SERVER_KILL_GRACE_MS = Math.max(
 const appServerReadOnlyCache = new Map();
 const fetchResponseCache = new Map();
 const threadResumeTerminalErrorCache = new Map();
+const threadResumeSuccessCache = new Map();
 const fastSyncCache = createFastSyncCache({
   dir: path.join(RUNTIME_DIR, "cache", "fast-sync"),
 });
@@ -383,6 +389,7 @@ function trackHiddenAppServerChild(child, launcher) {
 
   function rememberExit(event, code, signal, error) {
     appServerSpawnHook.activeChildren.delete(child);
+    clearThreadResumeSuccessCache("app_server_child_exit");
     const pid = typeof child.pid === "number" ? child.pid : null;
     const expected = pid != null ? appServerSpawnHook.expectedTerminations.get(pid) : null;
     if (pid != null) appServerSpawnHook.expectedTerminations.delete(pid);
@@ -606,6 +613,7 @@ function refreshHiddenOfficialRuntime(reason, changedPath) {
   appServerSpawnHook.lastRestartReason = reason;
   appServerSpawnHook.lastRestartChangedPath = changedPath || null;
   const childrenBeforeReload = Array.from(appServerSpawnHook.activeChildren);
+  clearThreadResumeSuccessCache("official_runtime_refresh");
   // 只读缓存不含账号/配置；刷新隐藏 runtime 时保留它，避免线程列表冷扫再次阻塞首屏和进会话。
   const closedRelays = wsHub && typeof wsHub.closeAllAppHostRelays === "function"
     ? wsHub.closeAllAppHostRelays("official_runtime_refresh")
@@ -1921,20 +1929,53 @@ function isThreadResumeMethod(summary) {
   return summary && String(summary.method || summary.requestMethod || "") === "thread/resume";
 }
 
-function recursiveStringMatches(value, pattern, depth = 0, seen = new WeakSet()) {
-  if (value == null || depth > 8) return false;
-  if (typeof value === "string") return pattern.test(value);
-  if (typeof value !== "object") return false;
-  if (seen.has(value)) return false;
+function collectArchivedResumeErrorText(value, depth = 0, seen = new WeakSet()) {
+  if (value == null || depth > 6) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (typeof value !== "object") return "";
+  if (seen.has(value)) return "";
   seen.add(value);
-  if (Array.isArray(value)) return value.some((item) => recursiveStringMatches(item, pattern, depth + 1, seen));
-  for (const nested of Object.values(value)) {
-    if (recursiveStringMatches(nested, pattern, depth + 1, seen)) return true;
+  if (Array.isArray(value)) {
+    return value.map((item) => collectArchivedResumeErrorText(item, depth + 1, seen)).filter(Boolean).join("\n");
   }
-  return false;
+  const chunks = [];
+  for (const key of ["error", "errorMessage", "message", "reason", "details"]) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      const text = collectArchivedResumeErrorText(value[key], depth + 1, seen);
+      if (text) chunks.push(text);
+    }
+  }
+  return chunks.join("\n");
+}
+
+function archivedThreadResumeErrorText(payload, depth = 0, seen = new WeakSet()) {
+  if (!payload || typeof payload !== "object" || depth > 5) return "";
+  if (seen.has(payload)) return "";
+  seen.add(payload);
+  if (Array.isArray(payload)) {
+    return payload.map((item) => archivedThreadResumeErrorText(item, depth + 1, seen)).filter(Boolean).join("\n");
+  }
+  const hasErrorShape =
+    Object.prototype.hasOwnProperty.call(payload, "error") ||
+    Object.prototype.hasOwnProperty.call(payload, "errorMessage") ||
+    Number(payload.status || 0) >= 400 ||
+    (typeof payload.responseType === "string" && payload.responseType !== "success");
+  if (hasErrorShape) return collectArchivedResumeErrorText(payload);
+  // 官方回包有时包在 response/payload 里；只沿这些协议壳继续找 error 字段，不能扫描正文消息。
+  for (const key of ["response", "payload"]) {
+    const text = archivedThreadResumeErrorText(payload[key], depth + 1, seen);
+    if (text) return text;
+  }
+  return "";
 }
 
 function terminalThreadResumeErrorKey(summary, payload) {
+  if (!isThreadResumeMethod(summary)) return "";
+  return flowThreadIdFromPayload(summary) || flowThreadIdFromPayload(payload);
+}
+
+function threadResumeSuccessCacheKey(summary, payload) {
   if (!isThreadResumeMethod(summary)) return "";
   return flowThreadIdFromPayload(summary) || flowThreadIdFromPayload(payload);
 }
@@ -1949,7 +1990,24 @@ function hasFreshTerminalThreadResumeError(threadId, nowMs = Date.now()) {
 
 function isArchivedThreadResumeError(payload) {
   // 官方 app-server 对已归档 session 会返回 invalid request；这个错误在同一页面中会被前端循环重试。
-  return recursiveStringMatches(payload, /\b(?:is archived|codex unarchive)\b/i);
+  return /\b(?:is archived|codex unarchive)\b/i.test(archivedThreadResumeErrorText(payload));
+}
+
+function clearThreadResumeSuccessCache(reason) {
+  if (threadResumeSuccessCache.size <= 0) return;
+  const count = threadResumeSuccessCache.size;
+  threadResumeSuccessCache.clear();
+  diagnosticLog("official-runtime", "thread_resume_success_cache_cleared", {
+    count,
+    reason,
+  });
+}
+
+function isSuccessfulThreadResumePayload(payload) {
+  if (!payload || typeof payload !== "object") return false;
+  if (payload.error || Number(payload.status || 0) >= 400) return false;
+  if (typeof payload.responseType === "string" && payload.responseType !== "success") return false;
+  return !isArchivedThreadResumeError(payload);
 }
 
 function maybeServeTerminalThreadResumeError(channel, invokeArgs, context, requestSummary) {
@@ -1963,6 +2021,27 @@ function maybeServeTerminalThreadResumeError(channel, invokeArgs, context, reque
   const responseArgs = cloneWithReplacement(entry.response.args, entry.response.requestId, requestId);
   requestSummary.terminalResumeErrorCacheHit = true;
   diagnosticLog("official-runtime", "thread_resume_terminal_error_cache_hit", {
+    requestId: shortId(requestId),
+    threadId: shortId(cacheKey),
+  });
+  return routeOfficialWebContentsSend(entry.response.channel || MESSAGE_FOR_VIEW_CHANNEL, responseArgs);
+}
+
+function maybeServeThreadResumeSuccessCache(channel, invokeArgs, context, requestSummary) {
+  if (channel !== MESSAGE_FROM_VIEW_CHANNEL || !wsHub || !context || !context.clientId) return false;
+  const requestId = requestRouteIdFromIncoming(channel, invokeArgs);
+  if (!requestId) return false;
+  const cacheKey = threadResumeSuccessCacheKey(requestSummary, payloadFromArgs(invokeArgs));
+  if (!cacheKey) return false;
+  const entry = threadResumeSuccessCache.get(cacheKey);
+  if (!entry) return false;
+  if (entry.expiresAtMs <= Date.now()) {
+    threadResumeSuccessCache.delete(cacheKey);
+    return false;
+  }
+  const responseArgs = cloneWithReplacement(entry.response.args, entry.response.requestId, requestId);
+  requestSummary.resumeSuccessCacheHit = true;
+  diagnosticLog("official-runtime", "thread_resume_success_cache_hit", {
     requestId: shortId(requestId),
     threadId: shortId(cacheKey),
   });
@@ -1987,6 +2066,29 @@ function rememberTerminalThreadResumeError(channel, args, requestSummary, reques
     },
   });
   diagnosticLog("official-runtime", "thread_resume_terminal_error_cached", {
+    requestId: shortId(requestId),
+    threadId: shortId(cacheKey),
+  });
+}
+
+function rememberThreadResumeSuccess(channel, args, requestSummary, requestId) {
+  if (requestSummary && requestSummary.resumeSuccessCacheHit) return;
+  if (!requestId || !isThreadResumeMethod(requestSummary)) return;
+  const payload = payloadFromArgs(args);
+  if (!isSuccessfulThreadResumePayload(payload)) return;
+  const cacheKey = threadResumeSuccessCacheKey(requestSummary, payload);
+  if (!cacheKey) return;
+  const cacheableArgs = cloneCacheableResponseArgs(args);
+  if (!cacheableArgs) return;
+  threadResumeSuccessCache.set(cacheKey, {
+    expiresAtMs: Date.now() + THREAD_RESUME_SUCCESS_CACHE_TTL_MS,
+    response: {
+      args: cacheableArgs,
+      channel,
+      requestId,
+    },
+  });
+  diagnosticLog("official-runtime", "thread_resume_success_cached", {
     requestId: shortId(requestId),
     threadId: shortId(cacheKey),
   });
@@ -2615,6 +2717,8 @@ function routeOfficialWebContentsSend(channel, args) {
   rememberCacheableFetchResponse(channel, args, requestSummary, requestId);
   // 归档会话的 thread/resume 是终态错误；缓存真实错误回包，避免官方前端循环慢打 app-server。
   rememberTerminalThreadResumeError(channel, args, requestSummary, requestId);
+  // 同一 app-server 生命周期里复用真实成功 resume 回包，避免刷新/重连时再次出现长时间空白。
+  rememberThreadResumeSuccess(channel, args, requestSummary, requestId);
   // fast-sync 快照只记录 allowlist 的官方成功只读回包，供浏览器首屏独立读取。
   rememberFastSyncSnapshot(channel, args, requestSummary, valueFromFastSyncFetchResponsePayload(payload), {
     clientId: mappedClientId || targetClientId,
@@ -2890,6 +2994,7 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   // 先记录请求归属，再调用官方 handler，这样同步和异步回包都能找到目标 client。
   rememberRequestRoute(channel, invokeArgs, context.clientId || "", requestSummary);
   if (maybeServeTerminalThreadResumeError(channel, invokeArgs, context, requestSummary)) return true;
+  if (maybeServeThreadResumeSuccessCache(channel, invokeArgs, context, requestSummary)) return true;
   // 会话列表保持官方原生链路，避免跨环境实验影响 Win/Mac 本地历史显示。
   if (maybeHandleDomainIsolationGlobalStateFetch(channel, invokeArgs)) return true;
   if (maybeServeCachedFetchResponse(channel, invokeArgs, context, requestSummary)) return true;

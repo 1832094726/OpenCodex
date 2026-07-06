@@ -332,6 +332,7 @@ test("desktop conversation entry auxiliary reads use browser read-only cache", (
   const block = source.slice(start, end);
   // 这些辅助读在电脑端首屏会并发触发；页内去重/短缓存可避免它们拖慢历史会话打开。
   for (const method of [
+    "collaborationMode/list",
     "config/read",
     "configRequirements/read",
     "experimentalFeature/list",

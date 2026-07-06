@@ -73,8 +73,11 @@ test("archived thread resume errors are cooled down with official response shape
   // 归档 session 的 thread/resume 是终态错误；重复请求要复用官方真实错误回包，不再每轮慢打 app-server。
   assert.match(source, /THREAD_RESUME_TERMINAL_ERROR_TTL_MS/);
   assert.match(source, /threadResumeTerminalErrorCache/);
+  assert.match(source, /archivedThreadResumeErrorText/);
   assert.match(source, /isArchivedThreadResumeError/);
   assert.match(source, /is archived\|codex unarchive/);
+  assert.doesNotMatch(rememberBody, /recursiveStringMatches\(payload/);
+  assert.match(rememberBody, /isArchivedThreadResumeError\(payload\)/);
   assert.match(serveBody, /thread_resume_terminal_error_cache_hit/);
   assert.match(serveBody, /cloneWithReplacement/);
   assert.match(rememberBody, /thread_resume_terminal_error_cached/);
@@ -87,6 +90,35 @@ test("archived thread resume errors are cooled down with official response shape
   assert.ok(
     invokeBody.indexOf("maybeServeTerminalThreadResumeError") < invokeBody.indexOf("maybeHandleDomainIsolationGlobalStateFetch"),
     "terminal resume cache should short-circuit before official handlers"
+  );
+});
+
+test("successful thread resume responses are reused only within one app-server lifecycle", () => {
+  const serveBody = officialRuntimeFunctionSource("maybeServeThreadResumeSuccessCache", "rememberTerminalThreadResumeError");
+  const rememberBody = officialRuntimeFunctionSource("rememberThreadResumeSuccess", "maybeServeReadOnlyAppServerCache");
+  const invokeBody = officialRuntimeFunctionSource("invokeOfficialIpc", "connectOfficialAppHostPort");
+  const routeBody = officialRuntimeFunctionSource("routeOfficialWebContentsSend", "shouldSuppressHiddenRendererSend");
+  const childBody = officialRuntimeFunctionSource("trackHiddenAppServerChild", "redirectHiddenAppServerSpawn");
+  const refreshBody = officialRuntimeFunctionSource("refreshHiddenOfficialRuntime", "codexRuntimeWatchPathFromFilename");
+
+  // 成功 resume 只在同一 app-server 生命周期内复用真实回包；进程变更后必须清空，避免伪造已恢复状态。
+  assert.match(source, /THREAD_RESUME_SUCCESS_CACHE_TTL_MS/);
+  assert.match(source, /threadResumeSuccessCache/);
+  assert.match(source, /clearThreadResumeSuccessCache/);
+  assert.match(serveBody, /thread_resume_success_cache_hit/);
+  assert.match(serveBody, /cloneWithReplacement/);
+  assert.match(rememberBody, /thread_resume_success_cached/);
+  assert.match(rememberBody, /isSuccessfulThreadResumePayload\(payload\)/);
+  assert.match(routeBody, /rememberThreadResumeSuccess\(channel, args, requestSummary, requestId\)/);
+  assert.match(childBody, /clearThreadResumeSuccessCache\("app_server_child_exit"\)/);
+  assert.match(refreshBody, /clearThreadResumeSuccessCache\("official_runtime_refresh"\)/);
+  assert.ok(
+    invokeBody.indexOf("maybeServeTerminalThreadResumeError") < invokeBody.indexOf("maybeServeThreadResumeSuccessCache"),
+    "archived terminal errors should stay higher priority than successful resume cache"
+  );
+  assert.ok(
+    invokeBody.indexOf("maybeServeThreadResumeSuccessCache") < invokeBody.indexOf("maybeHandleDomainIsolationGlobalStateFetch"),
+    "successful resume cache should short-circuit before official handlers"
   );
 });
 
@@ -144,6 +176,7 @@ test("conversation entry auxiliary reads can use read-only cache", () => {
     source.indexOf("const APP_SERVER_STALE_READ_ONLY_METHODS")
   );
   for (const method of [
+    "collaborationMode/list",
     "config/read",
     "configRequirements/read",
     "experimentalFeature/list",
@@ -164,6 +197,7 @@ test("thread list and auxiliary state can use stale read-only cache during conve
     source.indexOf("const APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS")
   );
   for (const method of [
+    "collaborationMode/list",
     "configRequirements/read",
     "experimentalFeature/list",
     "hooks/list",
