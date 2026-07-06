@@ -175,6 +175,7 @@ test("conversation entry auxiliary reads can use read-only cache", () => {
     source.indexOf("const APP_SERVER_READ_ONLY_METHODS"),
     source.indexOf("const APP_SERVER_STALE_READ_ONLY_METHODS")
   );
+  const readOnlyMethodBody = officialRuntimeFunctionSource("readOnlyAppServerMethodFromSummary", "readOnlyAppServerMethodFromCacheKey");
   for (const method of [
     "collaborationMode/list",
     "config/read",
@@ -188,6 +189,7 @@ test("conversation entry auxiliary reads can use read-only cache", () => {
   ]) {
     assert.match(readOnlyBody, new RegExp(JSON.stringify(method).replace("/", "\\/")));
   }
+  assert.match(readOnlyMethodBody, /\["method", "requestMethod", "paramsMethod"\]/);
 });
 
 test("thread list and auxiliary state can use stale read-only cache during conversation entry", () => {

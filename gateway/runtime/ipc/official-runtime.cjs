@@ -1496,10 +1496,11 @@ function incomingIpcDiagnosticSummary(channel, payload) {
     if (message.request && typeof message.request === "object") {
       if (message.request.id != null) summary.requestId = String(message.request.id);
       if (typeof message.request.method === "string") summary.requestMethod = message.request.method;
-      // 官方 app-host 兼容层有时把真实方法放在 request.method；缓存层统一看 summary.method。
+      // 官方 app-host 兼容层有时把真实方法放在 request.method；只读缓存会优先识别这些内层方法。
       if (!summary.method && typeof message.request.method === "string") summary.method = message.request.method;
     }
     if (message.params && typeof message.params === "object" && typeof message.params.method === "string") {
+      summary.paramsMethod = message.params.method;
       // 某些 JSON-RPC 包装会把 app-server 方法藏在 params.method，这里也归一化到 method。
       if (!summary.method) summary.method = message.params.method;
     }
@@ -1657,8 +1658,12 @@ function stableReadOnlyCachePart(value, seen = new WeakSet()) {
 }
 
 function readOnlyAppServerMethodFromSummary(summary) {
-  const method = summary && typeof summary.method === "string" ? summary.method : "";
-  return APP_SERVER_READ_ONLY_METHODS.has(method) ? method : "";
+  if (!summary || typeof summary !== "object") return "";
+  for (const key of ["method", "requestMethod", "paramsMethod"]) {
+    const method = typeof summary[key] === "string" ? summary[key] : "";
+    if (APP_SERVER_READ_ONLY_METHODS.has(method)) return method;
+  }
+  return "";
 }
 
 function readOnlyAppServerMethodFromCacheKey(cacheKey) {
