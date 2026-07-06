@@ -22,13 +22,21 @@ test("account usage fetch is not treated as non-critical", () => {
 
 test("codex runtime watcher refreshes hidden official app-server on config changes", () => {
   const watcherBody = officialRuntimeFunctionSource("installCodexRuntimeWatcher", "setWsHub");
+  const signatureBody = officialRuntimeFunctionSource("runtimeRestartSignatureForFile", "rememberRuntimeRestartSignature");
   const scheduleBody = officialRuntimeFunctionSource("scheduleHiddenOfficialRuntimeRefresh", "installCodexRuntimeFsWatcher");
-  // ccswitch 会更新这两个文件；OpenCodex 需要在不刷新前台页面的情况下重启隐藏官方 runtime。
-  assert.match(source, /CODEX_RUNTIME_WATCH_FILENAMES\s*=\s*new Set\(\["config\.toml", "auth\.json"\]\)/);
+  // ccswitch 会更新 settings；OpenCodex 需要在不刷新前台页面的情况下重启隐藏官方 runtime。
+  assert.match(source, /CODEX_RUNTIME_WATCH_FILENAMES\s*=\s*new Set\(\["auth\.json"\]\)/);
   assert.match(source, /CC_SWITCH_SETTINGS_PATH\s*=\s*path\.join\(os\.homedir\(\), "\.cc-switch", "settings\.json"\)/);
   assert.match(source, /fs\.watch\(targetPath/);
   assert.match(source, /scheduleHiddenOfficialRuntimeRefresh/);
   assert.match(watcherBody, /ccSwitchSettingsWatchPathFromFilename/);
+  assert.match(source, /shouldRefreshHiddenRuntimeForConfigChange\(changedPath\)/);
+  assert.match(source, /codexRuntimeRestartSignatures/);
+  // 官方 renderer 启动期会写前端偏好和实验开关，这些不应触发 app-server 重启打断进对话。
+  assert.match(watcherBody, /config\.toml 启动期会被官方前端触碰/);
+  assert.match(signatureBody, /name === "desktop"/);
+  assert.match(signatureBody, /name === "features"/);
+  assert.match(source, /hidden_runtime_refresh_skipped_irrelevant_config_change/);
   // 配置切换必须尽快刷新隐藏 runtime，不能因为手机/网页客户端在线而无限顺延。
   assert.doesNotMatch(scheduleBody, /hidden_runtime_refresh_deferred_for_clients/);
   assert.doesNotMatch(scheduleBody, /activeClientCount\s*>\s*0/);
@@ -129,4 +137,16 @@ test("thread detail snapshots notify other clients for the same thread", () => {
   assert.match(notifyBody, /threadId/);
   assert.match(notifyBody, /sendToThread/);
   assert.doesNotMatch(notifyBody, /broadcastExcept/);
+});
+
+test("official feature enablement writes are no-oped before app-server", () => {
+  const invokeBody = officialRuntimeFunctionSource("invokeOfficialIpc", "connectOfficialAppHostPort");
+  const noopBody = officialRuntimeFunctionSource("maybeHandleDeprecatedFeatureEnablement", "invokeOfficialIpc");
+
+  // 官方前端和当前 CLI 的实验开关集合可能错位；set 写入只同步本地 UI，不能打断会话正文加载。
+  assert.match(noopBody, /experimentalFeature\/enablement\/set/);
+  assert.doesNotMatch(noopBody, /containsDeprecatedExperimentalFeature/);
+  assert.match(noopBody, /feature_enablement_set_noop/);
+  assert.match(noopBody, /thread\/read、thread\/resume/);
+  assert.match(invokeBody, /if \(maybeHandleDeprecatedFeatureEnablement\(channel, invokeArgs\)\) return true/);
 });

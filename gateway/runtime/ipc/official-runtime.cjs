@@ -89,7 +89,7 @@ const APP_SERVER_STALE_READ_ONLY_CACHE_MAX_AGE_MS = Number(
 );
 const APP_SERVER_READ_ONLY_CACHE_FILE = path.join(RUNTIME_DIR, "cache", "app-server-read-only-cache.json");
 const DEFAULT_BROWSER_USE_AVAILABLE_BACKENDS = "chrome";
-const CODEX_RUNTIME_WATCH_FILENAMES = new Set(["config.toml", "auth.json"]);
+const CODEX_RUNTIME_WATCH_FILENAMES = new Set(["auth.json"]);
 const CC_SWITCH_SETTINGS_PATH = path.join(os.homedir(), ".cc-switch", "settings.json");
 const CODEX_RUNTIME_REFRESH_DEBOUNCE_MS = Math.max(
   100,
@@ -113,6 +113,7 @@ let officialBundle = null;
 let wsHub = null;
 let codexRuntimeWatchers = [];
 let codexRuntimeRefreshTimer = null;
+const codexRuntimeRestartSignatures = new Map();
 
 const officialIpc = {
   // 官方 main 调 ipcMain.handle/on 注册的 handler 会被这里记录，再由 HTTP IPC invoke 复用。
@@ -657,6 +658,7 @@ function installCodexRuntimeFsWatcher(label, targetPath, options, onEvent) {
     const watcher = fs.watch(targetPath, options, (eventType, filename) => {
       const changedPath = onEvent(eventType, filename);
       if (!changedPath) return;
+      if (!shouldRefreshHiddenRuntimeForConfigChange(changedPath)) return;
       scheduleHiddenOfficialRuntimeRefresh(`${label}_${eventType || "change"}`, changedPath);
     });
     watcher.on("error", (error) => {
@@ -678,6 +680,50 @@ function installCodexRuntimeFsWatcher(label, targetPath, options, onEvent) {
   }
 }
 
+function runtimeRestartSignatureForFile(filePath) {
+  if (!exists(filePath)) return "missing";
+  let text = "";
+  try {
+    text = fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return "unreadable";
+  }
+  if (path.basename(filePath) === "config.toml") {
+    /**
+     * 官方 renderer 启动时会同步 [desktop]/[features] 一类前端偏好。
+     * 这些变化不影响 app-server 的会话读取、模型调用或 MCP 配置，不能触发 hidden runtime 重启。
+     */
+    const keptLines = [];
+    let skippedSection = false;
+    for (const line of text.split(/\r?\n/)) {
+      const section = line.match(/^\s*\[+([^\]]+)\]+/);
+      if (section) {
+        const name = section[1].trim();
+        skippedSection = name === "desktop" || name.startsWith("desktop.") || name === "features" || name.startsWith("features.");
+      }
+      if (!skippedSection) keptLines.push(line);
+    }
+    text = keptLines.join("\n");
+  }
+  return crypto.createHash("sha256").update(text).digest("hex");
+}
+
+function rememberRuntimeRestartSignature(filePath) {
+  codexRuntimeRestartSignatures.set(filePath, runtimeRestartSignatureForFile(filePath));
+}
+
+function shouldRefreshHiddenRuntimeForConfigChange(changedPath) {
+  const nextSignature = runtimeRestartSignatureForFile(changedPath);
+  const previousSignature = codexRuntimeRestartSignatures.get(changedPath);
+  codexRuntimeRestartSignatures.set(changedPath, nextSignature);
+  if (previousSignature == null) return true;
+  if (previousSignature !== nextSignature) return true;
+  diagnosticLog("official-runtime", "hidden_runtime_refresh_skipped_irrelevant_config_change", {
+    changedPath,
+  });
+  return false;
+}
+
 function installCodexRuntimeWatcher() {
   if (process.env.OPENCODEX_DISABLE_CODEX_RUNTIME_WATCHER === "1") return;
   if (codexRuntimeWatchers.length > 0) return;
@@ -689,7 +735,7 @@ function installCodexRuntimeWatcher() {
       { persistent: false },
       (_eventType, filename) => codexRuntimeWatchPathFromFilename(filename)
     );
-    // 统一历史开关由 cc-switch 管理；只监听配置类文件，避免会话 JSONL 高频追加时重启 app-server。
+    // 统一历史/供应商切换由 cc-switch 管理；config.toml 启动期会被官方前端触碰，不能作为实时重启源。
     if (exists(path.dirname(CC_SWITCH_SETTINGS_PATH))) {
       installCodexRuntimeFsWatcher(
         "cc_switch_settings",
@@ -703,6 +749,7 @@ function installCodexRuntimeWatcher() {
       ...Array.from(CODEX_RUNTIME_WATCH_FILENAMES).map((name) => path.join(CODEX_HOME, name)),
       CC_SWITCH_SETTINGS_PATH,
     ];
+    for (const watchedPath of appServerSpawnHook.watchedPaths) rememberRuntimeRestartSignature(watchedPath);
     diagnosticLog("official-runtime", "codex_runtime_watcher_ready", {
       count: codexRuntimeWatchers.length,
       paths: appServerSpawnHook.watchedPaths,
@@ -1987,6 +2034,22 @@ function maybeHandleBrowserUseWebShimLifecycle(channel, args) {
   return false;
 }
 
+function maybeHandleDeprecatedFeatureEnablement(channel, args) {
+  if (channel !== MESSAGE_FROM_VIEW_CHANNEL) return false;
+  const summary = incomingIpcDiagnosticSummary(channel, args);
+  if (summary.method !== "experimentalFeature/enablement/set") return false;
+  /**
+   * 官方 renderer 可能比当前 Codex CLI 新，会写入当前 app-server 不认识的实验开关。
+   * 这些 set 只是在同步本地 UI 开关，不参与 thread/read、thread/resume 等会话正文链路；
+   * OpenCodex 直接 no-op，避免未知 feature key 把 app-server 重启，导致进对话卡启动图标。
+   */
+  diagnosticLog("official-runtime", "feature_enablement_set_noop", {
+    method: summary.method,
+    requestId: shortId(summary.requestId || requestRouteIdFromIncoming(channel, args)),
+  });
+  return true;
+}
+
 function parseFetchResponseBodyJson(payload) {
   if (!payload || typeof payload !== "object") return null;
   const raw = typeof payload.bodyJsonString === "string" ? payload.bodyJsonString : "";
@@ -2583,6 +2646,7 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   normalizeOfficialI18nFetchRequest(channel, invokeArgs);
   normalizeDesktopFeatureAvailabilityForBundledPlugins(channel, invokeArgs);
   const requestSummary = incomingIpcDiagnosticSummary(channel, invokeArgs);
+  if (maybeHandleDeprecatedFeatureEnablement(channel, invokeArgs)) return true;
   const readOnlyCacheKey = readOnlyAppServerCacheKey(channel, invokeArgs, requestSummary);
   if (readOnlyCacheKey) requestSummary.cacheKey = readOnlyCacheKey;
   attachFastSyncSnapshotKey(requestSummary, invokeArgs);

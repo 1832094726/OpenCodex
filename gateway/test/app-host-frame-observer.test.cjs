@@ -236,6 +236,7 @@ test("thread state records connect and replay diagnostics per thread", () => {
 
   const connected = appHostThreadStateSnapshot(state, "thread-connect");
   const missing = appHostThreadStateSnapshot(state, "thread-other");
+  assert.equal(connected.conversationId, "thread-connect");
   assert.equal(connected.clientCount, 1);
   assert.deepEqual(connected.clientIds, ["client-connect"]);
   assert.equal(connected.portCount, 1);

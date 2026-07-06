@@ -1510,6 +1510,66 @@ test("official renderer skips token usage capability only for mobile traffic mod
   }
 });
 
+test("official renderer injects initial route for deep linked local threads", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-official-initial-route-"));
+  try {
+    fs.mkdirSync(path.join(tempRoot, "assets"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tempRoot, "index.html"),
+      '<!doctype html><html><head><title>Codex</title><script src="./assets/app.js"></script></head><body><div id="root"></div></body></html>'
+    );
+    const staticAssets = createStaticAssetService({
+      getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+      getOfficialBundle: () => ({ webviewDir: tempRoot }),
+    });
+
+    const html = staticAssets.createRendererResponse({
+      initialRoute: '/local/thread-1?query="quoted"&x=<tag>',
+      mobileTrafficMode: false,
+    });
+
+    // 官方 renderer 首屏读取 meta[name="initial-route"]；深链刷新必须显式注入，否则会落回首页。
+    assert.match(html, /<meta name="initial-route" content="\/local\/thread-1\?query=&quot;quoted&quot;&amp;x=&lt;tag&gt;">/);
+    assert.match(html, /__opencodex_renderer/);
+    assert.match(html, /"full"/);
+    assert.match(html, /"probe"/);
+    assert.match(html, /history\.replaceState/);
+  } finally {
+    fs.rmSync(tempRoot, { force: true, recursive: true });
+  }
+});
+
+test("web shell plugin loader avoids document.write during renderer handoff", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-plugin-loader-"));
+  try {
+    const staticAssets = createStaticAssetService({
+      getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+      getOfficialBundle: () => null,
+    });
+
+    const response = collectResponse(
+      (_req, res) => staticAssets.servePluginLoader(res),
+      { headers: {}, method: "GET", socket: { remoteAddress: "127.0.0.1" }, url: "/opencodex-plugin-loader.js" }
+    );
+
+    return response.then((result) => {
+      assert.equal(result.statusCode, 200);
+      assert.doesNotMatch(result.body, /document\.write/);
+      assert.match(result.body, /appendChild\(script\)/);
+    });
+  } finally {
+    fs.rmSync(tempRoot, { force: true, recursive: true });
+  }
+});
+
+test("web shell does not wait forever for service worker readiness on HTTPS entry", () => {
+  const html = fs.readFileSync(path.join(__dirname, "..", "..", "web-shell", "index.html"), "utf8");
+  // Tailscale HTTPS 首次访问可能还没有 active service worker；ready 只能短等，
+  // 否则手机首页会停在启动壳页，拖慢切入官方 renderer。
+  assert.match(html, /withTimeout\(navigator\.serviceWorker\.ready,\s*1000,\s*null\)/);
+  assert.doesNotMatch(html, /const reg = await navigator\.serviceWorker\.ready/);
+});
+
 test("patched official chunks force-disable tail hydration gate", async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-official-tail-hydration-"));
   try {
@@ -1538,21 +1598,117 @@ test("patched official chunks force-disable tail hydration gate", async () => {
   }
 });
 
-test("request handler serves the official renderer directly when it is available", async () => {
+test("patched official chunks force-enable local thread resume gate", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-official-local-loader-"));
+  try {
+    const chunk = path.join(tempRoot, "local-conversation-page.js");
+    fs.writeFileSync(
+      chunk,
+      // 官方 local page 只有该 gate 开启后才会挂载 resume 组件；Statsig 路径失配时必须在响应期钉住。
+      "function ta(){let r=te(`567837310`),t=L(P,e),a=Vr(r?e:null).isResuming;let d=a||!t?(0,$.jsx)(_n,{debugName:`LocalConversationPage`}):(0,$.jsx)(Ki,{conversationId:e});return d}",
+      "utf8"
+    );
+    const staticAssets = createStaticAssetService({
+      getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+      getOfficialBundle: () => null,
+    });
+
+    const response = await collectResponse(
+      (req, res) => staticAssets.serveFile(req, res, chunk, 200, `${PATCHED_OFFICIAL_PREFIX}assets/local-conversation-page.js`),
+      { headers: {}, method: "GET", socket: { remoteAddress: "127.0.0.1" }, url: "/asset.js" }
+    );
+
+    assert.equal(response.statusCode, 200);
+    assert.match(response.body, /let r=true,t=L\(P,e\),a=Vr\(r\?e:null\)\.isResuming/);
+    assert.doesNotMatch(response.body, /te\(`567837310`\)/);
+  } finally {
+    fs.rmSync(tempRoot, { force: true, recursive: true });
+  }
+});
+
+test("patched official chunks trigger local conversation resume without service tier prefetch", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-official-local-resume-"));
+  try {
+    const chunk = path.join(tempRoot, "local-conversation-thread.js");
+    fs.writeFileSync(
+      chunk,
+      [
+        // 官方 local resume hook 原本依赖 catalog 内部 needs-resume atom；Web 桥目录只提供轻量索引，必须按 conversationId 触发恢复。
+        "function yS(e){let t=ht(oe),n=xr(),{activeMode:i}=Ua(e),{data:a}=k(Bn),o=a?.roots,c=Y(In,e);Y(s,e);",
+        // serviceTier 的账号/模型侧计算在 Web 桥下可能先于 thread/read 卡住，恢复正文不应等待它。
+        "return Mt(`maybe-resume-conversation`,{conversationId:e,hostId:n,workspaceRoots:o,serviceTier:await Js(t,n,i?.settings.model??null)})}",
+      ].join(""),
+      "utf8"
+    );
+    const staticAssets = createStaticAssetService({
+      getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+      getOfficialBundle: () => null,
+    });
+
+    const response = await collectResponse(
+      (req, res) => staticAssets.serveFile(req, res, chunk, 200, `${PATCHED_OFFICIAL_PREFIX}assets/local-conversation-thread.js`),
+      { headers: {}, method: "GET", socket: { remoteAddress: "127.0.0.1" }, url: "/asset.js" }
+    );
+
+    assert.equal(response.statusCode, 200);
+    assert.match(response.body, /o=a\?\.roots,c=e!=null;Y\(s,e\);/);
+    assert.match(response.body, /serviceTier:null/);
+    assert.doesNotMatch(response.body, /c=Y\(In,e\)/);
+    assert.doesNotMatch(response.body, /await Js\(t,n,i\?\.settings\.model\?\?null\)/);
+  } finally {
+    fs.rmSync(tempRoot, { force: true, recursive: true });
+  }
+});
+
+test("patched official chunks trigger local conversation resume for newer loader shape", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-official-local-resume-new-"));
+  try {
+    const chunk = path.join(tempRoot, "local-conversation-thread-new.js");
+    fs.writeFileSync(
+      chunk,
+      [
+        // 新版官方 bundle 的变量名会变化，但仍是 yS loader 内先读 catalog atom 再读 loadingThread atom。
+        "function yS(e){let t=ht(oe),n=xr(),{activeMode:i}=Ua(e),{data:a}=k(Bn),o=a?.roots,c=K(Ce,e);K(Pe,e);",
+        "const label=`localConversation.loadingThread`;",
+        // serviceTier 预取不参与正文恢复，慢网下不能阻塞 maybe-resume-conversation。
+        "return Mt(`maybe-resume-conversation`,{conversationId:e,hostId:n,workspaceRoots:o,serviceTier:await Js(t,n,i?.settings.model??null)})}",
+      ].join(""),
+      "utf8"
+    );
+    const staticAssets = createStaticAssetService({
+      getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+      getOfficialBundle: () => null,
+    });
+
+    const response = await collectResponse(
+      (req, res) =>
+        staticAssets.serveFile(req, res, chunk, 200, `${PATCHED_OFFICIAL_PREFIX}assets/local-conversation-thread-new.js`),
+      { headers: {}, method: "GET", socket: { remoteAddress: "127.0.0.1" }, url: "/asset.js" }
+    );
+
+    assert.equal(response.statusCode, 200);
+    assert.match(response.body, /o=a\?\.roots,c=e!=null;K\(Pe,e\);/);
+    assert.match(response.body, /serviceTier:null/);
+    assert.doesNotMatch(response.body, /c=K\(Ce,e\)/);
+    assert.doesNotMatch(response.body, /await Js\(t,n,i\?\.settings\.model\?\?null\)/);
+  } finally {
+    fs.rmSync(tempRoot, { force: true, recursive: true });
+  }
+});
+
+test("request handler serves the web shell for app routes", async () => {
   const { createRequestHandler } = require("../runtime/server.cjs");
-  const calls = [];
+  const shellCalls = [];
   const staticAssets = {
-    createRendererResponse(options) {
-      calls.push(options);
-      // 已认证/免密入口直接返回官方 renderer，避免登录壳再 document.write 造成空白页。
-      return options && options.mobileTrafficMode
-        ? '<html><head><script src="/codex-web-config.js"></script><!-- mobile renderer --></head><body><div id="root">official mobile</div></body></html>'
-        : '<html><head><script src="/opencodex-plugin-loader.js"></script></head><body><div id="root">official desktop</div></body></html>';
-    },
+    createRendererResponse: () => assert.fail("app shell routes should not directly return official renderer"),
     isAppShellRoute: (req, pathname) => req.method === "GET" && (pathname === "/" || pathname === "/m"),
     isPublicStaticPath: () => false,
     staticFile: () => null,
-    serveWebShellIndex: () => assert.fail("authenticated app shell should not fall back to login shell"),
+    serveWebShellIndex(res, options) {
+      shellCalls.push(options);
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(options && options.mobileTrafficMode ? "<html>shell mobile</html>" : "<html>shell desktop</html>");
+    },
   };
   const handler = createRequestHandler({
     localFiles: {},
@@ -1580,24 +1736,94 @@ test("request handler serves the official renderer directly when it is available
 
   assert.equal(desktop.statusCode, 200);
   assert.equal(mobile.statusCode, 200);
-  assert.match(desktop.body, /official desktop/);
-  assert.match(mobile.body, /official mobile/);
-  assert.equal(calls[0].mobileTrafficMode, false);
-  assert.equal(calls[1].mobileTrafficMode, true);
+  assert.match(desktop.body, /shell desktop/);
+  assert.match(mobile.body, /shell mobile/);
+  assert.equal(shellCalls[0].mobileTrafficMode, false);
+  assert.equal(shellCalls[1].mobileTrafficMode, true);
 });
 
-test("request handler supports an explicit mobile traffic query for desktop browser diagnostics", async () => {
+test("request handler serves official renderer for shell handoff routes", async () => {
   const { createRequestHandler } = require("../runtime/server.cjs");
   const calls = [];
   const staticAssets = {
     createRendererResponse(options) {
       calls.push(options);
-      return options && options.mobileTrafficMode ? "<html>mobile</html>" : "<html>desktop</html>";
+      return "<html><body>official</body></html>";
     },
+    isAppShellRoute: (req, pathname) => req.method === "GET" && pathname === "/local/thread-1",
+    isPublicStaticPath: () => false,
+    staticFile: () => null,
+    serveWebShellIndex: () => assert.fail("handoff route should return official renderer"),
+  };
+  const handler = createRequestHandler({
+    localFiles: {},
+    mobileApi: { handleBootstrap: () => assert.fail("mobile bootstrap should not handle shell HTML") },
+    pickedFiles: {},
+    staticAssets,
+  });
+
+  const response = await collectResponse(handler, {
+    headers: {
+      accept: "text/html",
+      host: "127.0.0.1:8080",
+      "user-agent": "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Mobile Safari/537.36",
+    },
+    method: "GET",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/local/thread-1?foo=bar&full=1&probe=1782908986532&__opencodex_renderer=1",
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body, "<html><body>official</body></html>");
+  assert.equal(calls[0].initialRoute, "/local/thread-1?foo=bar");
+  assert.equal(calls[0].mobileTrafficMode, false);
+});
+
+test("request handler passes official-index route query as official initial route", async () => {
+  const { createRequestHandler } = require("../runtime/server.cjs");
+  const calls = [];
+  const staticAssets = {
+    createRendererResponse(options) {
+      calls.push(options);
+      return "<html><body>official</body></html>";
+    },
+    isAppShellRoute: () => false,
+    isPublicStaticPath: () => false,
+    staticFile: () => null,
+    serveWebShellIndex: () => assert.fail("official-index should be served by official renderer"),
+  };
+  const handler = createRequestHandler({
+    localFiles: {},
+    mobileApi: { handleBootstrap: () => assert.fail("mobile bootstrap should not handle shell HTML") },
+    pickedFiles: {},
+    staticAssets,
+  });
+
+  const response = await collectResponse(handler, {
+    headers: { accept: "text/html", host: "127.0.0.1:8080", "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X)" },
+    method: "GET",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/official-index.patched.html?route=%2Flocal%2F019eb72f-e4ed-7573-ba07-cf5d3305f56c%3Fmobile%3D0",
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(calls[0].initialRoute, "/local/019eb72f-e4ed-7573-ba07-cf5d3305f56c");
+  assert.equal(calls[0].mobileTrafficMode, false);
+});
+
+test("request handler supports an explicit mobile traffic query for desktop browser diagnostics", async () => {
+  const { createRequestHandler } = require("../runtime/server.cjs");
+  const shellCalls = [];
+  const staticAssets = {
+    createRendererResponse: () => assert.fail("app shell routes should not directly return official renderer"),
     isAppShellRoute: (req, pathname) => req.method === "GET" && (pathname === "/" || pathname === "/m"),
     isPublicStaticPath: () => false,
     staticFile: () => null,
-    serveWebShellIndex: () => assert.fail("authenticated app shell should not fall back to login shell"),
+    serveWebShellIndex(res, options) {
+      shellCalls.push(options);
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(options && options.mobileTrafficMode ? "<html>mobile</html>" : "<html>desktop</html>");
+    },
   };
   const handler = createRequestHandler({
     localFiles: {},
@@ -1621,8 +1847,8 @@ test("request handler supports an explicit mobile traffic query for desktop brow
 
   assert.equal(mobile.body, "<html>mobile</html>");
   assert.equal(full.body, "<html>desktop</html>");
-  assert.equal(calls[0].mobileTrafficMode, true);
-  assert.equal(calls[1].mobileTrafficMode, false);
+  assert.equal(shellCalls[0].mobileTrafficMode, true);
+  assert.equal(shellCalls[1].mobileTrafficMode, false);
 });
 
 test("request handler exposes app-host thread diagnostics without message bodies", async () => {

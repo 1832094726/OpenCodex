@@ -37,8 +37,11 @@
       (function () {
         var config = window.__CODEX_WEB_CONFIG__ || {};
         if (config.mobileTrafficMode) return;
-        // 手机流量模式保留官方主界面，但跳过 OpenCodex 插件扩展，避免首屏加载额外脚本和后台状态。
-        document.write('<script src="/opencodex-plugin-loader.js"><\\/script>');
+        // 手机流量模式保留官方主界面；桌面端用 DOM 追加插件入口，避免 document.write 在重载交接时清空文档。
+        var script = document.createElement("script");
+        script.src = "/opencodex-plugin-loader.js";
+        script.async = false;
+        (document.head || document.documentElement).appendChild(script);
       })();
     </script>
     <style>
@@ -745,6 +748,21 @@
           hint.classList.remove("hidden");
         }
 
+        function withTimeout(promise, timeoutMs, fallbackValue) {
+          return new Promise((resolve) => {
+            const timer = setTimeout(() => resolve(fallbackValue), timeoutMs);
+            Promise.resolve(promise)
+              .then((value) => {
+                clearTimeout(timer);
+                resolve(value);
+              })
+              .catch(() => {
+                clearTimeout(timer);
+                resolve(fallbackValue);
+              });
+          });
+        }
+
         async function authStatus() {
           const res = await fetch("/api/auth/status", {
             cache: "no-store",
@@ -761,11 +779,14 @@
          // 缓存未就绪时继续加载 renderer，缺失资源仍会由 SW cache-first 按需补齐。
         if ("serviceWorker" in navigator && location.protocol === "https:") {
           try {
-            const reg = await navigator.serviceWorker.ready;
-            // 通过 MessageChannel 询问 SW 缓存是否就绪；最多等 4 秒，避免缓存构建拖住主界面。
+            // 首次用 Tailscale HTTPS 域名打开时可能还没有 active SW；ready 本身必须很短，
+            // 否则入口页会永远停在“正在启动 OpenCodex...”而不会切到官方 renderer。
+            const reg = await withTimeout(navigator.serviceWorker.ready, 1000, null);
+            if (!reg || !reg.active) throw new Error("service worker not ready");
+            // 通过 MessageChannel 询问 SW 缓存是否就绪；最多等 1 秒，避免缓存构建拖住主界面。
             await new Promise((resolve) => {
               const channel = new MessageChannel();
-              const timer = setTimeout(() => resolve({ ready: false, reason: "timeout" }), 4000);
+              const timer = setTimeout(() => resolve({ ready: false, reason: "timeout" }), 1000);
               channel.port1.onmessage = (e) => {
                 clearTimeout(timer);
                 resolve(e.data);
@@ -776,7 +797,10 @@
             console.warn("[sw-cache] 等待缓存就绪失败，直接加载", e);
           }
          }
-         const res = await fetch("/official-index.patched.html", {
+         const rendererUrl = new URL(location.href);
+         // 保持 /local/:id 原路径切入官方 renderer；官方 router 依赖真实 pathname 触发会话正文读取。
+         rendererUrl.searchParams.set("__opencodex_renderer", "1");
+         const res = await fetch(rendererUrl, {
             cache: "no-store",
             credentials: "same-origin",
             headers: authHeaders({ accept: "text/html" }),
@@ -787,10 +811,8 @@
             return;
           }
           if (!res.ok) throw new Error(t("web.auth.loadFailedHttp", { status: res.status }));
-          const html = await res.text();
-          document.open();
-          document.write(html);
-          document.close();
+          // 官方 renderer 需要在自己的 HTML/bootstrap 顺序里安装 bridge；切换页面比 document.write 更稳定。
+          location.replace(`${rendererUrl.pathname}${rendererUrl.search}${rendererUrl.hash}`);
         }
 
         function utf8Bytes(value) {

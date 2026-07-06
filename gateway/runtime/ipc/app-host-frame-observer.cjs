@@ -310,6 +310,8 @@ function rememberAppHostThreadPort(state, details = {}) {
   const thread = ensureThreadState(state, threadId);
   moveActivePortToThread(state, threadId, clientId, portId);
   rememberThreadParticipant(thread, clientId, portId, nowMs);
+  // connect 帧只有地址栏 threadId；先用它初始化 conversationId，后续真实 app-host 帧会用官方字段覆盖。
+  thread.conversationId ||= threadId;
   thread.lastFrameAtMs ||= nowMs;
   if (clientId) state.clientByThreadId.set(threadId, clientId);
   if (clientId && portId) state.portByClientId.set(clientId, portId);

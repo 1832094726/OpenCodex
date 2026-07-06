@@ -507,9 +507,19 @@
     artifacts: true,
   };
   const OPENCODEX_DISABLED_STATSIG_GATES = ["4261455886"];
+  const OPENCODEX_ENABLED_STATSIG_GATES = ["567837310"];
   const OPENCODEX_CLIENT_ID_STORAGE_KEY = "opencodex_browser_client_id_v1";
   const OPENCODEX_LAST_ROUTE_STORAGE_KEY = "opencodex_last_thread_route_v1";
   const OPENCODEX_APP_HOST_THREAD_SEQ_STORAGE_PREFIX = "opencodex_app_host_thread_seq_v1:";
+  const OPENCODEX_NON_RESTORABLE_ROUTE_PARAMS = [
+    "__opencodex_renderer",
+    "full",
+    "mobile",
+    "probe",
+    "_probe",
+    "_deep",
+    "_tail",
+  ];
 
   function createBrowserClientId() {
     return w.crypto?.randomUUID?.() || `web-client-${Math.random().toString(36).slice(2)}`;
@@ -540,10 +550,14 @@
     try {
       const parsed = new URL(text, location.origin);
       if (parsed.origin !== location.origin) return "";
+      for (const param of OPENCODEX_NON_RESTORABLE_ROUTE_PARAMS) {
+        // full/probe 等参数只用于一次性诊断或强制模式，不能写回“上次会话路由”。
+        parsed.searchParams.delete(param);
+      }
       const route = `${parsed.pathname || "/"}${parsed.search || ""}${parsed.hash || ""}`;
       return isRestorableThreadRoute(route) ? route : "";
     } catch {
-      return isRestorableThreadRoute(text) ? text : "";
+      return isRestorableThreadRoute(text) ? text.replace(/[?&](?:full|mobile|probe|_probe|_deep|_tail|__opencodex_renderer)=[^&#]*/g, "") : "";
     }
   }
 
@@ -657,6 +671,15 @@
     }
   }
 
+  function pushOpenCodexTrace(event, data) {
+    try {
+      // 轻量环形缓冲区直接挂在页面上，方便浏览器控制台第一时间确认官方请求走到哪一层。
+      const trace = (w.__opencodexTrace = Array.isArray(w.__opencodexTrace) ? w.__opencodexTrace : []);
+      trace.push({ event, data, at: new Date().toISOString(), ageMs: Date.now() - bridgeStartedAtMs });
+      while (trace.length > 240) trace.shift();
+    } catch {}
+  }
+
   function websocketStateName(socket) {
     if (!socket || !("WebSocket" in w)) return "missing";
     if (socket.readyState === w.WebSocket.CONNECTING) return "connecting";
@@ -720,7 +743,19 @@
 
   function shouldUploadClientDiagnostic(event) {
     // gateway 默认只消费发送链路和传输选择诊断；其它前端诊断留在本页面板，避免首屏制造额外 POST 洪峰。
-    return CLIENT_DIAGNOSTIC_UPLOAD_ENABLED || event === "fast-sync-flow" || event === "ws-transport-selected" || event === "ws-hello-ack";
+    const eventName = typeof event === "string" ? event : "";
+    return (
+      CLIENT_DIAGNOSTIC_UPLOAD_ENABLED ||
+      eventName === "ipc-invoke-start" ||
+      eventName === "ipc-invoke-success" ||
+      eventName === "ipc-invoke-failed" ||
+      eventName === "ipc-important-method" ||
+      eventName.startsWith("app-host-") ||
+      eventName === "fast-sync-flow" ||
+      eventName === "ws-transport-selected" ||
+      eventName === "ws-hello-ack" ||
+      eventName.startsWith("local-thread-catalog-")
+    );
   }
 
   function clientDiagnostic(event, data) {
@@ -741,6 +776,7 @@
         clientDiagnosticQueue.push({ event, data: diagnosticData });
       }
       recentClientDiagnostics.push({ event, data: diagnosticData });
+      pushOpenCodexTrace(event, diagnosticData);
       while (recentClientDiagnostics.length > 30) recentClientDiagnostics.shift();
       updateNetworkStatusWidget();
       if (clientDiagnosticQueue.length === 0) {
@@ -755,6 +791,13 @@
       } else {
         scheduleClientDiagnosticFlush();
       }
+    } catch {}
+  }
+
+  /** 观测代码不能影响官方 renderer 主路径；任何诊断失败都只静默降级。 */
+  function safeClientDiagnostic(event, data) {
+    try {
+      clientDiagnostic(event, data);
     } catch {}
   }
 
@@ -2349,6 +2392,15 @@
     };
   }
 
+  function enabledStatsigGateConfig(name) {
+    return {
+      name,
+      value: true,
+      rule_id: "opencodex_enabled",
+      secondary_exposures: [],
+    };
+  }
+
   function patchStatsigPayloadForOpenCodex(statsigPayload) {
     if (!statsigPayload || typeof statsigPayload !== "object") return false;
     statsigPayload.layer_configs =
@@ -2364,6 +2416,10 @@
       // tail hydration 在 OpenCodex Web 桥下会让历史正文依赖 resume 的 initialTurnsPage；
       // 该页偶发为空时用户会看到空/错对话，禁用后回到官方稳定的普通 hydration 路径。
       statsigPayload.feature_gates[gateName] = disabledStatsigGateConfig(gateName);
+    }
+    for (const gateName of OPENCODEX_ENABLED_STATSIG_GATES) {
+      // 旧本地对话页依赖该 gate 调用 maybe-resume-conversation；保留官方恢复分支才能触发 thread/read。
+      statsigPayload.feature_gates[gateName] = enabledStatsigGateConfig(gateName);
     }
     statsigPayload.has_updates = true;
     return true;
@@ -2384,6 +2440,7 @@
       payload.bodyJsonString = JSON.stringify(body);
       clientDiagnostic("statsig-bootstrap-opencodex-patched", {
         disabledGates: OPENCODEX_DISABLED_STATSIG_GATES.join(","),
+        enabledGates: OPENCODEX_ENABLED_STATSIG_GATES.join(","),
         locale: OPENCODEX_LOCALE,
         requestId,
       });
@@ -2537,6 +2594,40 @@
     }
   }
 
+  function dispatchOpenCodexRouteChange(route, reason) {
+    try {
+      w.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+    } catch {
+      try {
+        w.dispatchEvent(new Event("popstate"));
+      } catch {}
+    }
+    try {
+      w.dispatchEvent(new CustomEvent("opencodex:route-change", { detail: { reason, route } }));
+    } catch {}
+  }
+
+  function navigateToLocalThreadRouteInPlace(route, threadId) {
+    try {
+      const before = `${location.pathname || "/"}${location.search || ""}${location.hash || ""}`;
+      if (before === route) return false;
+      history.pushState(history.state, "", route);
+      dispatchOpenCodexRouteChange(route, "active-thread-change");
+      persistCurrentRoute();
+      clientDiagnostic("active-thread-change-route-pushstate", {
+        route,
+        threadId: shortThreadId(threadId),
+      });
+      return true;
+    } catch (error) {
+      clientDiagnostic("active-thread-change-route-pushstate-failed", {
+        error: error instanceof Error ? error.message : String(error),
+        threadId: shortThreadId(threadId),
+      });
+      return false;
+    }
+  }
+
   function preloadGatewaySnapshotFromNudge(message) {
     if (!message || message.replayGap !== true) return null;
     const method = typeof message.method === "string" ? message.method : "";
@@ -2615,6 +2706,32 @@
     }
   }
 
+  function canonicalThreadId(value) {
+    const text = typeof value === "string" ? value.trim() : "";
+    if (!text) return "";
+    return text.startsWith("local:") ? text.slice("local:".length) : text;
+  }
+
+  function isNavigableLocalThreadId(value) {
+    const id = canonicalThreadId(value);
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+  }
+
+  function localThreadRoute(value) {
+    const id = canonicalThreadId(value);
+    return isNavigableLocalThreadId(id) ? `/local/${encodeURIComponent(id)}` : "";
+  }
+
+  function ensureRouteForActiveLocalThread(threadId) {
+    const route = localThreadRoute(threadId);
+    if (!route) return false;
+    const currentThreadId = canonicalThreadId(currentRouteThreadId());
+    if (currentThreadId === canonicalThreadId(threadId)) return false;
+    // 官方侧栏点击已经在同一个 renderer 内切换了活跃会话；这里只补齐浏览器地址栏和路由事件，
+    // 不能再用 location.href 做整页跳转，否则每次进会话都会重新冷启动官方 bundle。
+    return navigateToLocalThreadRouteInPlace(route, threadId);
+  }
+
   function appHostThreadSeqStorageKey(threadId) {
     return `${OPENCODEX_APP_HOST_THREAD_SEQ_STORAGE_PREFIX}${encodeURIComponent(threadId)}`;
   }
@@ -2666,7 +2783,10 @@
   function normalizeActiveThreadChangePayload(payload) {
     if (!payload || typeof payload !== "object") return;
     if (payload.type !== "remote-hosted-pip-active-thread-changed") return;
-    if (typeof payload.conversationId === "string" && payload.conversationId) return;
+    if (typeof payload.conversationId === "string" && payload.conversationId) {
+      ensureRouteForActiveLocalThread(payload.conversationId);
+      return;
+    }
     const threadId = currentRouteThreadId();
     if (!threadId) return;
     // 官方 Web 壳在深链冷开时偶尔上报 null；这里用地址栏 threadId 补齐当前活跃会话。
@@ -2947,7 +3067,9 @@
       if (event.source !== w) return;
       const data = event.data;
       if (!data || typeof data !== "object" || data.type !== "connect-app-host") return;
-      const port = data.port || (event.ports && event.ports[0]);
+      // MessagePort 经过 postMessage transfer 后，标准可用引用在 event.ports[0]；
+      // data.port 在部分 WebView 里只是结构化克隆残影，能通过形状检查但收不到后续 RPC 帧。
+      const port = (event.ports && event.ports[0]) || data.port;
       if (!port || typeof port.postMessage !== "function" || typeof port.start !== "function") {
         clientDiagnostic("app-host-connect-missing-port", {
           payloadType: payloadShape(data),
@@ -2964,7 +3086,7 @@
         portId: appHostPortId(),
       };
       appHostPortRelays.set(state.portId, state);
-      port.addEventListener("message", (portEvent) => {
+      const handleBrowserAppHostMessage = (portEvent) => {
         // MessageEvent.data 可能不是自有属性，直接读取才能拿到官方 RPC 字符串。
         const portData = portEvent ? portEvent.data : undefined;
         if (!(portData === null || typeof portData === "string")) {
@@ -2976,7 +3098,10 @@
         }
         queueAppHostRelayPayload(state, { type: "app-host-port-message", data: portData });
         if (portData === null) closeAppHostRelay(state, "browser_closed", false);
-      });
+      };
+      port.addEventListener("message", handleBrowserAppHostMessage);
+      // 某些 WebView 的 MessagePort 只稳定触发 onmessage；两种入口复用同一处理函数。
+      port.onmessage = handleBrowserAppHostMessage;
       port.addEventListener("messageerror", () => {
         clientDiagnostic("app-host-browser-message-error", { portId: state.portId });
         closeAppHostRelay(state, "browser_message_error", true);
@@ -2989,6 +3114,7 @@
       port.start();
       clientDiagnostic("app-host-connect-captured", {
         portId: state.portId,
+        portSource: event.ports && event.ports[0] ? "event.ports" : "data.port",
         wsReady,
         wsState: websocketStateName(ws),
       });
@@ -4079,6 +4205,23 @@
   /** 模拟 Electron ipcRenderer.invoke，实际通过 gateway 的 /api/ipc/invoke 完成。 */
   async function invoke(channel, ...args) {
     const payload = payloadFromIpcArgs(args);
+    const method =
+      appServerMethod(payload) ||
+      (payload && typeof payload.method === "string" ? payload.method : "") ||
+      (payload && typeof payload.type === "string" ? payload.type : "");
+    if (
+      method === "maybe-resume-conversation" ||
+      method === "send-cli-request-for-host" ||
+      method === "thread/read" ||
+      method === "thread/turns/list"
+    ) {
+      // 这里是官方 renderer 进入 gateway 前的第一现场，只记录方法和形状，避免泄露正文。
+      const summary = ipcDiagnosticSummary(channel, payload);
+      clientDiagnostic("ipc-important-method", {
+        ...summary,
+        appServerMethod: method,
+      });
+    }
     if (channel === "pick-files") return pickFilesInBrowser(payload);
     emitOpenCodexPluginEvent("ipc:invoke", { channel, payload });
     return invokeGateway(channel, args);
@@ -4422,6 +4565,140 @@
 
   initializePersistedAtomSnapshot();
 
+  function localThreadCatalogTimestamp(value, fallbackMs) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim()) {
+      const parsed = Date.parse(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return fallbackMs;
+  }
+
+  function localThreadCatalogEntryFromMobileThread(thread, index, nowMs) {
+    if (!thread || typeof thread !== "object" || !thread.id) return null;
+    const updatedAt = localThreadCatalogTimestamp(thread.updatedAt, nowMs - index);
+    const createdAt = localThreadCatalogTimestamp(thread.createdAt, updatedAt);
+    const title = typeof thread.title === "string" && thread.title.trim() ? thread.title.trim() : "Untitled";
+    const cwd = typeof thread.projectPath === "string" && thread.projectPath.trim() ? thread.projectPath.trim() : null;
+    return {
+      archived: thread.archived === true,
+      cwd,
+      displayTitle: title,
+      gitBranch: null,
+      hostId: "local",
+      id: String(thread.id),
+      modelProvider: null,
+      sourceCreatedAt: createdAt,
+      sourceDetail: null,
+      sourceKind: "local",
+      sourceUpdatedAt: updatedAt,
+      threadId: String(thread.id),
+      title,
+      updatedAt,
+    };
+  }
+
+  function createLocalThreadCatalogService() {
+    let revision = 1;
+    let snapshot = { entries: [], hosts: [{ hostId: "local", isComplete: false }], isComplete: false, revision };
+    const subscribers = new Set();
+
+    function notifySnapshot() {
+      const event = { type: "snapshot", snapshot };
+      for (const subscriber of Array.from(subscribers)) {
+        try {
+          subscriber(event);
+        } catch (error) {
+          console.warn("[codex-web] localThreadCatalog subscriber failed", error);
+        }
+      }
+    }
+
+    async function refresh(mode) {
+      const response = await fetch(`/api/mobile/bootstrap?limit=200&catalog=1&_=${Date.now()}`, {
+        cache: "no-store",
+        credentials: "same-origin",
+      });
+      if (!response.ok) throw new Error(`localThreadCatalog bootstrap failed: HTTP ${response.status}`);
+      const payload = await response.json();
+      const nowMs = Date.now();
+      const entries = Array.isArray(payload.threads)
+        ? payload.threads
+            .map((thread, index) => localThreadCatalogEntryFromMobileThread(thread, index, nowMs))
+            .filter(Boolean)
+        : [];
+      revision += 1;
+      // 官方 local-thread catalog 只需要先拿到本地 thread 索引；正文仍由 maybe-resume-conversation 拉取。
+      snapshot = {
+        entries,
+        hosts: [{ hostId: "local", isComplete: true }],
+        isComplete: true,
+        revision,
+      };
+      safeClientDiagnostic("local-thread-catalog-refresh", {
+        entryCount: entries.length,
+        mode,
+        revision,
+        source: payload && payload.source ? String(payload.source) : "",
+      });
+      notifySnapshot();
+      return snapshot;
+    }
+
+    return {
+      readSnapshot: () => {
+        safeClientDiagnostic("local-thread-catalog-read", {
+          entryCount: snapshot.entries.length,
+          isComplete: snapshot.isComplete,
+          revision: snapshot.revision,
+        });
+        return snapshot;
+      },
+      requestStartupSync: () => {
+        safeClientDiagnostic("local-thread-catalog-startup-sync", {
+          entryCount: snapshot.entries.length,
+          isComplete: snapshot.isComplete,
+          revision: snapshot.revision,
+        });
+        return refresh("startup").catch((error) => {
+          console.warn("[codex-web] localThreadCatalog startup sync failed", error);
+        });
+      },
+      requestSync: () => {
+        safeClientDiagnostic("local-thread-catalog-sync", {
+          entryCount: snapshot.entries.length,
+          isComplete: snapshot.isComplete,
+          revision: snapshot.revision,
+        });
+        return refresh("sync").catch((error) => {
+          console.warn("[codex-web] localThreadCatalog sync failed", error);
+        });
+      },
+      subscribe(callback) {
+        if (typeof callback !== "function") return { dispose() {} };
+        subscribers.add(callback);
+        safeClientDiagnostic("local-thread-catalog-subscribe", {
+          entryCount: snapshot.entries.length,
+          isComplete: snapshot.isComplete,
+          revision: snapshot.revision,
+          subscriberCount: subscribers.size,
+        });
+        try {
+          callback({ type: "snapshot", snapshot });
+        } catch (error) {
+          console.warn("[codex-web] localThreadCatalog initial subscriber failed", error);
+        }
+        return { dispose: () => subscribers.delete(callback) };
+      },
+      unsubscribe(callback) {
+        if (typeof callback === "function") subscribers.delete(callback);
+        else subscribers.clear();
+      },
+    };
+  }
+
+  const localThreadCatalogService = createLocalThreadCatalogService();
+
   /** 把 Electron/Codex bridge API 挂到多个官方可能访问的全局对象上。 */
   function attachBridge(target) {
     target.invoke = invoke;
@@ -4476,6 +4753,22 @@
     };
     target.sendMessageFromView = async (payload) =>
       Promise.resolve().then(() => {
+        if (
+          payload &&
+          typeof payload === "object" &&
+          typeof payload.type === "string" &&
+          (payload.type === "maybe-resume-conversation" ||
+            payload.type === "send-cli-request-for-host" ||
+            payload.type === "thread/read" ||
+            payload.type === "thread/turns/list")
+        ) {
+          // 这是官方 renderer 通过 preload 发出的消息总闸口，只记录方法和请求形状。
+          const summary = ipcDiagnosticSummary("codex_desktop:message-from-view", payload);
+          clientDiagnostic("ipc-important-method", {
+            ...summary,
+            appServerMethod: payload.type,
+          });
+        }
         if (payload && typeof payload === "object") {
           // 官方 i18n 的 Statsig bootstrap 必须尽早携带中文语言环境，后续无论走本地短路还是 gateway 都能复用同一份 payload。
           normalizeStatsigBootstrapRequest(payload);
@@ -4563,6 +4856,8 @@
       return id;
     };
     target.getSharedObjectSnapshotValue = (key) => getSharedObjectSnapshotValue(key);
+    // 官方新本地会话页通过该服务同步本机历史目录；Web preload 必须补齐，否则 /local/:id 只有标题没有正文恢复。
+    target.localThreadCatalog = localThreadCatalogService;
     // Web shell 没有真实原生菜单；不暴露 showContextMenu，让官方 context-menu 组件走自带 DOM 菜单。
     try {
       delete target.showContextMenu;
@@ -4656,6 +4951,14 @@
         rule_id: "gateway_override",
         secondary_exposures: [],
       };
+    }
+    for (const gateName of OPENCODEX_DISABLED_STATSIG_GATES) {
+      // 本地 fallback 也保持和 bootstrap patch 一致，避免 Statsig 慢网超时时回到官方默认 gate。
+      feature_gates[gateName] = disabledStatsigGateConfig(gateName);
+    }
+    for (const gateName of OPENCODEX_ENABLED_STATSIG_GATES) {
+      // Statsig bootstrap 超时时也要保持本地会话恢复能力，否则深链只会停在标题和输入框。
+      feature_gates[gateName] = enabledStatsigGateConfig(gateName);
     }
     return {
       has_updates: true,

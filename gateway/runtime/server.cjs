@@ -61,6 +61,17 @@ const fastSyncCache = createFastSyncCache({
   dir: path.join(RUNTIME_DIR, "cache", "fast-sync"),
 });
 
+// 这些 query 只控制 OpenCodex 入口诊断/模式切换，不能交给官方 renderer 当作会话路由语义。
+const NON_RESTORABLE_ROUTE_QUERY_PARAMS = [
+  "__opencodex_renderer",
+  "full",
+  "mobile",
+  "probe",
+  "_probe",
+  "_deep",
+  "_tail",
+];
+
 // server.cjs 只负责编排 HTTP/WS 生命周期；官方 Electron hook 细节放在 official-runtime.cjs。
 function gatewayUrl(req) {
   // Node 原生 req.url 只有 path，需要补 host 才能安全解析 query 参数。
@@ -88,21 +99,57 @@ function isMobileTrafficRequest(req, url) {
 }
 
 function rendererOptionsForRequest(req, url) {
-  return { mobileTrafficMode: isMobileTrafficRequest(req, url) };
+  return {
+    initialRoute: initialRouteForRequest(url),
+    mobileTrafficMode: isMobileTrafficRequest(req, url),
+  };
+}
+
+function normalizeInitialThreadRoute(route) {
+  const text = typeof route === "string" ? route.trim() : "";
+  if (!text || text.startsWith("//")) return "";
+  try {
+    const base = "http://opencodex.local";
+    const parsed = new URL(text, base);
+    if (/^[a-z][a-z0-9+.-]*:/i.test(text) && parsed.origin !== base) return "";
+    for (const param of NON_RESTORABLE_ROUTE_QUERY_PARAMS) {
+      parsed.searchParams.delete(param);
+    }
+    const cleanRoute = `${parsed.pathname || "/"}${parsed.search || ""}${parsed.hash || ""}`;
+    // 只允许官方会话详情路由进入 initial-route，避免把诊断页或设置页写进 renderer 启动状态。
+    return /^\/(?:local|thread|conversation|remote)\/[^/?#]+/.test(cleanRoute) ? cleanRoute : "";
+  } catch {
+    return "";
+  }
+}
+
+function initialRouteForRequest(url) {
+  if (!url) return "";
+  const queryRoute = url.searchParams.get("route");
+  const route = queryRoute || `${url.pathname || "/"}${url.search || ""}${url.hash || ""}`;
+  return normalizeInitialThreadRoute(route);
 }
 
 function serveOfficialRendererOrShell(req, res, url, staticAssets) {
-  const requestAuth = AUTH_PASSWORD_HASH ? authResultForRequest(req, url) : null;
-  const canServeRenderer = !AUTH_PASSWORD_HASH || requestAuth.authenticated;
-  if (canServeRenderer) {
+  if (url.searchParams.get("__opencodex_renderer") === "1") {
+    // 壳页先完成认证、配置和 bridge 安装，再用保持原始 /local/:id 的地址切入官方 renderer。
     const html = staticAssets.createRendererResponse(rendererOptionsForRequest(req, url));
-    if (html) {
-      // 已认证或未启用密码时直接返回官方 renderer，绕开客户端 document.write 白屏路径。
-      return send(res, 200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }, html);
+    if (!html) {
+      return send(
+        res,
+        404,
+        { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+        "Official renderer bundle is not available yet."
+      );
     }
+    return send(res, 200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }, html);
   }
-  // 未认证时仍返回登录壳；登录成功后再进入受保护的官方 renderer。
-  return staticAssets.serveWebShellIndex(res, { mobileTrafficMode: isMobileHtmlRequest(req, url.pathname, url) });
+  // 页面入口保持 web-shell 壳页，让认证、运行时配置和 bridge polyfill 先稳定安装；
+  // 官方 renderer 只由壳页带内部 handoff 参数切入，避免直接首页启动时脚本顺序/CSP 退化。
+  return staticAssets.serveWebShellIndex(res, {
+    initialRoute: initialRouteForRequest(url),
+    mobileTrafficMode: isMobileHtmlRequest(req, url.pathname, url),
+  });
 }
 
 function remoteAddressFromRequest(req) {

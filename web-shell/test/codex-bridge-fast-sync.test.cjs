@@ -63,6 +63,53 @@ test("fast sync snapshot diagnostics are wired in the polyfill", () => {
   }
 });
 
+test("bridge exposes local thread catalog for official local conversation resume", () => {
+  const source = readPolyfillSource();
+  const catalogBody = sourceBetween(source, "function localThreadCatalogTimestamp", "/** 把 Electron/Codex bridge API");
+
+  // 官方 /local/:id 页面依赖 preload.localThreadCatalog 建立本地 thread 索引，再触发 maybe-resume-conversation。
+  assert.match(source, /target\.localThreadCatalog = localThreadCatalogService/);
+  assert.match(catalogBody, /local-thread-catalog-read/);
+  assert.match(catalogBody, /local-thread-catalog-startup-sync/);
+  assert.match(catalogBody, /local-thread-catalog-sync/);
+  assert.match(catalogBody, /local-thread-catalog-subscribe/);
+  assert.match(catalogBody, /return snapshot/);
+  assert.match(catalogBody, /return refresh\("startup"\)/);
+  assert.match(catalogBody, /return refresh\("sync"\)/);
+  assert.match(catalogBody, /fetch\(`\/api\/mobile\/bootstrap\?limit=200&catalog=1/);
+  assert.match(catalogBody, /hostId: "local"/);
+  assert.match(catalogBody, /displayTitle: title/);
+  assert.match(catalogBody, /sourceUpdatedAt/);
+  assert.match(catalogBody, /sourceCreatedAt/);
+  assert.match(catalogBody, /sourceKind: "local"/);
+});
+
+test("restored local thread routes drop one-shot diagnostic query params", () => {
+  const source = readPolyfillSource();
+  const normalizeBody = sourceBetween(source, "function normalizeRestorableRoute", "function isRestorableThreadRoute");
+  const paramsBlock = sourceBetween(source, "const OPENCODEX_NON_RESTORABLE_ROUTE_PARAMS", "function createBrowserClientId");
+
+  // full/probe 等参数只用于一次性调试或强制模式，不能污染下次打开的会话深链。
+  assert.match(source, /OPENCODEX_NON_RESTORABLE_ROUTE_PARAMS/);
+  for (const param of ["full", "mobile", "probe", "_probe", "_deep", "_tail", "__opencodex_renderer"]) {
+    assert.match(paramsBlock, new RegExp(JSON.stringify(param)));
+  }
+  assert.match(normalizeBody, /parsed\.searchParams\.delete\(param\)/);
+});
+
+test("active local thread changes update route without full page navigation", () => {
+  const source = readPolyfillSource();
+  const navigateBody = sourceBetween(source, "function navigateToLocalThreadRouteInPlace", "function preloadGatewaySnapshotFromNudge");
+  const activeChangeBody = sourceBetween(source, "function ensureRouteForActiveLocalThread", "function appHostThreadSeqStorageKey");
+
+  // 侧栏点击本身已经在官方 renderer 内切换会话；这里只同步地址栏和 popstate，避免重新冷启动。
+  assert.match(source, /function navigateToLocalThreadRouteInPlace/);
+  assert.match(navigateBody, /history\.pushState\(history\.state,\s*"",\s*route\)/);
+  assert.match(navigateBody, /dispatchOpenCodexRouteChange\(route,\s*"active-thread-change"\)/);
+  assert.match(activeChangeBody, /return navigateToLocalThreadRouteInPlace\(route, threadId\)/);
+  assert.doesNotMatch(activeChangeBody, /location\.href\s*=\s*route/);
+});
+
 test("gateway thread snapshot hits acknowledge the client cursor", () => {
   const source = readPolyfillSource();
   const gatewayBody = sourceBetween(source, "async function readGatewayFastSyncSnapshot", "async function invokeFastSyncSnapshot");
@@ -224,9 +271,10 @@ test("client diagnostics upload only flow events by default", () => {
   const source = readPolyfillSource();
   // 服务端默认只消费发送链路和传输选择诊断，普通诊断不上报可以避免进入会话时出现大量 /api/client-log。
   assert.match(source, /CLIENT_DIAGNOSTIC_UPLOAD_ENABLED/);
-  assert.match(source, /event === "fast-sync-flow"/);
-  assert.match(source, /event === "ws-transport-selected"/);
-  assert.match(source, /event === "ws-hello-ack"/);
+  assert.match(source, /eventName === "fast-sync-flow"/);
+  assert.match(source, /eventName === "ws-transport-selected"/);
+  assert.match(source, /eventName === "ws-hello-ack"/);
+  assert.match(source, /eventName\.startsWith\("local-thread-catalog-"\)/);
   assert.match(source, /shouldUploadClientDiagnostic\(event\)/);
 });
 
@@ -252,6 +300,16 @@ test("desktop disables official tail hydration gate in web statsig payload", () 
   assert.match(source, /OPENCODEX_DISABLED_STATSIG_GATES = \["4261455886"\]/);
   assert.match(source, /statsigPayload\.feature_gates\[gateName\] = disabledStatsigGateConfig\(gateName\)/);
   assert.match(source, /statsig-bootstrap-opencodex-patched/);
+});
+
+test("desktop enables official local thread resume gate in web statsig payload", () => {
+  const source = readPolyfillSource();
+  const fallbackBody = sourceBetween(source, "function buildStatsigInitializeResponse", "function isStatsigInitializeUrl");
+  // 官方旧本地对话详情页只有该 gate 开启时才会触发 maybe-resume-conversation 读取 turns。
+  assert.match(source, /OPENCODEX_ENABLED_STATSIG_GATES = \["567837310"\]/);
+  assert.match(source, /statsigPayload\.feature_gates\[gateName\] = enabledStatsigGateConfig\(gateName\)/);
+  assert.match(fallbackBody, /for \(const gateName of OPENCODEX_ENABLED_STATSIG_GATES\)[\s\S]*feature_gates\[gateName\] = enabledStatsigGateConfig\(gateName\)/);
+  assert.match(source, /enabledGates: OPENCODEX_ENABLED_STATSIG_GATES\.join\(","\)/);
 });
 
 test("desktop conversation entry auxiliary reads use browser read-only cache", () => {

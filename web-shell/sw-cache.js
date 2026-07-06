@@ -4,7 +4,7 @@
 //   activate: 接管页面，延迟 30s 后在后台低并发预缓存
 //   fetch:    静态资源 cache-first + 后台更新；HTML/API network-first
 
-const CACHE_NAME = "opencodex-static-v6";
+const CACHE_NAME = "opencodex-static-v7";
 const PRECACHE_MANIFEST_URL = "/api/precache-manifest";
 const PRECACHE_BUNDLE_URL = "/api/precache-bundle";
 const PRECACHE_DELAY_MS = 0;

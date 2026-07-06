@@ -31,6 +31,16 @@ const CODEX_TOOLTIP_DISMISS_GUARD_PATH = "/codex-tooltip-dismiss-guard.js";
 const FAVICON_PATH = "/favicon.ico";
 const PWA_MANIFEST_PATH = "/manifest.webmanifest";
 const WEB_SHELL_ASSETS_DIR = path.join(WEB_SHELL_DIR, "assets");
+// 壳页和 renderer 交接时允许短暂携带这些参数，但官方路由启动前必须擦掉，避免污染本地会话深链。
+const RENDERER_HANDOFF_CLEANUP_QUERY_PARAMS = [
+  "__opencodex_renderer",
+  "full",
+  "mobile",
+  "probe",
+  "_probe",
+  "_deep",
+  "_tail",
+];
 // 固定 web-shell 资源只在这里登记一次，白名单和文件映射共用同一份配置。
 const WEB_SHELL_STATIC_FILES = new Map([
   [FAVICON_PATH, path.join(WEB_SHELL_ASSETS_DIR, "icon.png")],
@@ -50,6 +60,7 @@ const WEB_SHELL_STATIC_FILES = new Map([
 function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   let hasWarnedHistoryPatchMiss = false;
   let hasWarnedTailHydrationPatchMiss = false;
+  let hasWarnedLocalThreadCatalogPatchMiss = false;
   // 旧版本曾经使用 /official-patched/；浏览器缓存的旧 chunk 可能还会懒加载这个前缀。
   const patchedOfficialPrefixes = Array.from(new Set([PATCHED_OFFICIAL_PREFIX, "/official-patched/"]));
 
@@ -113,8 +124,11 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     // 官方产物里的相对路径统一映射到 /official/，避免和 web-shell 自己的 /assets 冲突。
     html = html.replace(/(src|href)=["']\/(?!(?:official|assets)\/)([^"'#?]+)["']/g, '$1="/official/$2"');
     html = html.replace(/(src|href)=["']\.\/([^"'#?]+)["']/g, '$1="/official/$2"');
+    const initialRoute = typeof options.initialRoute === "string" ? options.initialRoute.trim() : "";
     const base = [
       '<base href="/official/">',
+      initialRoute ? `<meta name="initial-route" content="${escapeHtml(initialRoute)}">` : "",
+      createRendererHandoffCleanupScript(),
       `<link rel="manifest" href="${PWA_MANIFEST_PATH}">`,
       '<meta name="theme-color" content="#ffffff">',
       '<meta name="application-name" content="OpenCodex">',
@@ -142,6 +156,11 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       html = html.replace(/<head([^>]*)>/i, `<head$1>\n    ${base}`);
     }
     return patchOfficialHtmlForWeb(html);
+  }
+
+  function createRendererHandoffCleanupScript() {
+    const params = JSON.stringify(RENDERER_HANDOFF_CLEANUP_QUERY_PARAMS);
+    return `<script>(function(){try{var u=new URL(location.href),p=${params},changed=false;for(var i=0;i<p.length;i++){if(u.searchParams.has(p[i])){u.searchParams.delete(p[i]);changed=true}}if(changed){history.replaceState(history.state,"",u.pathname+u.search+u.hash)}}catch(e){}})();</script>`;
   }
 
   /** 给少量运行时 patch 过的官方 chunk 换路径命名空间，绕开浏览器 immutable 缓存。 */
@@ -176,13 +195,16 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     let html = patchOfficialCspForWeb(patchOfficialAssetUrls(rawHtml));
     // 注入 modulepreload 提示：仅预加载入口 chunk，避免洪泛 HTTP/2 连接
     // nginx proxy_cache 保证这些资源从服务器缓存秒回，浏览器 Cache-Control 保证二次访问命中
-    const preloadHints = `
-    <link rel="modulepreload" href="${PATCHED_OFFICIAL_PREFIX}assets/app-main-Dldh3K_n.js">
-    <link rel="modulepreload" href="${PATCHED_OFFICIAL_PREFIX}assets/app-shell-0b-x_r3Z.js">
-    <link rel="modulepreload" href="${PATCHED_OFFICIAL_PREFIX}assets/index-4bSY0Qgs.js">
-    <link rel="modulepreload" href="${PATCHED_OFFICIAL_PREFIX}assets/modulepreload-polyfill-Cf3xff8G.js">
-    <link rel="modulepreload" href="${PATCHED_OFFICIAL_PREFIX}assets/preload-helper-BmHspSiq.js">`;
-    html = html.replace("</head>", preloadHints + "\n  </head>");
+    // 入口 chunk 带 hash，不能写死文件名（官方 bundle 升级后 hash 会变导致 404 白屏），
+    // 只能按构建稳定前缀在当前缓存中查找真实存在的文件。
+    const preloadHints = ["app-main-", "app-shell-", "index-", "modulepreload-polyfill-", "preload-helper-"]
+      .map(locateOfficialScriptAssetHref)
+      .filter(Boolean)
+      .map((href) => `<link rel="modulepreload" href="${href}">`)
+      .join("\n    ");
+    if (preloadHints) {
+      html = html.replace("</head>", `    ${preloadHints}\n  </head>`);
+    }
     return html;
   }
 
@@ -217,6 +239,20 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     return fileName ? `/official/assets/${fileName}` : null;
   }
 
+  function locateOfficialScriptAssetHref(prefix) {
+    // 官方入口 JS 带 hash，bundle 升级后文件名会变；按稳定前缀查找当前缓存中的真实文件，
+    // 并走 patched 命名空间（与 patchOfficialAssetUrls 对 JS 的改写保持一致）。
+    const officialBundle = getOfficialBundle();
+    if (!officialBundle || !officialBundle.webviewDir) return null;
+    const assetsDir = path.join(officialBundle.webviewDir, "assets");
+    if (!exists(assetsDir)) return null;
+    const fileName = fs
+      .readdirSync(assetsDir)
+      .filter((entry) => entry.startsWith(prefix) && entry.endsWith(".js"))
+      .sort()[0];
+    return fileName ? `${PATCHED_OFFICIAL_PREFIX}assets/${fileName}` : null;
+  }
+
   function officialStyleLinks() {
     return ["app-main-", "app-shell-"]
       .map(locateOfficialStyleAssetHref)
@@ -246,6 +282,10 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       localeMode: i18n.mode || "",
       messages: i18n.messages,
     };
+    if (typeof options.initialRoute === "string" && options.initialRoute.trim()) {
+      // 官方 renderer 和 bridge 共用同一份深链信息，防止刷新 /local/:id 时首屏回到 home。
+      publicConfig.initialRoute = options.initialRoute.trim();
+    }
     if (options.mobileTrafficMode === true) {
       // 手机流量模式仍保留官方界面，只在前端运行时裁剪插件、预缓存和非关键状态。
       publicConfig.mobileTrafficMode = true;
@@ -278,10 +318,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   const pluginUrls = ${JSON.stringify(pluginUrls)};
   // loader 由 gateway 生成；刷新页面即可重新扫描 web-shell/plugins 下的插件目录。
   function loadPlugin(url) {
-    if (document.readyState === "loading") {
-      document.write('<script src="' + url + '"><\\/script>');
-      return;
-    }
+    // 插件入口可能在 shell -> 官方 renderer 交接时运行，不能用同步写文档的方式破坏当前页面。
     const script = document.createElement("script");
     script.src = url;
     script.async = false;
@@ -386,6 +423,60 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     return source.replace(tailHydrationGate, "false");
   }
 
+  /** 官方本地会话恢复 gate 必须开启，否则 /local/:id 不会挂载 resume 组件，也就不会发 thread/read。 */
+  function patchLocalThreadResumeGate(source) {
+    if (!source.includes("567837310")) return source;
+    // Statsig bootstrap 在不同官方版本里可能走不同 IPC/内联路径；这里在响应期直接钉住恢复 gate。
+    return source.replace(/\b[A-Za-z_$][\w$]*\((["'`])567837310\1\)/g, "true");
+  }
+
+  /** 官方本地会话页从 Electron preload 对象读取目录服务；浏览器桥需要回退到 window 上的 polyfill。 */
+  function patchLocalThreadCatalogBridgeFallback(source) {
+    if (!source.includes("localThreadCatalog")) return source;
+    if (source.includes("window.electronBridge?.localThreadCatalog")) return source;
+    // 负向后行断言排除前置标识符/成员访问字符，确保完整捕获压缩后的对象名（如 `$n`）。
+    // 旧写法用 `\b` 前缀会把 `$n.localThreadCatalog` 误拆成 `n`，替换后得到 `$(n...)`，
+    // 令官方 `$n` 变成函数调用，抛 `$ is not a function` 并崩到错误边界（白屏 Oops）。
+    const localThreadCatalogAccess = /(?<![\w$.?])([A-Za-z_$][\w$]*)\.localThreadCatalog\b/g;
+    if (!localThreadCatalogAccess.test(source)) {
+      if (!hasWarnedLocalThreadCatalogPatchMiss) {
+        hasWarnedLocalThreadCatalogPatchMiss = true;
+        console.warn("[gateway] local thread catalog bridge patch skipped: current bundle shape did not match");
+      }
+      return source;
+    }
+    return source.replace(
+      localThreadCatalogAccess,
+      (_match, objectName) =>
+        `(${objectName}.localThreadCatalog??window.electronBridge?.localThreadCatalog??window.codexBridge?.localThreadCatalog??window.electronAPI?.localThreadCatalog)`
+    );
+  }
+
+  /** 官方目录状态在 Web 桥下可能缺少 needs-resume 标记；本地会话页必须先触发 resume 才会拉正文。 */
+  function patchLocalConversationResumeTrigger(source) {
+    if (!source.includes("maybe-resume-conversation")) return source;
+    const marker = "function yS(e){let t=ht(oe),n=xr(),{activeMode:i}=Ua(e),{data:a}=k(Bn),o=a?.roots,c=Y(In,e);Y(s,e);";
+    let patched = source;
+    if (source.includes(marker)) {
+      patched = patched.replace(
+        marker,
+        "function yS(e){let t=ht(oe),n=xr(),{activeMode:i}=Ua(e),{data:a}=k(Bn),o=a?.roots,c=e!=null;Y(s,e);"
+      );
+    } else {
+      if (!source.includes("localConversation.loadingThread")) return source;
+      const localConversationResumeState =
+        /(function\s+yS\(e\)\{let\s+[A-Za-z_$][\w$]*=[^;]+,\s*[A-Za-z_$][\w$]*=[^;]+,\{activeMode:[A-Za-z_$][\w$]*\}=[^,]+,\{data:[A-Za-z_$][\w$]*\}=[^,]+,\s*[A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\?\.roots,\s*([A-Za-z_$][\w$]*)=)K\([A-Za-z_$][\w$]*,e\)(;K\([A-Za-z_$][\w$]*,e\);)/;
+      if (!localConversationResumeState.test(patched)) {
+        console.warn("[gateway] local conversation resume loader patch skipped: current bundle shape did not match");
+        return source;
+      }
+      patched = patched.replace(localConversationResumeState, "$1e!=null$3");
+    }
+    // 本地会话恢复只需要 conversationId/hostId/workspaceRoots；serviceTier 的账号侧计算在 Web 桥下可能卡住首屏。
+    patched = patched.replace(/serviceTier:await [A-Za-z_$][\w$]*\([^)]*\?\.settings\.model\?\?null\)/g, "serviceTier:null");
+    return patched;
+  }
+
   /** 对官方 chunk 做响应期 patch，不落盘改 vendor/官方构建产物。 */
   function patchOfficialAsset(reqPath, data) {
     if (!shouldPatchOfficialAsset(reqPath)) return data;
@@ -393,7 +484,10 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     const historyPatched = /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath)
       ? patchAppServerManagerSignalsChunk(source)
       : source;
-    const patched = patchTailHydrationGate(historyPatched);
+    const tailPatched = patchTailHydrationGate(historyPatched);
+    const resumePatched = patchLocalThreadResumeGate(tailPatched);
+    const catalogPatched = patchLocalThreadCatalogBridgeFallback(resumePatched);
+    const patched = patchLocalConversationResumeTrigger(catalogPatched);
     return Buffer.from(patched, "utf-8");
   }
 
