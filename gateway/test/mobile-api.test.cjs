@@ -1588,12 +1588,13 @@ test("web shell plugin loader avoids document.write during renderer handoff", ()
   }
 });
 
-test("web shell does not wait forever for service worker readiness on HTTPS entry", () => {
+test("web shell does not block renderer handoff on service worker readiness", () => {
   const html = fs.readFileSync(path.join(__dirname, "..", "..", "web-shell", "index.html"), "utf8");
-  // Tailscale HTTPS 首次访问可能还没有 active service worker；ready 只能短等，
-  // 否则手机首页会停在启动壳页，拖慢切入官方 renderer。
-  assert.match(html, /withTimeout\(navigator\.serviceWorker\.ready,\s*1000,\s*null\)/);
+  // Tailscale/弱网下 SW 只是缓存加速项；handoff 到官方 renderer 不能等待 ready 或 cache-status。
+  assert.match(html, /navigator\.serviceWorker\.ready\.catch\(\(\) => null\)/);
   assert.doesNotMatch(html, /const reg = await navigator\.serviceWorker\.ready/);
+  assert.doesNotMatch(html, /await\s+withTimeout\(navigator\.serviceWorker\.ready/);
+  assert.doesNotMatch(html, /await\s+new Promise\(\(resolve\).*cache-status/s);
 });
 
 test("patched official chunks rewrite statsig endpoints to local no-op routes", async () => {

@@ -839,43 +839,14 @@
         async function bootRenderer() {
           showBoot(t("web.auth.starting"));
           await clearUnavailableLastRouteBeforeRenderer();
-          // 短暂等待 SW 预缓存：命中缓存可加速冷启动，但弱网/DERP 下不能为了预缓存阻塞首屏。
-         // 缓存未就绪时继续加载 renderer，缺失资源仍会由 SW cache-first 按需补齐。
-        if ("serviceWorker" in navigator && location.protocol === "https:") {
-          try {
-            // 首次用 Tailscale HTTPS 域名打开时可能还没有 active SW；ready 本身必须很短，
-            // 否则入口页会永远停在“正在启动 OpenCodex...”而不会切到官方 renderer。
-            const reg = await withTimeout(navigator.serviceWorker.ready, 1000, null);
-            if (!reg || !reg.active) throw new Error("service worker not ready");
-            // 通过 MessageChannel 询问 SW 缓存是否就绪；最多等 1 秒，避免缓存构建拖住主界面。
-            await new Promise((resolve) => {
-              const channel = new MessageChannel();
-              const timer = setTimeout(() => resolve({ ready: false, reason: "timeout" }), 1000);
-              channel.port1.onmessage = (e) => {
-                clearTimeout(timer);
-                resolve(e.data);
-              };
-              reg.active.postMessage({ type: "cache-status" }, [channel.port2]);
-            });
-          } catch (e) {
-            console.warn("[sw-cache] 等待缓存就绪失败，直接加载", e);
+          // SW 预缓存只是加速项，不能阻塞真实 renderer 首屏；缺失资源会由浏览器按需请求并逐步缓存。
+          if ("serviceWorker" in navigator && location.protocol === "https:") {
+            navigator.serviceWorker.ready.catch(() => null);
           }
-         }
-         const rendererUrl = new URL(location.href);
-         // 保持 /local/:id 原路径切入官方 renderer；官方 router 依赖真实 pathname 触发会话正文读取。
-         rendererUrl.searchParams.set("__opencodex_renderer", "1");
-         const res = await fetch(rendererUrl, {
-            cache: "no-store",
-            credentials: "same-origin",
-            headers: authHeaders({ accept: "text/html" }),
-          });
-          if (res.status === 401) {
-            clearToken();
-            showLogin(t("web.auth.expired"));
-            return;
-          }
-          if (!res.ok) throw new Error(t("web.auth.loadFailedHttp", { status: res.status }));
-          // 官方 renderer 需要在自己的 HTML/bootstrap 顺序里安装 bridge；切换页面比 document.write 更稳定。
+          const rendererUrl = new URL(location.href);
+          // 保持 /local/:id 原路径切入官方 renderer；官方 router 依赖真实 pathname 触发会话正文读取。
+          rendererUrl.searchParams.set("__opencodex_renderer", "1");
+          // 认证状态已经在入口 authStatus/login 阶段确认；这里不再预取 renderer，避免弱网下多一次 HTML 往返。
           location.replace(`${rendererUrl.pathname}${rendererUrl.search}${rendererUrl.hash}`);
         }
 
