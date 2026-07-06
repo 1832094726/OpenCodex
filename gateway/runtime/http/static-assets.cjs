@@ -485,13 +485,24 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     return patched;
   }
 
+  /** 官方 Statsig/遥测外链在弱网会拖慢首屏；响应期改到同源 no-op 路由，避免等待外网超时。 */
+  function patchStatsigNetworkEndpoints(source) {
+    if (!/https:\/\/(?:ab\.chatgpt\.com|chatgpt\.com\/ces|statsigapi\.net)/.test(source)) return source;
+    // 官方代码会对部分 endpoint 执行 new URL(endpoint)，因此不能改成相对路径；在模板字符串里拼 location.origin 保持同源绝对 URL。
+    return source
+      .replace(/`https:\/\/ab\.chatgpt\.com/g, "`${location.origin}/api/noncritical/statsig")
+      .replace(/`https:\/\/chatgpt\.com\/ces/g, "`${location.origin}/api/noncritical/statsig/ces")
+      .replace(/`https:\/\/statsigapi\.net/g, "`${location.origin}/api/noncritical/statsig/statsigapi");
+  }
+
   /** 对官方 chunk 做响应期 patch，不落盘改 vendor/官方构建产物。 */
   function patchOfficialAsset(reqPath, data) {
     if (!shouldPatchOfficialAsset(reqPath)) return data;
     const source = data.toString("utf-8");
+    const statsigPatched = patchStatsigNetworkEndpoints(source);
     const historyPatched = /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath)
-      ? patchAppServerManagerSignalsChunk(source)
-      : source;
+      ? patchAppServerManagerSignalsChunk(statsigPatched)
+      : statsigPatched;
     const tailPatched = patchTailHydrationGate(historyPatched);
     const resumePatched = patchLocalThreadResumeGate(tailPatched);
     const catalogPatched = patchLocalThreadCatalogBridgeFallback(resumePatched);

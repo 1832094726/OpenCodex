@@ -1576,6 +1576,43 @@ test("web shell does not wait forever for service worker readiness on HTTPS entr
   assert.doesNotMatch(html, /const reg = await navigator\.serviceWorker\.ready/);
 });
 
+test("patched official chunks rewrite statsig endpoints to local no-op routes", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-official-statsig-endpoints-"));
+  try {
+    const chunk = path.join(tempRoot, "statsig-runtime.js");
+    fs.writeFileSync(
+      chunk,
+      [
+        // 官方 SDK 会把这些 endpoint 缓存在 chunk 作用域；响应期改写比运行时 monkey patch 更早生效。
+        "const api=`https://ab.chatgpt.com/v1`,exception=`https://ab.chatgpt.com/v1/sdk_exception`;",
+        "const logEvent=`https://chatgpt.com/ces/v1/rgstr`,sdkException=`https://statsigapi.net/v1/sdk_exception`;",
+      ].join(""),
+      "utf8"
+    );
+    const staticAssets = createStaticAssetService({
+      getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+      getOfficialBundle: () => null,
+    });
+
+    const response = await collectResponse(
+      (req, res) => staticAssets.serveFile(req, res, chunk, 200, `${PATCHED_OFFICIAL_PREFIX}assets/statsig-runtime.js`),
+      { headers: {}, method: "GET", socket: { remoteAddress: "127.0.0.1" }, url: "/asset.js" }
+    );
+
+    assert.equal(response.statusCode, 200);
+    assert.match(response.body, /`\$\{location\.origin\}\/api\/noncritical\/statsig\/v1`/);
+    assert.match(response.body, /`\$\{location\.origin\}\/api\/noncritical\/statsig\/v1\/sdk_exception`/);
+    assert.match(response.body, /`\$\{location\.origin\}\/api\/noncritical\/statsig\/ces\/v1\/rgstr`/);
+    assert.match(response.body, /`\$\{location\.origin\}\/api\/noncritical\/statsig\/statsigapi\/v1\/sdk_exception`/);
+    assert.doesNotMatch(response.body, /https:\/\/ab\.chatgpt\.com/);
+    assert.doesNotMatch(response.body, /https:\/\/chatgpt\.com\/ces/);
+    assert.doesNotMatch(response.body, /https:\/\/statsigapi\.net/);
+    assert.doesNotMatch(response.body, /const api=`\/api\/noncritical/);
+  } finally {
+    fs.rmSync(tempRoot, { force: true, recursive: true });
+  }
+});
+
 test("patched official chunks force-disable tail hydration gate", async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-official-tail-hydration-"));
   try {
@@ -1746,6 +1783,45 @@ test("request handler serves the web shell for app routes", async () => {
   assert.match(mobile.body, /shell mobile/);
   assert.equal(shellCalls[0].mobileTrafficMode, false);
   assert.equal(shellCalls[1].mobileTrafficMode, true);
+});
+
+test("request handler serves rewritten statsig telemetry locally", async () => {
+  const { createRequestHandler } = require("../runtime/server.cjs");
+  const staticAssets = {
+    createPrecacheBundle: () => assert.fail("statsig no-op should not touch precache"),
+    createPrecacheManifest: () => [],
+    createRendererResponse: () => assert.fail("statsig no-op should not render shell"),
+    isAppShellRoute: () => false,
+    isPublicStaticPath: () => false,
+    servePluginLoader: () => assert.fail("statsig no-op should not load plugins"),
+    serveWebShellIndex: () => assert.fail("statsig no-op should not serve web shell"),
+    staticFile: () => null,
+  };
+  const handler = createRequestHandler({
+    localFiles: {},
+    mobileApi: {},
+    pickedFiles: {},
+    staticAssets,
+  });
+
+  const initialize = await collectResponse(handler, {
+    headers: { host: "127.0.0.1:3737" },
+    method: "POST",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/api/noncritical/statsig/v1/initialize?stableID=test",
+  });
+  const rgstr = await collectResponse(handler, {
+    headers: { host: "127.0.0.1:3737" },
+    method: "POST",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/api/noncritical/statsig/ces/v1/rgstr?k=client",
+  });
+
+  assert.equal(initialize.statusCode, 200);
+  assert.equal(rgstr.statusCode, 200);
+  assert.equal(initialize.headers["cache-control"], "no-store");
+  assert.deepEqual(JSON.parse(initialize.body).feature_gates, {});
+  assert.deepEqual(JSON.parse(rgstr.body), {});
 });
 
 test("request handler serves official renderer for shell handoff routes", async () => {

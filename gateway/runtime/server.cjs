@@ -71,6 +71,7 @@ const NON_RESTORABLE_ROUTE_QUERY_PARAMS = [
   "_deep",
   "_tail",
 ];
+const NONCRITICAL_STATSIG_PREFIX = "/api/noncritical/statsig";
 
 // server.cjs 只负责编排 HTTP/WS 生命周期；官方 Electron hook 细节放在 official-runtime.cjs。
 function gatewayUrl(req) {
@@ -150,6 +151,59 @@ function serveOfficialRendererOrShell(req, res, url, staticAssets) {
     initialRoute: initialRouteForRequest(url),
     mobileTrafficMode: isMobileHtmlRequest(req, url.pathname, url),
   });
+}
+
+function nonCriticalStatsigBodyForPathname(pathname) {
+  const route = String(pathname || "")
+    .slice(NONCRITICAL_STATSIG_PREFIX.length)
+    .replace(/\/+$/, "");
+  if (route === "/v1/initialize") {
+    // Statsig 初始化只影响实验/遥测；给 SDK 一个完整空壳，避免它把本地短路当成网络错误。
+    return {
+      has_updates: false,
+      time: Date.now(),
+      feature_gates: {},
+      dynamic_configs: {},
+      layer_configs: {},
+      param_stores: {},
+      exposures: {},
+      sdk_flags: {},
+    };
+  }
+  if (
+    route === "/v1/rgstr" ||
+    route === "/v1/log_event" ||
+    route === "/v1/sdk_exception" ||
+    route === "/ces/v1/rgstr" ||
+    route === "/ces/v1/log_event" ||
+    route === "/statsigapi/v1/sdk_exception"
+  ) {
+    return {};
+  }
+  return null;
+}
+
+function handleNonCriticalStatsigRequest(req, res, pathname) {
+  if (!pathname.startsWith(`${NONCRITICAL_STATSIG_PREFIX}/`)) return false;
+  if (req.method === "OPTIONS") {
+    send(res, 204, { "cache-control": "no-store", allow: "GET, POST, HEAD, OPTIONS" }, "");
+    return true;
+  }
+  if (req.method !== "GET" && req.method !== "POST" && req.method !== "HEAD") {
+    sendJson(res, 405, { ok: false, error: "Method Not Allowed" }, { "cache-control": "no-store", allow: "GET, POST, HEAD, OPTIONS" });
+    return true;
+  }
+  const body = nonCriticalStatsigBodyForPathname(pathname);
+  if (body == null) {
+    sendJson(res, 404, { ok: false, error: "Not Found" }, { "cache-control": "no-store" });
+    return true;
+  }
+  if (req.method === "HEAD") {
+    send(res, 200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }, "");
+    return true;
+  }
+  sendJson(res, 200, body, { "cache-control": "no-store" });
+  return true;
 }
 
 function remoteAddressFromRequest(req) {
@@ -405,6 +459,7 @@ function createRequestHandler({ getWsHub = () => null, localFiles, mobileApi, pi
       }
       return sendJson(res, 200, buildGatewayStatus(), { "cache-control": "no-store" });
     }
+    if (handleNonCriticalStatsigRequest(req, res, pathname)) return;
 
     // 公开静态资源先返回，保证登录页和 web-shell polyfill 在未登录时也能加载。
     if (pathname === "/opencodex-plugin-loader.js" && req.method === "GET") {
