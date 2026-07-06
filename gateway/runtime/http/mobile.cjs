@@ -237,7 +237,11 @@ function localThreadFilesUnchanged(files) {
 }
 
 function localThreadListCacheKey(options = {}) {
-  return [path.resolve(options.codexHome || CODEX_HOME), Math.max(1, Math.min(Number(options.limit) || 50, 200))].join("|");
+  return [
+    path.resolve(options.codexHome || CODEX_HOME),
+    Math.max(1, Math.min(Number(options.limit) || 50, 200)),
+    firstString(options.includeThreadId),
+  ].join("|");
 }
 
 function cachedLocalThreadList(options = {}) {
@@ -608,6 +612,26 @@ function listLocalSessionThreads(options = {}) {
     }
     if (threads.length >= limit) break;
   }
+  const includeThreadId = firstString(options.includeThreadId);
+  if (includeThreadId && !threads.some((thread) => thread && thread.id === includeThreadId)) {
+    const includeMatch = findLocalSessionFile({
+      allowFullScan: options.includeAllowFullScan === true,
+      codexHome,
+      recentFileLimit: Math.max(limit * 6, Number(options.includeRecentFileLimit) || 0, MOBILE_THREAD_HTTP_RECENT_FILE_LIMIT),
+      threadId: includeThreadId,
+    });
+    const includedThread = includeMatch ? sessionThreadFromFile(includeMatch.filePath, includeMatch.archived) : null;
+    if (includedThread) {
+      // 手机 catalog 可以只下发少量最近会话，但直达 /local/:id 必须包含当前会话，官方 renderer 才能恢复正文。
+      rememberLocalSessionFile(includedThread.id, includeMatch);
+      try {
+        const stat = fs.statSync(includeMatch.filePath);
+        cachedFileStats.push({ filePath: includeMatch.filePath, mtimeMs: stat.mtimeMs, size: stat.size });
+      } catch {}
+      threads.unshift(includedThread);
+      while (threads.length > limit) threads.pop();
+    }
+  }
   // 手机弱网首屏宁可先返回已拿到的最近会话，也不要为了补全全部候选阻塞页面可交互。
   rememberLocalThreadList({ ...options, limit }, threads, cachedFileStats);
   return threads;
@@ -869,16 +893,29 @@ function createMobileBootstrapPayload(options = {}) {
   const snapshot = typeof options.readThreadListSnapshot === "function" ? options.readThreadListSnapshot() : null;
   const snapshotAgeMs = snapshot && Number(snapshot.capturedAtMs) > 0 ? Math.max(0, now() - Number(snapshot.capturedAtMs)) : null;
   const snapshotThreads = normalizeMobileThreads(snapshot ? snapshot.value : null, { limit: options.limit });
+  const includeThreadId = firstString(options.includeThreadId);
+  const needsLocalInclude =
+    includeThreadId &&
+    !snapshotThreads.some((thread) => thread && String(thread.id || "") === includeThreadId);
   const localThreads =
-    snapshotThreads.length === 0 && typeof options.listLocalThreads === "function"
+    (snapshotThreads.length === 0 || needsLocalInclude) && typeof options.listLocalThreads === "function"
       ? normalizeMobileThreads(options.listLocalThreads(), { limit: options.limit })
       : [];
+  let threads = snapshotThreads.length > 0 ? snapshotThreads : localThreads;
+  if (snapshotThreads.length > 0 && needsLocalInclude) {
+    const includedThread = localThreads.find((thread) => thread && String(thread.id || "") === includeThreadId);
+    if (includedThread) {
+      // 快照可能来自完整桌面 thread/list，但低流量入口指定的当前会话必须保留在手机 catalog 里。
+      threads = [includedThread, ...snapshotThreads.filter((thread) => thread && String(thread.id || "") !== includeThreadId)];
+      threads = threads.slice(0, Math.max(1, Math.min(Number(options.limit) || 50, 200)));
+    }
+  }
   const payload = {
     mode: "mobile-lite",
     ok: true,
     snapshotAgeMs,
     source: snapshotThreads.length > 0 ? snapshot.source || "snapshot" : localThreads.length > 0 ? "local-history" : "empty",
-    threads: snapshotThreads.length > 0 ? snapshotThreads : localThreads,
+    threads,
   };
   if (options.includeDeferredState === true) {
     // 默认不向手机传诊断态；需要排查时再显式打开，避免弱网首屏携带用不到的桌面状态说明。
@@ -928,10 +965,12 @@ function createMobileApi({ codexHome, fastSyncCache, invokeTurnStart, mobileRece
 
   async function handleBootstrap(req, res, url) {
     const limit = Number(url.searchParams.get("limit") || 50);
+    const includeThreadId = firstString(url.searchParams.get("includeThreadId"));
     const payload = await createMobileBootstrapPayload({
       includeDeferredState: url.searchParams.get("debugState") === "1",
+      includeThreadId,
       limit,
-      listLocalThreads: () => listLocalSessionThreads({ ...(codexHome ? { codexHome } : {}), limit }),
+      listLocalThreads: () => listLocalSessionThreads({ ...(codexHome ? { codexHome } : {}), includeThreadId, limit }),
       readThreadListSnapshot,
     });
     return sendMobilePayload(req, res, 200, payload);

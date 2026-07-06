@@ -781,6 +781,21 @@
           }
         }
 
+        function mobileThreadCatalogLimitBeforeRenderer() {
+          // 手机入口只需要少量目录用于恢复当前会话；完整桌面模式仍保留 200 条目录。
+          const configured = Number(runtimeConfig.mobileThreadCatalogLimit || 60);
+          return runtimeConfig.mobileTrafficMode ? Math.max(10, Math.min(200, configured || 60)) : 200;
+        }
+
+        function threadCatalogBootstrapUrlBeforeRenderer(threadId) {
+          const parsed = new URL("/api/mobile/bootstrap", location.origin);
+          parsed.searchParams.set("limit", String(mobileThreadCatalogLimitBeforeRenderer()));
+          parsed.searchParams.set("catalog", "1");
+          if (threadId) parsed.searchParams.set("includeThreadId", threadId);
+          parsed.searchParams.set("_", String(Date.now()));
+          return `${parsed.pathname}${parsed.search}`;
+        }
+
         function readArchivedThreadIdsBeforeRenderer() {
           try {
             const parsed = JSON.parse(localStorage.getItem(archivedThreadIdsKey) || "[]");
@@ -831,13 +846,15 @@
         async function readThreadCatalogBeforeRenderer() {
           const hasCurrentThreadRoute = !!threadIdFromRoute(currentThreadRouteBeforeRenderer());
           let hasLastThreadRoute = false;
+          let lastRouteThreadId = "";
           if (hasCurrentThreadRoute) {
             // 直达 /local/:id 的主目标是尽快切入官方 renderer；归档兜底只用本地缓存同步判断，不再阻塞 catalog 探测。
             return null;
           }
           if (!hasCurrentThreadRoute && coldHomeRouteBeforeRenderer()) {
             try {
-              hasLastThreadRoute = !!threadIdFromRoute(normalizeThreadRoute(localStorage.getItem(lastThreadRouteKey) || ""));
+              lastRouteThreadId = threadIdFromRoute(normalizeThreadRoute(localStorage.getItem(lastThreadRouteKey) || ""));
+              hasLastThreadRoute = !!lastRouteThreadId;
             } catch {}
           }
           if (!hasLastThreadRoute) return null;
@@ -845,7 +862,7 @@
           const timeoutMs = 1200;
           const catalog = await withTimeout(
             (async () => {
-              const res = await fetch(`/api/mobile/bootstrap?limit=200&catalog=1&_=${Date.now()}`, {
+              const res = await fetch(threadCatalogBootstrapUrlBeforeRenderer(lastRouteThreadId), {
                 cache: "no-store",
                 credentials: "same-origin",
                 headers: authHeaders({ accept: "application/json" }),

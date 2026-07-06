@@ -51,6 +51,7 @@
     20,
     Math.min(200, Number(cfg.auxiliaryFetchCacheMaxEntries || 80) || 80)
   );
+  const MOBILE_THREAD_CATALOG_LIMIT = Math.max(10, Math.min(200, Number(cfg.mobileThreadCatalogLimit || 60) || 60));
   const LOW_PRIORITY_IPC_CONCURRENCY = 2;
   const LOW_PRIORITY_IPC_LOG_EVERY = 25;
   const READ_ONLY_APP_SERVER_CACHE_TTL_MS = 15000;
@@ -611,6 +612,18 @@
       const match = String(route || "").match(/^\/(?:local|thread|conversation|remote)\/([^/?#]+)/);
       return match ? decodeURIComponent(match[1]) : "";
     }
+  }
+
+  function localThreadCatalogBootstrapUrl(threadId = "") {
+    const parsed = new URL("/api/mobile/bootstrap", location.origin);
+    // 手机端官方侧栏不需要 200 条目录；缩小 catalog 能减少 JSONL 元信息扫描和弱网传输量。
+    parsed.searchParams.set("limit", String(MOBILE_TRAFFIC_MODE ? MOBILE_THREAD_CATALOG_LIMIT : 200));
+    parsed.searchParams.set("catalog", "1");
+    const explicitThreadId = typeof threadId === "string" ? threadId.trim() : "";
+    const includeThreadId = explicitThreadId || threadIdFromRoute(currentRestorableRoute());
+    if (includeThreadId) parsed.searchParams.set("includeThreadId", includeThreadId);
+    parsed.searchParams.set("_", String(Date.now()));
+    return `${parsed.pathname}${parsed.search}`;
   }
 
   function readArchivedThreadIds() {
@@ -5057,7 +5070,7 @@
     }
 
     async function refresh(mode) {
-      const response = await fetch(`/api/mobile/bootstrap?limit=200&catalog=1&_=${Date.now()}`, {
+      const response = await fetch(localThreadCatalogBootstrapUrl(), {
         cache: "no-store",
         credentials: "same-origin",
       });

@@ -76,7 +76,11 @@ test("bridge exposes local thread catalog for official local conversation resume
   assert.match(catalogBody, /return snapshot/);
   assert.match(catalogBody, /return refresh\("startup"\)/);
   assert.match(catalogBody, /return refresh\("sync"\)/);
-  assert.match(catalogBody, /fetch\(`\/api\/mobile\/bootstrap\?limit=200&catalog=1/);
+  assert.match(source, /MOBILE_THREAD_CATALOG_LIMIT/);
+  assert.match(source, /function localThreadCatalogBootstrapUrl\(threadId = ""\)/);
+  assert.match(source, /parsed\.searchParams\.set\("limit", String\(MOBILE_TRAFFIC_MODE \? MOBILE_THREAD_CATALOG_LIMIT : 200\)\)/);
+  assert.match(source, /parsed\.searchParams\.set\("includeThreadId", includeThreadId\)/);
+  assert.match(catalogBody, /fetch\(localThreadCatalogBootstrapUrl\(\)/);
   assert.match(catalogBody, /hostId: "local"/);
   assert.match(catalogBody, /displayTitle: title/);
   assert.match(catalogBody, /sourceUpdatedAt/);
@@ -160,7 +164,12 @@ test("web shell clears unavailable last-route before renderer handoff", () => {
   assert.match(catalogBody, /return null/);
   assert.match(catalogBody, /if \(!hasLastThreadRoute\) return null/);
   assert.match(catalogBody, /const timeoutMs = 1200/);
-  assert.match(catalogBody, /\/api\/mobile\/bootstrap\?limit=200&catalog=1/);
+  assert.match(html, /function mobileThreadCatalogLimitBeforeRenderer/);
+  assert.match(html, /function threadCatalogBootstrapUrlBeforeRenderer\(threadId\)/);
+  assert.match(html, /parsed\.searchParams\.set\("limit", String\(mobileThreadCatalogLimitBeforeRenderer\(\)\)\)/);
+  assert.match(html, /parsed\.searchParams\.set\("includeThreadId", threadId\)/);
+  assert.match(catalogBody, /lastRouteThreadId = threadIdFromRoute/);
+  assert.match(catalogBody, /fetch\(threadCatalogBootstrapUrlBeforeRenderer\(lastRouteThreadId\)/);
   assert.match(lastRouteBody, /localStorage\.removeItem\(lastThreadRouteKey\)/);
   assert.match(lastRouteBody, /sessionStorage\.setItem\(skipLastRouteRestoreKey,\s*"1"\)/);
   assert.match(lastRouteBody, /if \(!coldHomeRouteBeforeRenderer\(\)\) return/);

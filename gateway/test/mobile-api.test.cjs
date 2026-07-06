@@ -213,6 +213,39 @@ test("createMobileBootstrapPayload uses cached thread list and records snapshot 
   assert.doesNotMatch(JSON.stringify(payload), /extraLargeField|large-state|unused-on-phone/);
 });
 
+test("createMobileBootstrapPayload preserves included thread when snapshot list omits it", async () => {
+  const payload = await createMobileBootstrapPayload({
+    includeThreadId: "thread-current",
+    limit: 2,
+    listLocalThreads: () => [
+      {
+        archived: false,
+        id: "thread-current",
+        projectPath: "/repo/current",
+        title: "当前手机深链会话",
+        updatedAt: "2026-06-30T08:00:00.000Z",
+      },
+    ],
+    readThreadListSnapshot: () => ({
+      capturedAtMs: 900,
+      source: "gateway-disk",
+      value: {
+        threads: [
+          {
+            id: "thread-newer",
+            projectPath: "/repo/newer",
+            title: "快照里的最近会话",
+            updatedAt: "2026-06-30T09:00:00.000Z",
+          },
+        ],
+      },
+    }),
+  });
+
+  assert.equal(payload.source, "gateway-disk");
+  assert.deepEqual(payload.threads.map((thread) => thread.id), ["thread-current", "thread-newer"]);
+});
+
 test("listLocalSessionThreads builds a phone-safe list from Codex jsonl history", () => {
   const root = tempDir();
   const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
@@ -258,6 +291,38 @@ test("listLocalSessionThreads builds a phone-safe list from Codex jsonl history"
       updatedAt: "2026-06-30T08:00:00.000Z",
     },
   ]);
+});
+
+test("listLocalSessionThreads includes requested deep link thread under a small mobile catalog limit", () => {
+  const root = tempDir();
+  const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const newestFile = path.join(sessionsDir, "rollout-2026-06-30T09-00-00-thread-newest.jsonl");
+  const includedFile = path.join(sessionsDir, "rollout-2026-06-30T08-00-00-thread-included.jsonl");
+  for (const [file, sessionId, message, at] of [
+    [newestFile, "thread-newest", "最新会话", "2026-06-30T09:00:00.000Z"],
+    [includedFile, "thread-included", "低 limit 也要保留当前会话", "2026-06-30T08:00:00.000Z"],
+  ]) {
+    fs.writeFileSync(
+      file,
+      [
+        JSON.stringify({ timestamp: at, type: "session_meta", payload: { cwd: `/repo/${sessionId}`, session_id: sessionId } }),
+        JSON.stringify({ type: "user_message", payload: { message } }),
+        "",
+      ].join("\n"),
+      "utf8"
+    );
+    fs.utimesSync(file, new Date(at), new Date(at));
+  }
+
+  const threads = listLocalSessionThreads({
+    cacheTtlMs: 0,
+    codexHome: root,
+    includeThreadId: "thread-included",
+    limit: 1,
+  });
+
+  assert.deepEqual(threads.map((thread) => thread.id), ["thread-included"]);
 });
 
 test("listLocalSessionThreads reuses a short cache for repeated mobile opens", () => {
