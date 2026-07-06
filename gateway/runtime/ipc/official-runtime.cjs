@@ -2829,12 +2829,28 @@ function nonCriticalFetchBodyForUrl(url) {
       };
     }
     if (
+      (parsed.hostname === "api.segment.io" && pathname.startsWith("/v1/")) ||
       (parsed.hostname === "chatgpt.com" && (pathname === "/ces/v1/rgstr" || pathname === "/ces/v1/log_event")) ||
       (parsed.hostname === "ab.chatgpt.com" && (pathname === "/v1/rgstr" || pathname === "/v1/log_event"))
     ) {
       return {};
     }
     if (pathname === "/beacons/home") return {};
+    if (pathname === "/inbox-items") {
+      // 首页侧栏通知只影响徽标和待办入口；启动期用空列表避免阻塞主会话渲染。
+      return {
+        items: [],
+        unreadRunCounts: {
+          total: 0,
+          automationIds: [],
+          unreadRuns: [],
+        },
+      };
+    }
+    if (pathname === "/list-automations") {
+      // 自动化列表会定期刷新，冷启动时先给空数组，避免手机首屏等待 app-server 慢查询。
+      return { items: [] };
+    }
     if (pathname === "/wham/tasks/list") {
       return {
         items: [],

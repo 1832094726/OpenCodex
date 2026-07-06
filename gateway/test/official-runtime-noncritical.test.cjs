@@ -56,6 +56,11 @@ test("non-critical statsig telemetry is short-circuited locally", () => {
   assert.match(nonCriticalBody, /chatgpt\.com/);
   assert.match(nonCriticalBody, /\/ces\/v1\/rgstr/);
   assert.match(nonCriticalBody, /\/ces\/v1\/log_event/);
+  assert.match(nonCriticalBody, /api\.segment\.io/);
+  assert.match(nonCriticalBody, /pathname\.startsWith\("\/v1\/"\)/);
+  assert.match(nonCriticalBody, /pathname === "\/inbox-items"/);
+  assert.match(nonCriticalBody, /unreadRunCounts/);
+  assert.match(nonCriticalBody, /pathname === "\/list-automations"/);
   assert.ok(
     invokeBody.indexOf("maybeHandleNonCriticalFetch") < invokeBody.indexOf("waitForOfficialBridgeReady"),
     "non-critical fetches should not wait for the hidden official bridge during cold startup"

@@ -177,7 +177,8 @@ function nonCriticalStatsigBodyForPathname(pathname) {
     route === "/ces/v1/rgstr" ||
     route === "/ces/v1/log_event" ||
     route === "/ces/v1/m" ||
-    route === "/statsigapi/v1/sdk_exception"
+    route === "/statsigapi/v1/sdk_exception" ||
+    route.startsWith("/segment/v1/")
   ) {
     return {};
   }

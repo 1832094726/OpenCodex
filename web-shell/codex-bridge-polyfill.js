@@ -5118,6 +5118,7 @@
       const parsed = new URL(url, location.href);
       const pathname = parsed.pathname.replace(/\/+$/, "");
       return (
+        (parsed.hostname === "api.segment.io" && pathname.startsWith("/v1/")) ||
         (parsed.hostname === "chatgpt.com" && (pathname === "/ces/v1/rgstr" || pathname === "/ces/v1/log_event")) ||
         (parsed.hostname === "ab.chatgpt.com" && pathname === "/v1/rgstr")
       );

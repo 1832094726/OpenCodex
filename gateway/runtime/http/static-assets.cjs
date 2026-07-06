@@ -169,8 +169,31 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   }
 
   function createEarlyTelemetryPatchScript() {
-    // 官方 Statsig SDK 可能在 bridge 大文件跑完前抓住 fetch；最早期就短路纯遥测，避免弱网 10s timeout 卡首屏。
-    return `<script>(function(){try{var w=window;if(w.__opencodexEarlyTelemetryPatched)return;w.__opencodexEarlyTelemetryPatched=true;function u(v){try{var p=new URL(v,location.href),x=p.pathname.replace(/\\/+$/,"");return p.hostname==="chatgpt.com"&&(x==="/ces/v1/rgstr"||x==="/ces/v1/log_event")||p.hostname==="ab.chatgpt.com"&&(x==="/v1/rgstr"||x==="/v1/log_event")}catch(e){return false}}function h(){return{"content-type":"application/json; charset=utf-8"}}if(typeof w.fetch==="function"&&!w.__opencodexEarlyFetchTelemetryPatched){var f=w.fetch.bind(w);w.fetch=function(i,n){var v=typeof i==="string"?i:i&&typeof i==="object"&&"url"in i?String(i.url||""):"";if(u(v))return Promise.resolve(new Response("{}",{status:200,headers:h()}));return f(i,n)};w.__opencodexEarlyFetchTelemetryPatched=true}if(typeof w.XMLHttpRequest==="function"&&!w.__opencodexEarlyXhrTelemetryPatched){var X=w.XMLHttpRequest;w.XMLHttpRequest=function(){var r=new X,t="",o=r.open,s=r.send;r.open=function(m,v){t=u(String(v||""))?String(v||""):"";if(t)return;return o.apply(r,arguments)};r.send=function(){if(!t)return s.apply(r,arguments);setTimeout(function(){try{Object.defineProperty(r,"readyState",{configurable:true,value:4});Object.defineProperty(r,"status",{configurable:true,value:200});Object.defineProperty(r,"responseText",{configurable:true,value:"{}"});Object.defineProperty(r,"response",{configurable:true,value:"{}"})}catch(e){}try{if(typeof r.onreadystatechange==="function")r.onreadystatechange(new Event("readystatechange"));r.dispatchEvent(new Event("readystatechange"));if(typeof r.onload==="function")r.onload(new Event("load"));r.dispatchEvent(new Event("load"));if(typeof r.onloadend==="function")r.onloadend(new Event("loadend"));r.dispatchEvent(new Event("loadend"))}catch(e){}},0)};return r};w.XMLHttpRequest.prototype=X.prototype;w.__opencodexEarlyXhrTelemetryPatched=true}}catch(e){}})();</script>`;
+    // 官方 Statsig/Segment SDK 可能在 bridge 大文件跑完前抓住 fetch；最早期就短路纯遥测，避免弱网 10s timeout 卡首屏。
+    const initializeBody = JSON.stringify({
+      has_updates: true,
+      time: Date.now(),
+      hash_used: "djb2",
+      feature_gates: {
+        // tail hydration 依赖缺失的 resume.initialTurnsPage，Web 桥下必须关闭。
+        "4261455886": { name: "4261455886", value: false, rule_id: "gateway_override", secondary_exposures: [] },
+        // local thread resume gate 必须打开，否则深链只显示标题和输入框。
+        "567837310": { name: "567837310", value: true, rule_id: "gateway_override", secondary_exposures: [] },
+      },
+      dynamic_configs: {},
+      layer_configs: {
+        "72216192": {
+          name: "72216192",
+          value: { enable_i18n: true, locale_source: "IDE" },
+          rule_id: "gateway_override",
+          secondary_exposures: [],
+        },
+      },
+      param_stores: {},
+      exposures: {},
+      sdk_flags: {},
+    });
+    return `<script>(function(){try{var w=window;if(w.__opencodexEarlyTelemetryPatched)return;w.__opencodexEarlyTelemetryPatched=true;var init=${initializeBody};function b(v){try{var p=new URL(v,location.href),x=p.pathname.replace(/\\/+$/,"");if(p.hostname==="api.segment.io"&&x.indexOf("/v1/")===0)return{};if(p.hostname==="ab.chatgpt.com"&&x==="/v1/initialize")return init;if(p.hostname==="chatgpt.com"&&(x==="/ces/v1/rgstr"||x==="/ces/v1/log_event"))return{};if(p.hostname==="ab.chatgpt.com"&&(x==="/v1/rgstr"||x==="/v1/log_event"))return{}}catch(e){}return null}function h(){return{"content-type":"application/json; charset=utf-8"}}function j(v){return JSON.stringify(v&&typeof v==="object"?v:{})}if(typeof w.fetch==="function"&&!w.__opencodexEarlyFetchTelemetryPatched){var f=w.fetch.bind(w);w.fetch=function(i,n){var v=typeof i==="string"?i:i&&typeof i==="object"&&"url"in i?String(i.url||""):"",r=b(v);if(r!==null)return Promise.resolve(new Response(j(r),{status:200,headers:h()}));return f(i,n)};w.__opencodexEarlyFetchTelemetryPatched=true}if(typeof w.XMLHttpRequest==="function"&&!w.__opencodexEarlyXhrTelemetryPatched){var X=w.XMLHttpRequest;w.XMLHttpRequest=function(){var r=new X,t=null,o=r.open,s=r.send;r.open=function(m,v){t=b(String(v||""));if(t!==null)return;return o.apply(r,arguments)};r.send=function(){if(t===null)return s.apply(r,arguments);setTimeout(function(){var v=j(t);try{Object.defineProperty(r,"readyState",{configurable:true,value:4});Object.defineProperty(r,"status",{configurable:true,value:200});Object.defineProperty(r,"responseText",{configurable:true,value:v});Object.defineProperty(r,"response",{configurable:true,value:v})}catch(e){}try{if(typeof r.onreadystatechange==="function")r.onreadystatechange(new Event("readystatechange"));r.dispatchEvent(new Event("readystatechange"));if(typeof r.onload==="function")r.onload(new Event("load"));r.dispatchEvent(new Event("load"));if(typeof r.onloadend==="function")r.onloadend(new Event("loadend"));r.dispatchEvent(new Event("loadend"))}catch(e){}},0)};return r};w.XMLHttpRequest.prototype=X.prototype;w.__opencodexEarlyXhrTelemetryPatched=true}}catch(e){}})();</script>`;
   }
 
   /** 给少量运行时 patch 过的官方 chunk 换路径命名空间，绕开浏览器 immutable 缓存。 */
@@ -491,12 +514,15 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
 
   /** 官方 Statsig/遥测外链在弱网会拖慢首屏；响应期改到同源 no-op 路由，避免等待外网超时。 */
   function patchStatsigNetworkEndpoints(source) {
-    if (!/https:\/\/(?:ab\.chatgpt\.com|chatgpt\.com\/ces|statsigapi\.net)/.test(source)) return source;
+    if (!/https:\/\/(?:ab\.chatgpt\.com|chatgpt\.com\/ces|statsigapi\.net|api\.segment\.io)|api\.segment\.io\/v1/.test(source)) return source;
     // 官方代码会对部分 endpoint 执行 new URL(endpoint)，因此不能改成相对路径；在模板字符串里拼 location.origin 保持同源绝对 URL。
     return source
       .replace(/`https:\/\/ab\.chatgpt\.com/g, "`${location.origin}/api/noncritical/statsig")
       .replace(/`https:\/\/chatgpt\.com\/ces/g, "`${location.origin}/api/noncritical/statsig/ces")
-      .replace(/`https:\/\/statsigapi\.net/g, "`${location.origin}/api/noncritical/statsig/statsigapi");
+      .replace(/`https:\/\/statsigapi\.net/g, "`${location.origin}/api/noncritical/statsig/statsigapi")
+      .replace(/`https:\/\/api\.segment\.io/g, "`${location.origin}/api/noncritical/statsig/segment")
+      .replace(/`api\.segment\.io\/v1`/g, "`${location.host}/api/noncritical/statsig/segment/v1`")
+      .replace(/([A-Za-z_$][\w$]*)=`\$\{this\.protocol\}:\/\/\$\{this\.host\}\/m`/g, "$1=`${location.origin}/api/noncritical/statsig/segment/v1/m`");
   }
 
   /** 对官方 chunk 做响应期 patch，不落盘改 vendor/官方构建产物。 */

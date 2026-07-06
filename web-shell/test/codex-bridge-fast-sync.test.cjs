@@ -370,6 +370,15 @@ test("desktop enables official local thread resume gate in web statsig payload",
   assert.match(source, /enabledGates: OPENCODEX_ENABLED_STATSIG_GATES\.join\(","\)/);
 });
 
+test("desktop short-circuits segment telemetry in the browser bridge", () => {
+  const source = readPolyfillSource();
+  const telemetryBody = sourceBetween(source, "function isTelemetryRegisterUrl", "// sentry-ipc://");
+
+  // Segment 只承载浏览器埋点；弱网下不能让它绕过 gateway 造成 CSP 报错或重试阻塞。
+  assert.match(telemetryBody, /api\.segment\.io/);
+  assert.match(telemetryBody, /pathname\.startsWith\("\/v1\/"\)/);
+});
+
 test("desktop conversation entry auxiliary reads use browser read-only cache", () => {
   const source = readPolyfillSource();
   const start = source.indexOf("const READ_ONLY_APP_SERVER_METHODS");

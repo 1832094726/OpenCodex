@@ -1549,8 +1549,12 @@ test("official renderer injects initial route for deep linked local threads", ()
     assert.match(html, /"probe"/);
     assert.match(html, /history\.replaceState/);
     assert.match(html, /__opencodexEarlyTelemetryPatched/);
+    assert.match(html, /\/v1\/initialize/);
+    assert.match(html, /4261455886/);
+    assert.match(html, /567837310/);
     assert.match(html, /\/v1\/rgstr/);
     assert.match(html, /\/ces\/v1\/log_event/);
+    assert.match(html, /api\.segment\.io/);
     assert.match(html, /XMLHttpRequest/);
     const csp = html.match(/Content-Security-Policy"\s+content="([^"]+)/)?.[1] || "";
     assert.doesNotMatch(csp, /connect-src[^;]*https:\/\/ab\.chatgpt\.com/);
@@ -1600,6 +1604,7 @@ test("patched official chunks rewrite statsig endpoints to local no-op routes", 
         // 官方 SDK 会把这些 endpoint 缓存在 chunk 作用域；响应期改写比运行时 monkey patch 更早生效。
         "const api=`https://ab.chatgpt.com/v1`,exception=`https://ab.chatgpt.com/v1/sdk_exception`;",
         "const logEvent=`https://chatgpt.com/ces/v1/rgstr`,sdkException=`https://statsigapi.net/v1/sdk_exception`;",
+        "const segmentTrack=`https://api.segment.io/v1/t`,segmentHost=`api.segment.io/v1`;function flush(){let n=`${this.protocol}://${this.host}/m`;return n}",
       ].join(""),
       "utf8"
     );
@@ -1618,9 +1623,13 @@ test("patched official chunks rewrite statsig endpoints to local no-op routes", 
     assert.match(response.body, /`\$\{location\.origin\}\/api\/noncritical\/statsig\/v1\/sdk_exception`/);
     assert.match(response.body, /`\$\{location\.origin\}\/api\/noncritical\/statsig\/ces\/v1\/rgstr`/);
     assert.match(response.body, /`\$\{location\.origin\}\/api\/noncritical\/statsig\/statsigapi\/v1\/sdk_exception`/);
+    assert.match(response.body, /`\$\{location\.origin\}\/api\/noncritical\/statsig\/segment\/v1\/t`/);
+    assert.match(response.body, /`\$\{location\.host\}\/api\/noncritical\/statsig\/segment\/v1`/);
+    assert.match(response.body, /`\$\{location\.origin\}\/api\/noncritical\/statsig\/segment\/v1\/m`/);
     assert.doesNotMatch(response.body, /https:\/\/ab\.chatgpt\.com/);
     assert.doesNotMatch(response.body, /https:\/\/chatgpt\.com\/ces/);
     assert.doesNotMatch(response.body, /https:\/\/statsigapi\.net/);
+    assert.doesNotMatch(response.body, /api\.segment\.io/);
     assert.doesNotMatch(response.body, /const api=`\/api\/noncritical/);
   } finally {
     fs.rmSync(tempRoot, { force: true, recursive: true });
@@ -1836,6 +1845,18 @@ test("request handler serves rewritten statsig telemetry locally", async () => {
     socket: { remoteAddress: "127.0.0.1" },
     url: "/api/noncritical/statsig/ces/v1/m",
   });
+  const segmentTrack = await collectResponse(handler, {
+    headers: { host: "127.0.0.1:3737" },
+    method: "POST",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/api/noncritical/statsig/segment/v1/t",
+  });
+  const segmentMetrics = await collectResponse(handler, {
+    headers: { host: "127.0.0.1:3737" },
+    method: "POST",
+    socket: { remoteAddress: "127.0.0.1" },
+    url: "/api/noncritical/statsig/segment/v1/m",
+  });
   const segmentSettings = await collectResponse(handler, {
     headers: { host: "127.0.0.1:3737" },
     method: "GET",
@@ -1846,11 +1867,15 @@ test("request handler serves rewritten statsig telemetry locally", async () => {
   assert.equal(initialize.statusCode, 200);
   assert.equal(rgstr.statusCode, 200);
   assert.equal(metrics.statusCode, 200);
+  assert.equal(segmentTrack.statusCode, 200);
+  assert.equal(segmentMetrics.statusCode, 200);
   assert.equal(segmentSettings.statusCode, 200);
   assert.equal(initialize.headers["cache-control"], "no-store");
   assert.deepEqual(JSON.parse(initialize.body).feature_gates, {});
   assert.deepEqual(JSON.parse(rgstr.body), {});
   assert.deepEqual(JSON.parse(metrics.body), {});
+  assert.deepEqual(JSON.parse(segmentTrack.body), {});
+  assert.deepEqual(JSON.parse(segmentMetrics.body), {});
   assert.deepEqual(JSON.parse(segmentSettings.body).integrations, {});
 });
 
