@@ -176,6 +176,8 @@ test("archived thread resume errors are cooled down with official response shape
 
 test("successful thread resume responses survive app-server exits when session file is unchanged", () => {
   const successShapeBody = officialRuntimeFunctionSource("hasExplicitThreadResumeSuccessPayload", "collectArchivedResumeErrorText");
+  const skipReasonBody = officialRuntimeFunctionSource("threadResumeSuccessCacheSkipReason", "threadResumePayloadShape");
+  const shapeBody = officialRuntimeFunctionSource("threadResumePayloadShape", "collectArchivedResumeErrorText");
   const successPayloadBody = officialRuntimeFunctionSource("isSuccessfulThreadResumePayload", "maybeServeTerminalThreadResumeError");
   const serveBody = officialRuntimeFunctionSource("maybeServeThreadResumeSuccessCache", "rememberTerminalThreadResumeError");
   const rememberBody = officialRuntimeFunctionSource("rememberThreadResumeSuccess", "maybeServeReadOnlyAppServerCache");
@@ -198,15 +200,26 @@ test("successful thread resume responses survive app-server exits when session f
   assert.match(successShapeBody, /payload\.responseType === "success"/);
   assert.match(successShapeBody, /payload\.type === "mcp-response"/);
   assert.match(successShapeBody, /Object\.prototype\.hasOwnProperty\.call\(payload\.message, "result"\)/);
+  assert.match(successShapeBody, /Object\.prototype\.hasOwnProperty\.call\(payload, "result"\)/);
   assert.match(successShapeBody, /!payload\.message\.error/);
+  assert.match(successShapeBody, /\["message", "response", "payload", "result", "data", "body", "value"\]/);
   assert.match(successShapeBody, /Array\.isArray\(payload\)/);
-  assert.match(successPayloadBody, /hasExplicitThreadResumeSuccessPayload\(payload\)/);
+  assert.match(skipReasonBody, /missing_payload/);
+  assert.match(skipReasonBody, /no_explicit_success_payload/);
+  assert.match(skipReasonBody, /archived_error/);
+  assert.match(shapeBody, /payloadType/);
+  assert.match(shapeBody, /responseType/);
+  assert.match(shapeBody, /keys/);
+  assert.match(shapeBody, /只记录包装层 key 和类型，不记录正文内容/);
+  assert.match(successPayloadBody, /threadResumeSuccessCacheSkipReason\(payload\)/);
   assert.match(serveBody, /thread_resume_success_cache_hit/);
   assert.match(serveBody, /validateThreadResumeSuccessCacheEntry\(cacheKey, entry\)/);
   assert.match(serveBody, /thread_resume_success_cache_invalidated/);
   assert.match(serveBody, /cloneWithReplacement/);
   assert.match(rememberBody, /thread_resume_success_cached/);
-  assert.match(rememberBody, /isSuccessfulThreadResumePayload\(payload\)/);
+  assert.match(rememberBody, /thread_resume_success_cache_skipped/);
+  assert.match(rememberBody, /threadResumePayloadShape\(payload\)/);
+  assert.match(rememberBody, /threadResumeSuccessCacheSkipReason\(payload\)/);
   assert.match(rememberBody, /findThreadResumeSessionFingerprint\(cacheKey\)/);
   assert.match(rememberBody, /sessionFingerprint && sessionFingerprint\.archived/);
   assert.match(rememberBody, /thread_resume_success_cache_skipped_archived_session/);

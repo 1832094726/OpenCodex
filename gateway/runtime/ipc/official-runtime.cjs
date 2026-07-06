@@ -2068,10 +2068,51 @@ function hasExplicitThreadResumeSuccessPayload(payload, depth = 0, seen = new We
     // 官方 MCP 回包没有 responseType；只把明确含 result 且不含 error 的最终回包视为 thread/resume 成功。
     return !payload.message.error && Object.prototype.hasOwnProperty.call(payload.message, "result");
   }
-  for (const key of ["response", "payload", "result", "data", "body", "value"]) {
+  if (payload.type === "mcp-response" && !payload.error && Object.prototype.hasOwnProperty.call(payload, "result")) return true;
+  for (const key of ["message", "response", "payload", "result", "data", "body", "value"]) {
     if (hasExplicitThreadResumeSuccessPayload(payload[key], depth + 1, seen)) return true;
   }
   return false;
+}
+
+function threadResumeSuccessCacheSkipReason(payload) {
+  if (!payload || typeof payload !== "object") return "missing_payload";
+  if (payload.error) return "error_payload";
+  if (Number(payload.status || 0) >= 400) return "bad_status";
+  if (typeof payload.responseType === "string" && payload.responseType !== "success") return "non_success_response_type";
+  if (!hasExplicitThreadResumeSuccessPayload(payload)) return "no_explicit_success_payload";
+  if (isArchivedThreadResumeError(payload)) return "archived_error";
+  return "";
+}
+
+function threadResumePayloadShape(value, depth = 0, seen = new WeakSet()) {
+  if (value == null) return String(value);
+  if (typeof value !== "object") return `${typeof value}${typeof value === "string" ? `(${value.length})` : ""}`;
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return {
+      type: "array",
+      length: value.length,
+      first: value.length > 0 ? threadResumePayloadShape(value[0], depth + 1, seen) : null,
+    };
+  }
+  const keys = Object.keys(value).sort().slice(0, 24);
+  const result = {
+    type: "object",
+    keys,
+  };
+  if (typeof value.type === "string") result.payloadType = value.type;
+  if (typeof value.responseType === "string") result.responseType = value.responseType;
+  if (depth >= 3) return result;
+  const childKeys = ["message", "response", "payload", "result", "data", "body", "value"];
+  for (const key of childKeys) {
+    if (value[key] && typeof value[key] === "object") {
+      // 只记录包装层 key 和类型，不记录正文内容；用于判断官方新版 response shape 是否变了。
+      result[key] = threadResumePayloadShape(value[key], depth + 1, seen);
+    }
+  }
+  return result;
 }
 
 function collectArchivedResumeErrorText(value, depth = 0, seen = new WeakSet()) {
@@ -2500,11 +2541,7 @@ function clearThreadResumeInFlight(reason) {
 }
 
 function isSuccessfulThreadResumePayload(payload) {
-  if (!payload || typeof payload !== "object") return false;
-  if (payload.error || Number(payload.status || 0) >= 400) return false;
-  if (typeof payload.responseType === "string" && payload.responseType !== "success") return false;
-  if (!hasExplicitThreadResumeSuccessPayload(payload)) return false;
-  return !isArchivedThreadResumeError(payload);
+  return !threadResumeSuccessCacheSkipReason(payload);
 }
 
 function maybeServeTerminalThreadResumeError(channel, invokeArgs, context, requestSummary) {
@@ -2641,7 +2678,16 @@ function rememberThreadResumeSuccess(channel, args, requestSummary, requestId) {
   if (requestSummary && requestSummary.resumeSuccessCacheHit) return;
   if (!requestId || !isThreadResumeMethod(requestSummary)) return;
   const payload = payloadFromArgs(args);
-  if (!isSuccessfulThreadResumePayload(payload)) return;
+  const skipReason = threadResumeSuccessCacheSkipReason(payload);
+  if (skipReason) {
+    diagnosticLog("official-runtime", "thread_resume_success_cache_skipped", {
+      payloadShape: threadResumePayloadShape(payload),
+      reason: skipReason,
+      requestId: shortId(requestId),
+      threadId: shortId(flowThreadIdFromPayload(requestSummary) || flowThreadIdFromPayload(payload)),
+    });
+    return;
+  }
   const cacheKey = threadResumeSuccessCacheKey(requestSummary, payload);
   if (!cacheKey) return;
   const cacheableArgs = cloneCacheableResponseArgs(args);
