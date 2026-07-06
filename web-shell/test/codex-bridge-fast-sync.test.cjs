@@ -84,6 +84,17 @@ test("bridge exposes local thread catalog for official local conversation resume
   assert.match(catalogBody, /sourceKind: "local"/);
 });
 
+test("local thread deep links prewarm the catalog before official delayed startup sync", () => {
+  const source = readPolyfillSource();
+  const prewarmBody = sourceBetween(source, "function prewarmLocalThreadCatalogForRoute", "/** 把 Electron/Codex bridge API");
+
+  // 官方 Provider 会延迟启动同步；深链直达时先拉本地目录，避免正文等固定 5 秒。
+  assert.match(prewarmBody, /\^\\\/local\\\/\[\^\/\?#\]\+/);
+  assert.match(prewarmBody, /local-thread-catalog-route-prewarm/);
+  assert.match(prewarmBody, /localThreadCatalogService\.requestStartupSync\(\)/);
+  assert.match(source, /prewarmLocalThreadCatalogForRoute\(\);/);
+});
+
 test("restored local thread routes drop one-shot diagnostic query params", () => {
   const source = readPolyfillSource();
   const normalizeBody = sourceBetween(source, "function normalizeRestorableRoute", "function isRestorableThreadRoute");
@@ -95,6 +106,19 @@ test("restored local thread routes drop one-shot diagnostic query params", () =>
     assert.match(paramsBlock, new RegExp(JSON.stringify(param)));
   }
   assert.match(normalizeBody, /parsed\.searchParams\.delete\(param\)/);
+});
+
+test("bridge client id is scoped to the current tab session", () => {
+  const source = readPolyfillSource();
+  const clientIdBody = sourceBetween(source, "function persistentPageClientId", "function routeRestorationEnabled");
+
+  // clientId 直接决定 gateway 定向回包；跨标签共享 localStorage 会把回包投到错误页面。
+  assert.match(source, /const OPENCODEX_CLIENT_ID_STORAGE_KEY = "opencodex_tab_client_id_v1"/);
+  assert.match(source, /const clientId = persistentPageClientId\(\)/);
+  assert.match(clientIdBody, /sessionStorage\.getItem\(OPENCODEX_CLIENT_ID_STORAGE_KEY\)/);
+  assert.match(clientIdBody, /sessionStorage\.setItem\(OPENCODEX_CLIENT_ID_STORAGE_KEY, next\)/);
+  assert.doesNotMatch(clientIdBody, /localStorage\.(?:getItem|setItem)\(OPENCODEX_CLIENT_ID_STORAGE_KEY/);
+  assert.match(source, /clientIdStable: "tab-session"/);
 });
 
 test("restored local thread routes skip archived catalog entries", () => {
@@ -232,7 +256,8 @@ test("thread detail gateway reads include thread id for middle-layer full-state 
   const invokeBody = sourceBetween(source, "async function invokeFastSyncSnapshot", "/** locale-info");
 
   // thread 详情没有 snapshotKey hint 时，也要让 gateway 能按 threadId 读取最新进程内全量状态。
-  assert.match(gatewayBody, /const threadId = diagnosticSummary && typeof diagnosticSummary\.threadId === "string" \? diagnosticSummary\.threadId : ""/);
+  assert.match(gatewayBody, /let threadId = ""/);
+  assert.match(gatewayBody, /threadId = diagnosticSummary && typeof diagnosticSummary\.threadId === "string" \? diagnosticSummary\.threadId : ""/);
   assert.match(gatewayBody, /if \(threadId && FAST_SYNC_MEMORY_SNAPSHOT_METHODS\.has\(method\)\) parsed\.searchParams\.set\("threadId", threadId\)/);
   assert.match(invokeBody, /threadId,/);
 });
@@ -290,6 +315,17 @@ test("fast sync snapshot reads have short miss timeouts", () => {
   assert.match(source, /FAST_SYNC_GATEWAY_READ_TIMEOUT_MS/);
   assert.match(source, /browser-read-timeout/);
   assert.match(source, /gateway-read-timeout/);
+});
+
+test("gateway fast sync hit keeps thread id in scope for acknowledgement", () => {
+  const source = readPolyfillSource();
+  const gatewayReadBody = sourceBetween(source, "async function readGatewayFastSyncSnapshot", "async function readGatewayFastSyncSnapshotByKey");
+
+  // gateway 快照命中后还要用 threadId 写 ack 和内存缓存；块级 const 会在命中路径抛 ReferenceError。
+  assert.match(gatewayReadBody, /let threadId = "";/);
+  assert.doesNotMatch(gatewayReadBody, /const threadId = diagnosticSummary/);
+  assert.match(gatewayReadBody, /acknowledgeFastSyncSnapshotHit\(method, ipcArgs, snapshot\)/);
+  assert.match(gatewayReadBody, /rememberGatewayKeySnapshot\(method, threadId, snapshot\)/);
 });
 
 test("mobile traffic mode keeps official shell while localizing noncritical app state", () => {

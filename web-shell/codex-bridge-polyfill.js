@@ -511,7 +511,7 @@
   };
   const OPENCODEX_DISABLED_STATSIG_GATES = ["4261455886"];
   const OPENCODEX_ENABLED_STATSIG_GATES = ["567837310"];
-  const OPENCODEX_CLIENT_ID_STORAGE_KEY = "opencodex_browser_client_id_v1";
+  const OPENCODEX_CLIENT_ID_STORAGE_KEY = "opencodex_tab_client_id_v1";
   const OPENCODEX_LAST_ROUTE_STORAGE_KEY = "opencodex_last_thread_route_v1";
   const OPENCODEX_ARCHIVED_THREAD_IDS_STORAGE_KEY = "opencodex_archived_thread_ids_v1";
   const OPENCODEX_APP_HOST_THREAD_SEQ_STORAGE_PREFIX = "opencodex_app_host_thread_seq_v1:";
@@ -529,12 +529,13 @@
     return w.crypto?.randomUUID?.() || `web-client-${Math.random().toString(36).slice(2)}`;
   }
 
-  function persistentBrowserClientId() {
+  function persistentPageClientId() {
     try {
-      const existing = String(localStorage.getItem(OPENCODEX_CLIENT_ID_STORAGE_KEY) || "").trim();
+      // clientId 是定向 IPC 回包的路由身份，必须按标签页隔离；否则多标签会互相抢回包。
+      const existing = String(sessionStorage.getItem(OPENCODEX_CLIENT_ID_STORAGE_KEY) || "").trim();
       if (existing && existing.length <= 160) return existing;
       const next = createBrowserClientId();
-      localStorage.setItem(OPENCODEX_CLIENT_ID_STORAGE_KEY, next);
+      sessionStorage.setItem(OPENCODEX_CLIENT_ID_STORAGE_KEY, next);
       return next;
     } catch {
       return createBrowserClientId();
@@ -672,7 +673,7 @@
     w.addEventListener("pagehide", persistCurrentRoute);
   }
 
-  const clientId = persistentBrowserClientId();
+  const clientId = persistentPageClientId();
   let ws = null;
   let wsReady = false;
   const wsReadyWaiters = new Set();
@@ -1581,7 +1582,7 @@
 
   clientDiagnostic("bridge-installed", {
     target: "codex-bridge-polyfill",
-    clientIdStable: true,
+    clientIdStable: "tab-session",
     restoredRoute: currentRestorableRoute(),
     wsState: websocketStateName(ws),
   });
@@ -3778,11 +3779,13 @@
     const controller = typeof AbortController === "function" ? new AbortController() : null;
     const timeoutMs = fastSyncTimeoutMs(FAST_SYNC_GATEWAY_READ_TIMEOUT_MS, 250);
     let abortTimer = null;
+    // threadId 后续还要用于快照水位确认和浏览器内存缓存，不能只活在 URL 构造的 try 块里。
+    let threadId = "";
     try {
       const parsed = new URL("/api/fast-sync/snapshot", location.origin);
       parsed.searchParams.set("method", method);
       parsed.searchParams.set("args", JSON.stringify(ipcArgs));
-      const threadId = diagnosticSummary && typeof diagnosticSummary.threadId === "string" ? diagnosticSummary.threadId : "";
+      threadId = diagnosticSummary && typeof diagnosticSummary.threadId === "string" ? diagnosticSummary.threadId : "";
       // thread 详情快照由 gateway 进程内维护；带上 threadId 才能在 args/key 不匹配时读取最新全量状态。
       if (threadId && FAST_SYNC_MEMORY_SNAPSHOT_METHODS.has(method)) parsed.searchParams.set("threadId", threadId);
       url = parsed.toString();
@@ -4822,6 +4825,18 @@
   }
 
   const localThreadCatalogService = createLocalThreadCatalogService();
+
+  function prewarmLocalThreadCatalogForRoute() {
+    const route = currentRestorableRoute();
+    if (!/^\/local\/[^/?#]+/.test(route)) return;
+    // 官方 LocalThreadCatalogProvider 默认延迟 5 秒再 requestStartupSync；深链直达时先预热，减少正文空等。
+    safeClientDiagnostic("local-thread-catalog-route-prewarm", {
+      route,
+    });
+    void localThreadCatalogService.requestStartupSync();
+  }
+
+  prewarmLocalThreadCatalogForRoute();
 
   /** 把 Electron/Codex bridge API 挂到多个官方可能访问的全局对象上。 */
   function attachBridge(target) {
