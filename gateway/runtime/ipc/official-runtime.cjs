@@ -102,6 +102,12 @@ const THREAD_RESUME_TERMINAL_ERROR_TTL_MS = Number(
 const THREAD_RESUME_SUCCESS_CACHE_TTL_MS = Number(
   process.env.OPENCODEX_THREAD_RESUME_SUCCESS_CACHE_TTL_MS || 5 * 60 * 1000
 );
+const THREAD_RESUME_SESSION_FINGERPRINT_RECENT_FILE_LIMIT = Math.max(
+  1,
+  Number(process.env.OPENCODEX_THREAD_RESUME_SESSION_FINGERPRINT_RECENT_FILE_LIMIT || 800)
+);
+const THREAD_RESUME_SESSION_FINGERPRINT_HEAD_BYTES = 64 * 1024;
+const THREAD_RESUME_SESSION_FINGERPRINT_HASH_BYTES = 16 * 1024;
 // 这些官方启动期 wham fetch 只影响账号菜单、用量提示和实验配置；缓存真实回包可避免弱网重复拖慢会话进入。
 const FETCH_RESPONSE_CACHEABLE_PATHS = new Set([
   "/wham/accounts/check",
@@ -129,6 +135,7 @@ const appServerReadOnlyCache = new Map();
 const fetchResponseCache = new Map();
 const threadResumeTerminalErrorCache = new Map();
 const threadResumeSuccessCache = new Map();
+const threadResumeSessionFileCache = new Map();
 const fastSyncCache = createFastSyncCache({
   dir: path.join(RUNTIME_DIR, "cache", "fast-sync"),
 });
@@ -138,6 +145,7 @@ let officialBundle = null;
 let wsHub = null;
 let codexRuntimeWatchers = [];
 let codexRuntimeRefreshTimer = null;
+let appServerChildEpoch = 0;
 const codexRuntimeRestartSignatures = new Map();
 
 const officialIpc = {
@@ -436,7 +444,7 @@ function trackHiddenAppServerChild(child, launcher) {
 
   function rememberExit(event, code, signal, error) {
     appServerSpawnHook.activeChildren.delete(child);
-    clearThreadResumeSuccessCache("app_server_child_exit");
+    appServerChildEpoch += 1;
     const pid = typeof child.pid === "number" ? child.pid : null;
     const expected = pid != null ? appServerSpawnHook.expectedTerminations.get(pid) : null;
     if (pid != null) appServerSpawnHook.expectedTerminations.delete(pid);
@@ -2033,6 +2041,176 @@ function threadResumeSuccessCacheKey(summary, payload) {
   return flowThreadIdFromPayload(summary) || flowThreadIdFromPayload(payload);
 }
 
+function firstNonEmptyString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function threadResumeSessionRoots(codexHome = CODEX_HOME) {
+  return [
+    { archived: false, dir: path.join(codexHome, "sessions") },
+    { archived: true, dir: path.join(codexHome, "archived_sessions") },
+  ];
+}
+
+function walkThreadResumeSessionFiles(root, files = [], options = {}) {
+  const maxFiles = Math.max(1, Number(options.maxFiles) || THREAD_RESUME_SESSION_FINGERPRINT_RECENT_FILE_LIMIT);
+  if (files.length >= maxFiles) return files;
+  let entries = [];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return files;
+  }
+  // Codex sessions 按日期目录和文件名递增；倒序优先命中新近会话，避免为了缓存指纹扫完整历史。
+  entries.sort((left, right) => right.name.localeCompare(left.name));
+  for (const entry of entries) {
+    if (files.length >= maxFiles) break;
+    const fullPath = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      walkThreadResumeSessionFiles(fullPath, files, options);
+    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      files.push(fullPath);
+    }
+  }
+  return files;
+}
+
+function readThreadResumeSessionHeadRecord(filePath) {
+  let fd = null;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const buffer = Buffer.alloc(THREAD_RESUME_SESSION_FINGERPRINT_HEAD_BYTES);
+    const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    const firstLine = buffer.subarray(0, bytesRead).toString("utf8").split(/\r?\n/, 1)[0] || "";
+    return firstLine ? JSON.parse(firstLine) : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd != null) {
+      try {
+        fs.closeSync(fd);
+      } catch {}
+    }
+  }
+}
+
+function matchThreadResumeSessionFile(threadId, root, filePath) {
+  if (!threadId || !filePath) return null;
+  if (path.basename(filePath, ".jsonl").endsWith(threadId)) {
+    return { archived: Boolean(root.archived), filePath };
+  }
+  const record = readThreadResumeSessionHeadRecord(filePath);
+  const payload = record && record.payload && typeof record.payload === "object" ? record.payload : {};
+  const sessionId = firstNonEmptyString(payload.session_id, payload.id);
+  return sessionId === threadId ? { archived: Boolean(root.archived), filePath } : null;
+}
+
+function rememberThreadResumeSessionFile(threadId, match) {
+  if (!threadId || !match || !match.filePath) return;
+  threadResumeSessionFileCache.set(threadId, {
+    archived: Boolean(match.archived),
+    filePath: match.filePath,
+  });
+}
+
+function threadResumeSessionContentHash(filePath, stat) {
+  if (!filePath || !stat || !Number.isFinite(stat.size)) return "";
+  let fd = null;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const hash = crypto.createHash("sha1");
+    const readSlice = (start, length) => {
+      if (length <= 0) return;
+      const buffer = Buffer.alloc(length);
+      const bytesRead = fs.readSync(fd, buffer, 0, length, start);
+      if (bytesRead > 0) hash.update(buffer.subarray(0, bytesRead));
+    };
+    const headLength = Math.min(stat.size, THREAD_RESUME_SESSION_FINGERPRINT_HASH_BYTES);
+    readSlice(0, headLength);
+    const tailStart = Math.max(headLength, stat.size - THREAD_RESUME_SESSION_FINGERPRINT_HASH_BYTES);
+    readSlice(tailStart, stat.size - tailStart);
+    return hash.digest("base64url");
+  } catch {
+    return "";
+  } finally {
+    if (fd != null) {
+      try {
+        fs.closeSync(fd);
+      } catch {}
+    }
+  }
+}
+
+function sessionFingerprintFromMatch(threadId, match) {
+  if (!threadId || !match || !match.filePath) return null;
+  try {
+    const stat = fs.statSync(match.filePath);
+    rememberThreadResumeSessionFile(threadId, match);
+    // 不落盘、不打印正文，只用头尾窗口 hash 区分“真实内容变化”和官方 resume 的 mtime touch。
+    const contentHash = threadResumeSessionContentHash(match.filePath, stat);
+    return {
+      archived: Boolean(match.archived),
+      contentHash,
+      filePath: path.resolve(match.filePath),
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+    };
+  } catch {
+    threadResumeSessionFileCache.delete(threadId);
+    return null;
+  }
+}
+
+function findThreadResumeSessionFingerprint(threadId) {
+  const id = firstNonEmptyString(threadId);
+  if (!id) return null;
+  const cached = threadResumeSessionFileCache.get(id);
+  const cachedFingerprint = sessionFingerprintFromMatch(id, cached);
+  if (cachedFingerprint) return cachedFingerprint;
+
+  for (const root of threadResumeSessionRoots()) {
+    for (const filePath of walkThreadResumeSessionFiles(root.dir, [], {
+      maxFiles: THREAD_RESUME_SESSION_FINGERPRINT_RECENT_FILE_LIMIT,
+    })) {
+      const match = matchThreadResumeSessionFile(id, root, filePath);
+      const fingerprint = sessionFingerprintFromMatch(id, match);
+      if (fingerprint) return fingerprint;
+    }
+  }
+  return null;
+}
+
+function validateThreadResumeSuccessCacheEntry(threadId, entry) {
+  if (!entry) return { ok: false, reason: "missing_entry" };
+  if (entry.expiresAtMs <= Date.now()) return { ok: false, reason: "expired" };
+  if (!entry.sessionFingerprint) {
+    // 无法定位 JSONL 时只允许同一 app-server 子进程生命周期内复用，避免重启后读到过期正文。
+    return entry.appServerChildEpoch === appServerChildEpoch
+      ? { ok: true, reason: "same_app_server_lifecycle" }
+      : { ok: false, reason: "missing_session_fingerprint" };
+  }
+  const current = sessionFingerprintFromMatch(threadId, entry.sessionFingerprint);
+  if (!current) return { ok: false, reason: "session_file_missing" };
+  if (
+    current.filePath !== entry.sessionFingerprint.filePath ||
+    current.archived !== entry.sessionFingerprint.archived ||
+    current.size !== entry.sessionFingerprint.size
+  ) {
+    return { ok: false, reason: "session_file_changed" };
+  }
+  if (current.contentHash && entry.sessionFingerprint.contentHash && current.contentHash !== entry.sessionFingerprint.contentHash) {
+    return { ok: false, reason: "session_file_changed" };
+  }
+  if (current.mtimeMs !== entry.sessionFingerprint.mtimeMs) {
+    entry.sessionFingerprint = current;
+    return { ok: true, reason: "session_file_touched" };
+  }
+  return { ok: true, reason: "session_fingerprint_match" };
+}
+
 function hasFreshTerminalThreadResumeError(threadId, nowMs = Date.now()) {
   const entry = threadId ? threadResumeTerminalErrorCache.get(threadId) : null;
   if (!entry) return false;
@@ -2088,13 +2266,20 @@ function maybeServeThreadResumeSuccessCache(channel, invokeArgs, context, reques
   if (!cacheKey) return false;
   const entry = threadResumeSuccessCache.get(cacheKey);
   if (!entry) return false;
-  if (entry.expiresAtMs <= Date.now()) {
+  const validation = validateThreadResumeSuccessCacheEntry(cacheKey, entry);
+  if (!validation.ok) {
     threadResumeSuccessCache.delete(cacheKey);
+    diagnosticLog("official-runtime", "thread_resume_success_cache_invalidated", {
+      reason: validation.reason,
+      requestId: shortId(requestId),
+      threadId: shortId(cacheKey),
+    });
     return false;
   }
   const responseArgs = cloneWithReplacement(entry.response.args, entry.response.requestId, requestId);
   requestSummary.resumeSuccessCacheHit = true;
   diagnosticLog("official-runtime", "thread_resume_success_cache_hit", {
+    reason: validation.reason,
     requestId: shortId(requestId),
     threadId: shortId(cacheKey),
   });
@@ -2133,15 +2318,19 @@ function rememberThreadResumeSuccess(channel, args, requestSummary, requestId) {
   if (!cacheKey) return;
   const cacheableArgs = cloneCacheableResponseArgs(args);
   if (!cacheableArgs) return;
+  const sessionFingerprint = findThreadResumeSessionFingerprint(cacheKey);
   threadResumeSuccessCache.set(cacheKey, {
+    appServerChildEpoch,
     expiresAtMs: Date.now() + THREAD_RESUME_SUCCESS_CACHE_TTL_MS,
     response: {
       args: cacheableArgs,
       channel,
       requestId,
     },
+    sessionFingerprint,
   });
   diagnosticLog("official-runtime", "thread_resume_success_cached", {
+    hasSessionFingerprint: !!sessionFingerprint,
     requestId: shortId(requestId),
     threadId: shortId(cacheKey),
   });
@@ -2770,7 +2959,7 @@ function routeOfficialWebContentsSend(channel, args) {
   rememberCacheableFetchResponse(channel, args, requestSummary, requestId);
   // 归档会话的 thread/resume 是终态错误；缓存真实错误回包，避免官方前端循环慢打 app-server。
   rememberTerminalThreadResumeError(channel, args, requestSummary, requestId);
-  // 同一 app-server 生命周期里复用真实成功 resume 回包，避免刷新/重连时再次出现长时间空白。
+  // 短期复用真实成功 resume 回包；跨 app-server 重启时必须先确认本地 session JSONL 指纹未变化。
   rememberThreadResumeSuccess(channel, args, requestSummary, requestId);
   // fast-sync 快照只记录 allowlist 的官方成功只读回包，供浏览器首屏独立读取。
   rememberFastSyncSnapshot(channel, args, requestSummary, valueFromFastSyncFetchResponsePayload(payload), {

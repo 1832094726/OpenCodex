@@ -109,24 +109,40 @@ test("archived thread resume errors are cooled down with official response shape
   );
 });
 
-test("successful thread resume responses are reused only within one app-server lifecycle", () => {
+test("successful thread resume responses survive app-server exits when session file is unchanged", () => {
   const serveBody = officialRuntimeFunctionSource("maybeServeThreadResumeSuccessCache", "rememberTerminalThreadResumeError");
   const rememberBody = officialRuntimeFunctionSource("rememberThreadResumeSuccess", "maybeServeReadOnlyAppServerCache");
   const invokeBody = officialRuntimeFunctionSource("invokeOfficialIpc", "connectOfficialAppHostPort");
   const routeBody = officialRuntimeFunctionSource("routeOfficialWebContentsSend", "shouldSuppressHiddenRendererSend");
   const childBody = officialRuntimeFunctionSource("trackHiddenAppServerChild", "redirectHiddenAppServerSpawn");
   const refreshBody = officialRuntimeFunctionSource("refreshHiddenOfficialRuntime", "codexRuntimeWatchPathFromFilename");
+  const validateBody = officialRuntimeFunctionSource("validateThreadResumeSuccessCacheEntry", "hasFreshTerminalThreadResumeError");
 
-  // 成功 resume 只在同一 app-server 生命周期内复用真实回包；进程变更后必须清空，避免伪造已恢复状态。
+  // 成功 resume 复用真实回包；app-server 子进程退出后也可复用，但必须由本地 JSONL 指纹保护。
   assert.match(source, /THREAD_RESUME_SUCCESS_CACHE_TTL_MS/);
+  assert.match(source, /THREAD_RESUME_SESSION_FINGERPRINT_RECENT_FILE_LIMIT/);
+  assert.match(source, /THREAD_RESUME_SESSION_FINGERPRINT_HASH_BYTES/);
   assert.match(source, /threadResumeSuccessCache/);
+  assert.match(source, /threadResumeSessionFileCache/);
   assert.match(source, /clearThreadResumeSuccessCache/);
   assert.match(serveBody, /thread_resume_success_cache_hit/);
+  assert.match(serveBody, /validateThreadResumeSuccessCacheEntry\(cacheKey, entry\)/);
+  assert.match(serveBody, /thread_resume_success_cache_invalidated/);
   assert.match(serveBody, /cloneWithReplacement/);
   assert.match(rememberBody, /thread_resume_success_cached/);
   assert.match(rememberBody, /isSuccessfulThreadResumePayload\(payload\)/);
+  assert.match(rememberBody, /findThreadResumeSessionFingerprint\(cacheKey\)/);
+  assert.match(rememberBody, /appServerChildEpoch/);
+  assert.match(rememberBody, /sessionFingerprint/);
   assert.match(routeBody, /rememberThreadResumeSuccess\(channel, args, requestSummary, requestId\)/);
-  assert.match(childBody, /clearThreadResumeSuccessCache\("app_server_child_exit"\)/);
+  assert.match(childBody, /appServerChildEpoch \+= 1/);
+  assert.doesNotMatch(childBody, /clearThreadResumeSuccessCache\("app_server_child_exit"\)/);
+  assert.match(validateBody, /same_app_server_lifecycle/);
+  assert.match(validateBody, /missing_session_fingerprint/);
+  assert.match(validateBody, /session_fingerprint_match/);
+  assert.match(validateBody, /session_file_touched/);
+  assert.match(validateBody, /contentHash/);
+  assert.match(validateBody, /session_file_changed/);
   assert.match(refreshBody, /clearThreadResumeSuccessCache\("official_runtime_refresh"\)/);
   assert.ok(
     invokeBody.indexOf("maybeServeTerminalThreadResumeError") < invokeBody.indexOf("maybeServeThreadResumeSuccessCache"),
