@@ -230,6 +230,7 @@ test("successful thread resume responses survive app-server exits when session f
   assert.doesNotMatch(childBody, /clearThreadResumeSuccessCache\("app_server_child_exit"\)/);
   assert.match(childBody, /clearThreadResumeInFlight\("app_server_child_exit"\)/);
   assert.match(validateBody, /same_app_server_lifecycle/);
+  assert.match(validateBody, /same_app_server_lifecycle_session_changed/);
   assert.match(validateBody, /missing_session_fingerprint/);
   assert.match(validateBody, /session_fingerprint_match/);
   assert.match(validateBody, /session_file_touched/);

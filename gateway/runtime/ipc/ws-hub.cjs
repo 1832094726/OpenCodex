@@ -1806,8 +1806,6 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     ws.__codexWebClientId = clientId;
     clientsById.set(clientId, ws);
     joinSocketIoClientRoom(ws, clientId);
-    flushPendingTargetMessages(ws, clientId);
-    flushOrphanTargetResponses(ws, clientId);
     recordFlowEvent({
       clientId,
       hint: "浏览器连接已确认 clientId，可以接收定向回包",
@@ -1838,6 +1836,9 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
         error: error instanceof Error ? error.message : String(error),
       });
     }
+    // 重连补发必须排在 hello-ack 之后；前端收到 ack 才会标记 WS ready 并恢复 app-host/IPC 队列。
+    flushPendingTargetMessages(ws, clientId);
+    flushOrphanTargetResponses(ws, clientId);
   }
 
   function parseClientFrame(raw) {

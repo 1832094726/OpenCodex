@@ -2452,6 +2452,21 @@ function validateThreadResumeSuccessCacheEntry(threadId, entry) {
   ) {
     return { ok: false, reason: "session_file_changed" };
   }
+  if (entry.appServerChildEpoch === appServerChildEpoch) {
+    const sameLifecycleChanged =
+      current.size !== entry.sessionFingerprint.size ||
+      current.mtimeMs !== entry.sessionFingerprint.mtimeMs ||
+      (current.contentHash && entry.sessionFingerprint.contentHash && current.contentHash !== entry.sessionFingerprint.contentHash) ||
+      (current.visibleSignature &&
+        entry.sessionFingerprint.visibleSignature &&
+        current.visibleSignature !== entry.sessionFingerprint.visibleSignature);
+    if (sameLifecycleChanged) {
+      // 同一隐藏 app-server 子进程已经成功接过这个 session；文件继续增长通常只是当前对话在写入。
+      // 远程 Web/手机重复进入时复用成功回包，正文由 thread/read/app-host 增量刷新兜底。
+      entry.sessionFingerprint = current;
+      return { ok: true, reason: "same_app_server_lifecycle_session_changed" };
+    }
+  }
   if (current.visibleSignature && entry.sessionFingerprint.visibleSignature) {
     if (current.visibleSignature !== entry.sessionFingerprint.visibleSignature) {
       return { ok: false, reason: "session_visible_messages_changed" };

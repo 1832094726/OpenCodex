@@ -1053,6 +1053,39 @@ test("socket.io transport accepts the existing gateway json protocol", async () 
   }
 });
 
+test("target reconnect replay is delivered after hello acknowledgement", async () => {
+  const { createWsHub } = require("../runtime/ipc/ws-hub.cjs");
+  const server = http.createServer((req, res) => {
+    res.writeHead(404);
+    res.end();
+  });
+  const hub = createWsHub(server, {
+    createAppHostRelay() {
+      throw new Error("not used");
+    },
+    isAuthed: () => true,
+  });
+  const address = await listen(server);
+  const clientId = "client-replay-order";
+  let ws = null;
+
+  try {
+    // 页面短暂离线时，官方回包会先暂存；重连后必须先让前端拿到 hello-ack 再补发回包。
+    assert.equal(hub.sendTo(clientId, { type: "queued-target-reply", value: 1 }), false);
+    ws = new WebSocket(`ws://127.0.0.1:${address.port}/ws`);
+    await once(ws, "open");
+    const messagesPromise = wsMessages(ws, () => true, 2);
+    ws.send(JSON.stringify({ type: "hello", clientId }));
+    const messages = await messagesPromise;
+    assert.equal(messages[0].type, "hello-ack");
+    assert.equal(messages[0].clientId, clientId);
+    assert.deepEqual(messages[1], { type: "queued-target-reply", value: 1 });
+  } finally {
+    if (ws) ws.close();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("socket.io thread rooms target active thread clients while raw websocket remains a fallback", async () => {
   const { createWsHub } = require("../runtime/ipc/ws-hub.cjs");
   const server = http.createServer((req, res) => {
