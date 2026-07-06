@@ -37,6 +37,7 @@
   const LOW_PRIORITY_IPC_CONCURRENCY = 2;
   const LOW_PRIORITY_IPC_LOG_EVERY = 25;
   const READ_ONLY_APP_SERVER_CACHE_TTL_MS = 15000;
+  const CONVERSATION_ENTRY_HTTP_FIRST_WINDOW_MS = 15000;
   const FAST_SYNC_BROWSER_READ_TIMEOUT_MS = Number(cfg.fastSyncBrowserReadTimeoutMs || 120);
   const FAST_SYNC_GATEWAY_READ_TIMEOUT_MS = Number(cfg.fastSyncGatewayReadTimeoutMs || 250);
   const FAST_SYNC_GATEWAY_KEY_SNAPSHOT_TTL_MS = Number(cfg.fastSyncGatewayKeySnapshotTtlMs || 5000);
@@ -3385,6 +3386,23 @@
     "thread/list",
   ]);
   const FAST_SYNC_MEMORY_SNAPSHOT_METHODS = new Set(["thread/read", "thread/turns/list"]);
+  const CONVERSATION_ENTRY_HTTP_FIRST_METHODS = new Set([
+    "config/read",
+    "configRequirements/read",
+    "mcpServerStatus/list",
+    "permissionProfile/list",
+    "thread/goal/get",
+  ]);
+  const CONVERSATION_ENTRY_HTTP_FIRST_TYPES = new Set([
+    "electron-app-state-snapshot-trigger",
+    "heartbeat-automation-thread-state-changed",
+    "local-thread-activity-changed",
+    "shared-object-subscribe",
+    "thread-stream-state-changed",
+    "tray-menu-threads-changed",
+    "update-diff-if-open",
+    "worker-request",
+  ]);
 
   /** 提取官方 app-server 只读方法名；这些方法多次并发调用时结果可短时间复用。 */
   function readOnlyAppServerMethod(payload) {
@@ -3420,6 +3438,21 @@
     if (!MOBILE_TRAFFIC_MODE || !MOBILE_TRAFFIC_LOCAL_METHODS.has(method)) return null;
     // 手机官方壳首屏保留会话与输入体验；插件/MCP 管理类状态在手机弱网下本地空响应，避免阻塞 app-server。
     return [];
+  }
+
+  function isConversationEntryWindow() {
+    if (!isRestorableThreadRoute(currentRestorableRoute())) return false;
+    return Date.now() - bridgeStartedAtMs <= CONVERSATION_ENTRY_HTTP_FIRST_WINDOW_MS;
+  }
+
+  function shouldPreferHttpForConversationEntry(payload) {
+    if (!isConversationEntryWindow() || !payload || typeof payload !== "object") return false;
+    const method = appServerMethod(payload);
+    if (method === "thread/read" || method === "thread/turns/list" || method === "turn/start") return false;
+    if (method && CONVERSATION_ENTRY_HTTP_FIRST_METHODS.has(method)) return true;
+    const type = typeof payload.type === "string" ? payload.type : "";
+    // 会话入口期这些都是辅助同步/worker 状态；HTTP 独立请求比半开 WS 更快失败和恢复，不应拖住正文挂载。
+    return CONVERSATION_ENTRY_HTTP_FIRST_TYPES.has(type);
   }
 
   function hasThreadStartUserContent(value, depth = 0, seen = new WeakSet()) {
@@ -4163,21 +4196,25 @@
   }
   // ─── WS IPC 通道结束 ────────────────────────────────────────────
 
-  async function invokeGatewayImmediate(channel, ipcArgs, payload) {
+  async function invokeGatewayImmediate(channel, ipcArgs, payload, options = {}) {
     // HTTP fallback 也在序列化前兜底，保持与 WS 通道一致。
     normalizeStatsigBootstrapArgs(ipcArgs);
     normalizeStatsigBootstrapRequest(payload);
     const diagnosticSummary = ipcDiagnosticSummary(channel, payload);
     const invokeStartedAtMs = Date.now();
     const suppressRoutineDiagnostic = shouldSuppressRoutineIpcDiagnostic(payload);
+    const preferHttp =
+      options.preferHttp === true ||
+      (shouldWaitForWsBeforeInvoke(channel) && shouldPreferHttpForConversationEntry(payload));
     if (!suppressRoutineDiagnostic) {
       clientDiagnostic("ipc-invoke-start", {
         ...diagnosticSummary,
+        preferHttp,
         wsReady,
         wsState: websocketStateName(ws),
       });
     }
-    if (shouldWaitForWsBeforeInvoke(channel) && !wsFirstConnectDone) {
+    if (shouldWaitForWsBeforeInvoke(channel) && !wsFirstConnectDone && !preferHttp) {
       // 整个页面生命周期只阻塞一次 WS 等待：首次 message-from-view IPC 等握手，
       // 超时后 wsFirstConnectDone 置 true，后续不再阻塞，直接走 canUseWsForIpc 判断。
       const waitStartedAtMs = Date.now();
@@ -4203,7 +4240,7 @@
   // WS 已就绪则直接复用（省掉每次 IPC 的 HTTP RTT）。
   // wsFirstConnectDone 确保整个页面生命周期只阻塞等待一次 WS 握手：
   // 如果首次等待超时（网络差/DERP 中继慢），后续 IPC 全部走 HTTP，不再重复阻塞。
-   if (canUseWsForIpc()) {
+   if (canUseWsForIpc() && !preferHttp) {
       try {
         const wsValue = await invokeViaWs(channel, ipcArgs, diagnosticSummary);
         if (!suppressRoutineDiagnostic) {

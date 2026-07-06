@@ -436,6 +436,24 @@ test("desktop conversation entry auxiliary reads use browser read-only cache", (
   }
 });
 
+test("conversation entry auxiliary ipc prefers http while critical thread reads stay live", () => {
+  const source = readPolyfillSource();
+  const policyBody = sourceBetween(source, "function shouldPreferHttpForConversationEntry", "function hasThreadStartUserContent");
+  const invokeBody = sourceBetween(source, "async function invokeGatewayImmediate", "/** 模拟 Electron ipcRenderer.invoke");
+
+  // 进入历史会话前几秒，配置/权限/worker 等辅助 IPC 不能被半开 WS 卡住；正文读取和发送仍保持实时链路。
+  assert.match(source, /CONVERSATION_ENTRY_HTTP_FIRST_WINDOW_MS = 15000/);
+  assert.match(policyBody, /CONVERSATION_ENTRY_HTTP_FIRST_METHODS/);
+  assert.match(policyBody, /CONVERSATION_ENTRY_HTTP_FIRST_TYPES/);
+  assert.match(policyBody, /method === "thread\/read"/);
+  assert.match(policyBody, /method === "thread\/turns\/list"/);
+  assert.match(policyBody, /method === "turn\/start"/);
+  assert.match(invokeBody, /const preferHttp =/);
+  assert.match(invokeBody, /shouldPreferHttpForConversationEntry\(payload\)/);
+  assert.match(invokeBody, /!wsFirstConnectDone && !preferHttp/);
+  assert.match(invokeBody, /canUseWsForIpc\(\) && !preferHttp/);
+});
+
 test("token usage inline waits until conversation entry is idle", () => {
   const source = fs.readFileSync(path.join(repoRoot, "web-shell/plugins/token-usage-inline/index.js"), "utf8");
   // token 用量 badge 是辅助信息，必须晚于会话正文加载，避免抢占 thread/resume 和 turns/list。
