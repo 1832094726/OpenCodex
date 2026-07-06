@@ -145,6 +145,20 @@ function renderPluginDirs(pluginDirs) {
   input.value = pluginDirs || "";
 }
 
+function renderPreventSleep(preventSleep) {
+  const input = $("preventSleepInput");
+  if (!input) return;
+  // 防睡眠开关只反映 launcher 持久化设置，真实系统能力由主进程同步。
+  input.checked = !!preventSleep;
+}
+
+function renderOfficialAutoScanUpgrade(officialAutoScanUpgrade) {
+  const input = $("officialAutoScanUpgradeInput");
+  if (!input) return;
+  // 旧版设置没有该字段时按默认开启展示，保持升级前后的启动行为一致。
+  input.checked = officialAutoScanUpgrade !== false;
+}
+
 function renderUrls(state) {
   const urls = state.urls || {};
   const primary = urls.primary || state.url || "";
@@ -201,6 +215,8 @@ function render(state) {
   renderHostMode(settings.hostMode);
   renderPort(settings.port || state.port);
   renderPluginDirs(settings.pluginDirs);
+  renderPreventSleep(settings.preventSleep);
+  renderOfficialAutoScanUpgrade(settings.officialAutoScanUpgrade);
   renderExternalPluginStatus(state.externalPlugins);
 
   // launcher 自身版本固定展示在左上角品牌区，避免占用设置列表空间。
@@ -334,11 +350,32 @@ document.addEventListener("keydown", async (event) => {
 
 document.addEventListener("change", async (event) => {
   const target = event.target;
-  if (!target || target.name !== "hostMode") return;
-  const hostMode = selectedHostMode();
-  pendingHostMode = hostMode;
-  renderHostMode(hostMode);
-  render(await launcher.updateHostMode(hostMode));
+  if (!target) return;
+  if (target.name === "hostMode") {
+    const hostMode = selectedHostMode();
+    pendingHostMode = hostMode;
+    renderHostMode(hostMode);
+    render(await launcher.updateHostMode(hostMode));
+    return;
+  }
+  if (target.id === "preventSleepInput") {
+    target.disabled = true;
+    try {
+      render(await launcher.updatePreventSleep(target.checked));
+    } finally {
+      target.disabled = false;
+    }
+    return;
+  }
+  if (target.id === "officialAutoScanUpgradeInput") {
+    target.disabled = true;
+    try {
+      render(await launcher.updateOfficialAutoScanUpgrade(target.checked));
+    } finally {
+      target.disabled = false;
+    }
+    return;
+  }
 });
 
 launcher.onState(render);

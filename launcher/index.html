@@ -97,6 +97,34 @@
               </div>
             </div>
 
+            <!-- 防睡眠能力由 launcher 主进程持有，开关只负责切换持久化设置。 -->
+            <div class="setting-item">
+              <div class="setting-info">
+                <div class="setting-label" data-i18n="launcher.settings.preventSleep.label">阻止电脑睡眠</div>
+                <div class="setting-desc" data-i18n="launcher.settings.preventSleep.description">启用后会保持系统唤醒保证服务可用，但不会阻止屏幕熄灭和锁屏</div>
+              </div>
+              <div class="setting-control">
+                <label class="toggle" for="preventSleepInput">
+                  <input id="preventSleepInput" type="checkbox" data-i18n-aria-label="launcher.settings.preventSleep.toggle" />
+                  <span aria-hidden="true"></span>
+                </label>
+              </div>
+            </div>
+
+            <!-- 官方运行时扫描策略由 gateway 启动环境变量消费，关闭后优先复用已有缓存。 -->
+            <div class="setting-item">
+              <div class="setting-info">
+                <div class="setting-label" data-i18n="launcher.settings.officialAutoScanUpgrade.label">自动扫描官方运行时更新</div>
+                <div class="setting-desc" data-i18n="launcher.settings.officialAutoScanUpgrade.description">开启后启动时会扫描本地Codex版本，在发现新版时会自动跟进更新；关闭后复用现有缓存，仅在缓存缺失或不可用时才扫描。</div>
+              </div>
+              <div class="setting-control">
+                <label class="toggle" for="officialAutoScanUpgradeInput">
+                  <input id="officialAutoScanUpgradeInput" type="checkbox" data-i18n-aria-label="launcher.settings.officialAutoScanUpgrade.toggle" />
+                  <span aria-hidden="true"></span>
+                </label>
+              </div>
+            </div>
+
             <div class="setting-item">
               <div class="setting-info">
                 <div class="setting-label" data-i18n="launcher.settings.pluginDirs.label">外部插件目录</div>

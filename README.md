@@ -113,7 +113,15 @@ http://127.0.0.1:3737
 
 如果需要在其他设备访问，请使用 Launcher 展示的局域网地址，或配合 Tailscale、ZeroTier、企业自建 VPN 等方式实现远程局域网访问。
 
-> 不建议把 OpenCodex 直接暴露到公网。
+### 无头服务器启动
+
+[配置步骤](docs/Xvfb.md)
+
+### 远程访问
+
+OpenCodex 本身不提供远程访问服务，如果需要在其他设备中远程访问，请使用 Tailscale、ZeroTier、Cloudflare Tunnel、企业自建 VPN 等方式搭建网络，然后在启动器中打开局域网模式进行访问。
+
+> 不建议把 OpenCodex 直接暴露到公网，还是推荐上述工具，更加安全可控。
 
 ### 一键启动脚本
 
@@ -186,16 +194,51 @@ HOST=0.0.0.0 PORT=3738 pnpm run service:install:mac
 | `CODEX_WEB_SLOW_LOG_MS` | `750` | IPC 慢调用日志阈值，单位毫秒。 |
 | `CODEX_WEB_LOCAL_FILE_TOKEN_TTL_MS` | `300000` | 本地文件预览 URL token 有效期，单位毫秒。 |
 | `CODEX_DESKTOP_APP_PATH` | 自动扫描 | 指定 Codex Desktop 安装路径或 `app.asar` 所在路径。 |
+| `CODEX_DESKTOP_EXECUTABLE_PATH` | 自动扫描 | Windows/Linux 下指定 Codex Desktop Electron 可执行文件路径。 |
+| `CODEX_APP_SERVER_BINARY_PATH` | 自动扫描 | Windows 下指定 Codex app-server/CLI 可执行文件路径。 |
+| `CODEX_CLI_PATH` | 自动扫描 | Windows 下指定 Codex CLI 可执行文件路径。 |
 | `CODEX_WEB_RUNTIME_DIR` | `.data/runtime` | 命令行 gateway 运行目录；打包态由 Launcher 指向用户数据目录。 |
 | `CODEX_WEB_OFFICIAL_BUNDLE_DIR` | `.data/cache/codex-official-bundle` | 指定官方 bundle 解包缓存目录。 |
+| `CODEX_WEB_OFFICIAL_AUTO_SCAN_UPGRADE` | `1` | 控制是否在启动时自动扫描官方 Codex 运行时更新；设为 `0` 后优先复用现有缓存，仅在缓存缺失或不可用时扫描。 |
 | `CODEX_WEB_OFFICIAL_USER_DATA_DIR` | `.data/official-user-data` | 指定官方 Electron profile 隔离目录。 |
+| `CODEX_WEB_OFFICIAL_TMPDIR` / `CODEX_WEB_OFFICIAL_TMP_DIR` | 自动生成 | 指定官方 hidden runtime 的临时目录，用于隔离官方 IPC socket。 |
+| `CODEX_WEB_REPORTS_DIR` | `.data/reports` | gateway 诊断报告输出目录。 |
+| `CODEX_WEB_WORKSPACE_ROOTS` | 空 | 初始 workspace roots，多个路径用逗号分隔。 |
 | `CODEX_HOME` | `~/.codex` | Codex CLI / app-server 的配置和运行数据目录。 |
+
+### 高级调试环境变量
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `CODEX_WEB_PICKED_FILES_MAX_COUNT` | `20` | Web 端临时 picked file 请求目录数量上限。 |
+| `CODEX_WEB_PICKED_FILE_MAX_BYTES` | `52428800` | 单个 picked file 大小上限，单位字节。 |
+| `CODEX_WEB_PICKED_FILES_MAX_TOTAL_BYTES` | `104857600` | picked file 临时目录总大小上限，单位字节。 |
+| `CODEX_WEB_PICKED_FILE_TTL_MS` | `86400000` | picked file 临时目录保留时间，单位毫秒。 |
+| `CODEX_WEB_DISABLE_ASSET_CACHE` | 空 | 设为 `1` 后禁用 gateway 静态资源缓存。 |
+| `CODEX_WEB_DISABLE_GZIP` | 空 | 设为 `1` 后禁用 gateway gzip 响应压缩。 |
+| `OPENCODEX_DEBUG_WS` | 空 | 设为 `1` 后启用 WebSocket/app-host 链路诊断。 |
+| `OPENCODEX_WS_LARGE_LOG_BYTES` | `262144` | WebSocket 大消息日志阈值，单位字节。 |
+| `OPENCODEX_WS_SEND_SLOW_MS` | `80` | WebSocket 发送慢日志阈值，单位毫秒。 |
+| `OPENCODEX_WS_STRINGIFY_SLOW_MS` | `20` | WebSocket JSON 序列化慢日志阈值，单位毫秒。 |
+| `OPENCODEX_WS_BUFFERED_LOG_BYTES` | `524288` | WebSocket bufferedAmount 日志阈值，单位字节。 |
+| `OPENCODEX_APP_HOST_TRAFFIC_FLUSH_MS` | `2000` | app-host 流量统计 flush 间隔，单位毫秒。 |
+| `OPENCODEX_APP_HOST_LARGE_FRAME_BYTES` | `65536` | app-host 大帧日志阈值，单位字节。 |
+| `OPENCODEX_WS_DISABLE_DEFLATE` | 空 | 设为 `1` 后关闭 WebSocket permessage-deflate。 |
+| `OPENCODEX_WS_DEFLATE_THRESHOLD` | `65536` | WebSocket 压缩启用阈值，单位字节。 |
+| `OPENCODEX_WS_DEFLATE_CONCURRENCY` | `4` | WebSocket 压缩并发限制。 |
+| `OPENCODEX_WS_DEFLATE_LEVEL` | `3` | WebSocket zlib 压缩等级。 |
 
 ## 常见问题
 
 ### 第一次打开会话历史为空
 
 第一次加载可能较慢，也会受到远程局域网网速影响。稍等一会后再刷新或重新进入即可。
+
+### 会话同步不及时
+
+如果你把 OpenCodex 和官方 Desktop 同时使用，因为两者都各自维护一个会话状态，虽然是同一个数据但是可能并不会完全实时同步。
+
+推荐无论是本地还是远程都直接只使用 OpenCodex，可以配合 PWA，体验和官方 Desktop 相差无几。
 
 ### 启动后打不开页面
 
