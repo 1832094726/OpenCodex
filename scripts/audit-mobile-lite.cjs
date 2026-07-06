@@ -32,6 +32,13 @@ function resolveUrl(baseUrl, pathname) {
   return new URL(pathname, baseUrl).toString();
 }
 
+function rendererHandoffPath(pathname) {
+  const target = new URL(pathname, "http://opencodex.local");
+  // 根路径先返回 OpenCodex 入口壳；审计脚本显式带 handoff 参数验证真实官方 renderer。
+  target.searchParams.set("__opencodex_renderer", "1");
+  return `${target.pathname}${target.search}${target.hash}`;
+}
+
 function decodeBody(buffer, encoding) {
   const normalized = String(encoding || "").toLowerCase();
   if (normalized.includes("gzip")) return zlib.gunzipSync(buffer);
@@ -127,14 +134,24 @@ async function auditMobileLite() {
   const config = auditConfig();
   console.log(`Mobile official-shell audit base=${config.baseUrl}`);
 
-  const shell = await requestOnce(resolveUrl(config.baseUrl, "/"));
-  printSummary(summarizeResult("shell", shell), config);
-  const shellText = shell.body.toString("utf8");
-  if (!shellText.includes("/codex-bridge-polyfill.js")) {
-    throw new Error("Expected phone root to serve the official renderer with the OpenCodex bridge");
+  const entryShell = await requestOnce(resolveUrl(config.baseUrl, "/"));
+  printSummary(summarizeResult("entry-shell", entryShell), config);
+  const entryShellText = entryShell.body.toString("utf8");
+  if (!entryShellText.includes("__opencodex_renderer")) {
+    throw new Error("Expected phone root to serve the OpenCodex entry shell that hands off to the official renderer");
   }
-  if (shellText.includes("data-opencodex-mobile-lite")) {
+  if (entryShellText.includes("data-opencodex-mobile-lite")) {
     throw new Error("Standalone mobile-lite shell should not be served from the phone root");
+  }
+
+  const renderer = await requestOnce(resolveUrl(config.baseUrl, rendererHandoffPath("/")));
+  printSummary(summarizeResult("renderer", renderer), config);
+  const rendererText = renderer.body.toString("utf8");
+  if (!rendererText.includes("/codex-bridge-polyfill.js")) {
+    throw new Error("Expected renderer handoff to serve the official renderer with the OpenCodex bridge");
+  }
+  if (rendererText.includes("data-opencodex-mobile-lite")) {
+    throw new Error("Standalone mobile-lite shell should not be served from the renderer handoff route");
   }
 
   const runtimeConfig = await requestOnce(resolveUrl(config.baseUrl, "/codex-web-config.js"));

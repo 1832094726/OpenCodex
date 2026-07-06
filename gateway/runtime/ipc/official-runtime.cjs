@@ -2064,6 +2064,10 @@ function hasExplicitThreadResumeSuccessPayload(payload, depth = 0, seen = new We
   }
   // 官方 message-for-view 有时把真实回包包在数组或 response/result 里；成功缓存只能接受明确成功壳。
   if (payload.responseType === "success") return true;
+  if (payload.type === "mcp-response" && payload.message && typeof payload.message === "object") {
+    // 官方 MCP 回包没有 responseType；只把明确含 result 且不含 error 的最终回包视为 thread/resume 成功。
+    return !payload.message.error && Object.prototype.hasOwnProperty.call(payload.message, "result");
+  }
   for (const key of ["response", "payload", "result", "data", "body", "value"]) {
     if (hasExplicitThreadResumeSuccessPayload(payload[key], depth + 1, seen)) return true;
   }

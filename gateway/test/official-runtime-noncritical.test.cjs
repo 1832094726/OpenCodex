@@ -196,6 +196,9 @@ test("successful thread resume responses survive app-server exits when session f
   assert.match(source, /threadResumeAppendIsSafe/);
   assert.match(source, /clearThreadResumeSuccessCache/);
   assert.match(successShapeBody, /payload\.responseType === "success"/);
+  assert.match(successShapeBody, /payload\.type === "mcp-response"/);
+  assert.match(successShapeBody, /Object\.prototype\.hasOwnProperty\.call\(payload\.message, "result"\)/);
+  assert.match(successShapeBody, /!payload\.message\.error/);
   assert.match(successShapeBody, /Array\.isArray\(payload\)/);
   assert.match(successPayloadBody, /hasExplicitThreadResumeSuccessPayload\(payload\)/);
   assert.match(serveBody, /thread_resume_success_cache_hit/);
