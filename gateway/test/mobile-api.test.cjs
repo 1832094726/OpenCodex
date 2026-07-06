@@ -1565,6 +1565,58 @@ test("request handler keeps the official shell for mobile browsers and enables t
   assert.doesNotMatch(deepLink.body, /codex-window-controls-overlay\.(?:js|css)/);
 });
 
+test("mobile shell skips official css while desktop shell keeps it", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-shell-css-"));
+  try {
+    fs.mkdirSync(path.join(tempRoot, "assets"), { recursive: true });
+    fs.writeFileSync(path.join(tempRoot, "assets", "app-main-test.css"), "body{}");
+    fs.writeFileSync(path.join(tempRoot, "assets", "app-shell-test.css"), "body{}");
+
+    const { createRequestHandler } = require("../runtime/server.cjs");
+    const staticAssets = createStaticAssetService({
+      getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+      getOfficialBundle: () => ({ webviewDir: tempRoot }),
+    });
+    const handler = createRequestHandler({
+      localFiles: {},
+      mobileApi: { handleBootstrap: () => assert.fail("mobile bootstrap should not handle shell HTML") },
+      pickedFiles: {},
+      staticAssets,
+    });
+
+    const desktop = await collectResponse(handler, {
+      headers: {
+        accept: "text/html",
+        host: "127.0.0.1:8080",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/537.36 Chrome/126 Safari/537.36",
+      },
+      method: "GET",
+      socket: { remoteAddress: "127.0.0.1" },
+      url: "/",
+    });
+    const mobile = await collectResponse(handler, {
+      headers: {
+        accept: "text/html",
+        host: "127.0.0.1:8080",
+        "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1",
+      },
+      method: "GET",
+      socket: { remoteAddress: "127.0.0.1" },
+      url: "/",
+    });
+
+    assert.match(desktop.body, /\/official\/assets\/app-main-test\.css/);
+    assert.match(desktop.body, /\/official\/assets\/app-shell-test\.css/);
+    assert.match(desktop.body, /data-codex-official-style/);
+    assert.doesNotMatch(mobile.body, /\/official\/assets\/app-main-test\.css/);
+    assert.doesNotMatch(mobile.body, /\/official\/assets\/app-shell-test\.css/);
+    assert.doesNotMatch(mobile.body, /data-codex-official-style/);
+    assert.match(mobile.body, /手机流量模式跳过官方 CSS/);
+  } finally {
+    fs.rmSync(tempRoot, { force: true, recursive: true });
+  }
+});
+
 test("official renderer skips token usage capability only for mobile traffic mode", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-official-html-"));
   try {

@@ -397,7 +397,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       patchWebShellAppVersion(patchHtmlLang(readText(shell), i18n.locale)),
       options
     );
-    const links = officialStyleLinks();
+    const links = options.mobileTrafficMode === true ? "" : officialStyleLinks();
     if (links) {
       // web-shell 自己负责承载 UI，注入官方样式后视觉表现和桌面 renderer 保持一致。
       if (html.includes("<!-- codex-official-styles -->")) {
@@ -405,6 +405,11 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       } else {
         html = html.replace(/<\/head>/i, `${links}\n  </head>`);
       }
+    } else if (options.mobileTrafficMode === true && html.includes("<!-- codex-official-styles -->")) {
+      html = html.replace(
+        "<!-- codex-official-styles -->",
+        "<!-- OpenCodex 手机流量模式跳过官方 CSS；壳页只负责认证和 renderer handoff。 -->"
+      );
     }
     const bootstrap = webShellBootstrapScript(i18n, options);
     if (html.includes("<!-- opencodex-runtime-config -->")) {
