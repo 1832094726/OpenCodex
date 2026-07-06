@@ -59,6 +59,10 @@ const requestRoutes = new Map();
 const requestRouteSummaries = new Map();
 const threadSnapshotNudgeAtMsByThreadId = new Map();
 const APP_SERVER_READ_ONLY_CACHE_TTL_MS = Number(process.env.OPENCODEX_APP_SERVER_READ_ONLY_CACHE_TTL_MS || 5 * 60 * 1000);
+const APP_SERVER_READ_ONLY_IN_FLIGHT_TTL_MS = Math.max(
+  1000,
+  Number(process.env.OPENCODEX_APP_SERVER_READ_ONLY_IN_FLIGHT_TTL_MS || 30 * 1000)
+);
 const THREAD_SNAPSHOT_NUDGE_MIN_INTERVAL_MS = Number(process.env.OPENCODEX_THREAD_SNAPSHOT_NUDGE_MIN_INTERVAL_MS || 30 * 1000);
 // 首屏辅助读允许走短 TTL 只读缓存；会话详情和发送链路仍保持官方实时 IPC。
 const APP_SERVER_READ_ONLY_METHODS = new Set([
@@ -140,6 +144,7 @@ const DESKTOP_FEATURE_AVAILABILITY_DUPLICATE_TTL_MS = Math.max(
   Number(process.env.OPENCODEX_DESKTOP_FEATURE_AVAILABILITY_DUPLICATE_TTL_MS || 2 * 60 * 1000)
 );
 const appServerReadOnlyCache = new Map();
+const appServerReadOnlyInFlight = new Map();
 const fetchResponseCache = new Map();
 const threadResumeTerminalErrorCache = new Map();
 const threadResumeSuccessCache = new Map();
@@ -456,6 +461,7 @@ function trackHiddenAppServerChild(child, launcher) {
   function rememberExit(event, code, signal, error) {
     appServerSpawnHook.activeChildren.delete(child);
     appServerChildEpoch += 1;
+    clearAppServerReadOnlyInFlight("app_server_child_exit");
     clearThreadResumeInFlight("app_server_child_exit");
     const pid = typeof child.pid === "number" ? child.pid : null;
     const expected = pid != null ? appServerSpawnHook.expectedTerminations.get(pid) : null;
@@ -681,6 +687,7 @@ function refreshHiddenOfficialRuntime(reason, changedPath) {
   appServerSpawnHook.lastRestartChangedPath = changedPath || null;
   const childrenBeforeReload = Array.from(appServerSpawnHook.activeChildren);
   clearThreadResumeSuccessCache("official_runtime_refresh");
+  clearAppServerReadOnlyInFlight("official_runtime_refresh");
   clearThreadResumeInFlight("official_runtime_refresh");
   // 只读缓存不含账号/配置；刷新隐藏 runtime 时保留它，避免线程列表冷扫再次阻塞首屏和进会话。
   const closedRelays = wsHub && typeof wsHub.closeAllAppHostRelays === "function"
@@ -2649,6 +2656,69 @@ function maybeServeReadOnlyAppServerCache(channel, invokeArgs, context, summary,
   return false;
 }
 
+function clearAppServerReadOnlyInFlight(reason) {
+  if (appServerReadOnlyInFlight.size <= 0) return;
+  const count = appServerReadOnlyInFlight.size;
+  appServerReadOnlyInFlight.clear();
+  diagnosticLog("official-runtime", "read_only_inflight_cleared", {
+    count,
+    reason,
+  });
+}
+
+function maybeCoalesceReadOnlyAppServerInFlight(channel, invokeArgs, context, summary, cacheKey) {
+  if (!cacheKey || channel !== MESSAGE_FROM_VIEW_CHANNEL || !wsHub || !context || !context.clientId) return false;
+  const method = readOnlyAppServerMethodFromSummary(summary);
+  if (!method) return false;
+  const requestId = requestRouteIdFromIncoming(channel, invokeArgs);
+  if (!requestId) return false;
+  const nowMs = Date.now();
+  const entry = appServerReadOnlyInFlight.get(cacheKey);
+  if (!entry || entry.expiresAtMs <= nowMs) {
+    appServerReadOnlyInFlight.set(cacheKey, {
+      duplicateRequestIds: new Set(),
+      expiresAtMs: nowMs + APP_SERVER_READ_ONLY_IN_FLIGHT_TTL_MS,
+      method,
+      primaryRequestId: requestId,
+      startedAtMs: nowMs,
+    });
+    summary.readOnlyInFlightPrimary = true;
+    return false;
+  }
+  if (entry.primaryRequestId === requestId || entry.duplicateRequestIds.has(requestId)) return true;
+  entry.duplicateRequestIds.add(requestId);
+  entry.expiresAtMs = Math.max(entry.expiresAtMs, nowMs + APP_SERVER_READ_ONLY_IN_FLIGHT_TTL_MS);
+  summary.readOnlyInFlightCoalesced = true;
+  diagnosticLog("official-runtime", "read_only_inflight_coalesced", {
+    ageMs: nowMs - entry.startedAtMs,
+    duplicateCount: entry.duplicateRequestIds.size,
+    method: entry.method || method,
+    primaryRequestId: shortId(entry.primaryRequestId),
+    requestId: shortId(requestId),
+  });
+  return true;
+}
+
+function dispatchReadOnlyAppServerInFlightResponses(channel, args, requestSummary, requestId) {
+  if (!requestId || !requestSummary || !requestSummary.cacheKey) return;
+  const method = readOnlyAppServerMethodFromSummary(requestSummary);
+  if (!method) return;
+  const entry = appServerReadOnlyInFlight.get(requestSummary.cacheKey);
+  if (!entry) return;
+  const duplicateRequestIds = [...entry.duplicateRequestIds].filter((duplicateRequestId) => duplicateRequestId !== requestId);
+  appServerReadOnlyInFlight.delete(requestSummary.cacheKey);
+  if (duplicateRequestIds.length === 0) return;
+  diagnosticLog("official-runtime", "read_only_inflight_replayed", {
+    duplicateCount: duplicateRequestIds.length,
+    method,
+    requestId: shortId(requestId),
+  });
+  for (const duplicateRequestId of duplicateRequestIds) {
+    const responseArgs = cloneWithReplacement(args, requestId, duplicateRequestId);
+    routeOfficialWebContentsSend(channel, responseArgs);
+  }
+}
+
 function rememberReadOnlyAppServerResponse(channel, args, requestSummary, requestId) {
   const method = readOnlyAppServerMethodFromSummary(requestSummary);
   if (!method || !requestId) return;
@@ -3227,6 +3297,8 @@ function routeOfficialWebContentsSend(channel, args) {
   };
   // 这些 app-server 列表是只读初始化数据；成功回包落盘后，重启网关也能先用热缓存撑住弱网首屏。
   rememberReadOnlyAppServerResponse(channel, args, requestSummary, requestId);
+  // 只读辅助请求在启动期可能并发重复；首个真实回包回来后复制给同 key 的等待请求。
+  dispatchReadOnlyAppServerInFlightResponses(channel, args, requestSummary, requestId);
   // 官方启动期 wham fetch 只缓存真实成功回包；后续弱网重复打开时可直接复用，不伪造账号/用量数据。
   rememberCacheableFetchResponse(channel, args, requestSummary, requestId);
   // 归档会话的 thread/resume 是终态错误；缓存真实错误回包，避免官方前端循环慢打 app-server。
@@ -3512,6 +3584,7 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   if (maybeServeReadOnlyAppServerCache(channel, invokeArgs, context, requestSummary, readOnlyCacheKey)) return true;
   // 先记录请求归属，再调用官方 handler，这样同步和异步回包都能找到目标 client。
   rememberRequestRoute(channel, invokeArgs, context.clientId || "", requestSummary);
+  if (maybeCoalesceReadOnlyAppServerInFlight(channel, invokeArgs, context, requestSummary, readOnlyCacheKey)) return true;
   if (maybeServeTerminalThreadResumeError(channel, invokeArgs, context, requestSummary)) return true;
   if (maybeServeThreadResumeSuccessCache(channel, invokeArgs, context, requestSummary)) return true;
   if (maybeCoalesceThreadResumeInFlight(channel, invokeArgs, context, requestSummary)) return true;

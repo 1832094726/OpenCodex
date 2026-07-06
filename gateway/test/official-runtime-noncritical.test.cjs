@@ -306,6 +306,35 @@ test("conversation entry auxiliary reads can use read-only cache", () => {
   assert.match(readOnlyMethodBody, /\["method", "requestMethod", "paramsMethod"\]/);
 });
 
+test("duplicate read-only app-server requests are coalesced while the first read is in flight", () => {
+  const coalesceBody = officialRuntimeFunctionSource("maybeCoalesceReadOnlyAppServerInFlight", "dispatchReadOnlyAppServerInFlightResponses");
+  const dispatchBody = officialRuntimeFunctionSource("dispatchReadOnlyAppServerInFlightResponses", "rememberReadOnlyAppServerResponse");
+  const routeBody = officialRuntimeFunctionSource("routeOfficialWebContentsSend", "shouldSuppressHiddenRendererSend");
+  const invokeBody = officialRuntimeFunctionSource("invokeOfficialIpc", "connectOfficialAppHostPort");
+  const childBody = officialRuntimeFunctionSource("trackHiddenAppServerChild", "redirectHiddenAppServerSpawn");
+  const refreshBody = officialRuntimeFunctionSource("refreshHiddenOfficialRuntime", "codexRuntimeWatchPathFromFilename");
+
+  // config/read 等首屏辅助读会在官方启动期重复并发；重复请求等待首个真实回包，减少 app-server 队列压力。
+  assert.match(source, /APP_SERVER_READ_ONLY_IN_FLIGHT_TTL_MS/);
+  assert.match(source, /appServerReadOnlyInFlight/);
+  assert.match(coalesceBody, /read_only_inflight_coalesced/);
+  assert.match(coalesceBody, /duplicateRequestIds\.add\(requestId\)/);
+  assert.match(dispatchBody, /read_only_inflight_replayed/);
+  assert.match(dispatchBody, /cloneWithReplacement\(args, requestId, duplicateRequestId\)/);
+  assert.match(dispatchBody, /routeOfficialWebContentsSend\(channel, responseArgs\)/);
+  assert.match(routeBody, /dispatchReadOnlyAppServerInFlightResponses\(channel, args, requestSummary, requestId\)/);
+  assert.match(childBody, /clearAppServerReadOnlyInFlight\("app_server_child_exit"\)/);
+  assert.match(refreshBody, /clearAppServerReadOnlyInFlight\("official_runtime_refresh"\)/);
+  assert.ok(
+    invokeBody.indexOf("maybeServeReadOnlyAppServerCache") < invokeBody.indexOf("maybeCoalesceReadOnlyAppServerInFlight"),
+    "cached read-only responses should be served before in-flight coalescing"
+  );
+  assert.ok(
+    invokeBody.indexOf("maybeCoalesceReadOnlyAppServerInFlight") < invokeBody.indexOf("maybeServeTerminalThreadResumeError"),
+    "duplicate read-only requests should stop before official handler dispatch"
+  );
+});
+
 test("thread list and auxiliary state can use stale read-only cache during conversation entry", () => {
   // thread/list 是进入会话前的入口数据；旧列表比长时间白屏更可接受，详情仍由 thread/read/resume 拉新。
   const staleBody = source.slice(
