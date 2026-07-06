@@ -131,6 +131,10 @@ const CODEX_APP_SERVER_KILL_GRACE_MS = Math.max(
   100,
   Number(process.env.OPENCODEX_CODEX_APP_SERVER_KILL_GRACE_MS || 2500)
 );
+const DESKTOP_FEATURE_AVAILABILITY_DUPLICATE_TTL_MS = Math.max(
+  1000,
+  Number(process.env.OPENCODEX_DESKTOP_FEATURE_AVAILABILITY_DUPLICATE_TTL_MS || 2 * 60 * 1000)
+);
 const appServerReadOnlyCache = new Map();
 const fetchResponseCache = new Map();
 const threadResumeTerminalErrorCache = new Map();
@@ -146,6 +150,8 @@ let wsHub = null;
 let codexRuntimeWatchers = [];
 let codexRuntimeRefreshTimer = null;
 let appServerChildEpoch = 0;
+let lastDesktopFeatureAvailabilitySignature = "";
+let lastDesktopFeatureAvailabilityAtMs = 0;
 const codexRuntimeRestartSignatures = new Map();
 
 const officialIpc = {
@@ -1488,6 +1494,50 @@ function normalizeDesktopFeatureAvailabilityForBundledPlugins(channel, args) {
     recordAndReplay: true,
     sites: true,
   });
+}
+
+function desktopFeatureAvailabilitySignature(message) {
+  if (!message || typeof message !== "object" || message.type !== "electron-desktop-features-changed") return "";
+  const keys = [
+    "ambientSuggestions",
+    "browserPane",
+    "computerUse",
+    "computerUseNodeRepl",
+    "control",
+    "externalBrowserUse",
+    "externalBrowserUseAllowed",
+    "inAppBrowserUse",
+    "inAppBrowserUseAllowed",
+    "multiBrowserTabs",
+    "recordAndReplay",
+    "sites",
+  ];
+  const stable = {};
+  for (const key of keys) stable[key] = Boolean(message[key]);
+  return crypto.createHash("sha1").update(JSON.stringify(stable)).digest("base64url");
+}
+
+function maybeHandleDuplicateDesktopFeatureAvailability(channel, args) {
+  if (channel !== MESSAGE_FROM_VIEW_CHANNEL) return false;
+  const message = payloadFromArgs(args);
+  const signature = desktopFeatureAvailabilitySignature(message);
+  if (!signature) return false;
+  const nowMs = Date.now();
+  if (
+    signature === lastDesktopFeatureAvailabilitySignature &&
+    nowMs - lastDesktopFeatureAvailabilityAtMs < DESKTOP_FEATURE_AVAILABILITY_DUPLICATE_TTL_MS
+  ) {
+    // 官方 focus 事件会重复 reconcile bundled plugins；OpenCodex 的能力位是静态的，重复签名可直接确认。
+    diagnosticLog("desktop-features", "duplicate_electron_desktop_features_changed_suppressed", {
+      requestId: shortId(requestRouteIdFromIncoming(channel, args)),
+      ageMs: nowMs - lastDesktopFeatureAvailabilityAtMs,
+    });
+    lastDesktopFeatureAvailabilityAtMs = nowMs;
+    return true;
+  }
+  lastDesktopFeatureAvailabilitySignature = signature;
+  lastDesktopFeatureAvailabilityAtMs = nowMs;
+  return false;
 }
 
 function stringRouteId(value) {
@@ -3380,6 +3430,7 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   const event = createOfficialIpcEvent(context);
   normalizeOfficialI18nFetchRequest(channel, invokeArgs);
   normalizeDesktopFeatureAvailabilityForBundledPlugins(channel, invokeArgs);
+  if (maybeHandleDuplicateDesktopFeatureAvailability(channel, invokeArgs)) return true;
   normalizeLocalResumeServiceTier(channel, invokeArgs);
   const requestSummary = incomingIpcDiagnosticSummary(channel, invokeArgs);
   if (maybeHandleDeprecatedFeatureEnablement(channel, invokeArgs)) return true;

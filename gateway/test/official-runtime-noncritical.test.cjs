@@ -95,6 +95,37 @@ test("browser use runtime paths are injected from official resources", () => {
   assert.match(alignBody, /applyOfficialBrowserUseRuntimeEnv\(process\.env, bundle\)/);
 });
 
+test("duplicate desktop feature availability events are suppressed", () => {
+  const normalizeBody = officialRuntimeFunctionSource(
+    "normalizeDesktopFeatureAvailabilityForBundledPlugins",
+    "desktopFeatureAvailabilitySignature"
+  );
+  const signatureBody = officialRuntimeFunctionSource(
+    "desktopFeatureAvailabilitySignature",
+    "maybeHandleDuplicateDesktopFeatureAvailability"
+  );
+  const duplicateBody = officialRuntimeFunctionSource("maybeHandleDuplicateDesktopFeatureAvailability", "stringRouteId");
+  const invokeBody = officialRuntimeFunctionSource("invokeOfficialIpc", "connectOfficialAppHostPort");
+
+  // 官方 focus 会重复触发 bundled plugin reconcile；OpenCodex 的桌面能力位是静态的，短期重复签名直接确认即可。
+  assert.match(source, /DESKTOP_FEATURE_AVAILABILITY_DUPLICATE_TTL_MS/);
+  assert.match(normalizeBody, /browserPane: true/);
+  assert.match(normalizeBody, /computerUseNodeRepl: true/);
+  assert.match(signatureBody, /crypto\.createHash\("sha1"\)/);
+  assert.match(signatureBody, /recordAndReplay/);
+  assert.match(duplicateBody, /duplicate_electron_desktop_features_changed_suppressed/);
+  assert.match(duplicateBody, /lastDesktopFeatureAvailabilitySignature/);
+  assert.ok(
+    invokeBody.indexOf("normalizeDesktopFeatureAvailabilityForBundledPlugins") <
+      invokeBody.indexOf("maybeHandleDuplicateDesktopFeatureAvailability"),
+    "feature availability should be normalized before duplicate detection"
+  );
+  assert.ok(
+    invokeBody.indexOf("maybeHandleDuplicateDesktopFeatureAvailability") < invokeBody.indexOf("logDesktopFeatureAvailability"),
+    "duplicate feature events should be suppressed before official handler dispatch"
+  );
+});
+
 test("archived thread resume errors are cooled down with official response shape", () => {
   const serveBody = officialRuntimeFunctionSource("maybeServeTerminalThreadResumeError", "rememberTerminalThreadResumeError");
   const rememberBody = officialRuntimeFunctionSource("rememberTerminalThreadResumeError", "maybeServeReadOnlyAppServerCache");
