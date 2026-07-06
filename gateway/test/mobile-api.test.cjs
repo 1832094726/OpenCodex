@@ -1534,6 +1534,10 @@ test("official renderer injects initial route for deep linked local threads", ()
     assert.match(html, /"full"/);
     assert.match(html, /"probe"/);
     assert.match(html, /history\.replaceState/);
+    assert.match(html, /__opencodexEarlyTelemetryPatched/);
+    assert.match(html, /\/v1\/rgstr/);
+    assert.match(html, /\/ces\/v1\/log_event/);
+    assert.match(html, /XMLHttpRequest/);
   } finally {
     fs.rmSync(tempRoot, { force: true, recursive: true });
   }

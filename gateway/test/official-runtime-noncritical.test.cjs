@@ -131,6 +131,9 @@ test("archived thread resume errors are cooled down with official response shape
   const rememberBody = officialRuntimeFunctionSource("rememberTerminalThreadResumeError", "maybeServeReadOnlyAppServerCache");
   const invokeBody = officialRuntimeFunctionSource("invokeOfficialIpc", "connectOfficialAppHostPort");
   const routeBody = officialRuntimeFunctionSource("routeOfficialWebContentsSend", "shouldSuppressHiddenRendererSend");
+  const archivedBody = officialRuntimeFunctionSource("archivedThreadResumeErrorText", "terminalThreadResumeErrorKey");
+  const freshBody = officialRuntimeFunctionSource("hasFreshTerminalThreadResumeError", "archivedThreadResumeSessionFingerprint");
+  const terminalShapeBody = officialRuntimeFunctionSource("isTerminalThreadResumeErrorPayload", "clearThreadResumeSuccessCache");
 
   // 归档 session 的 thread/resume 是终态错误；重复请求要复用官方真实错误回包，不再每轮慢打 app-server。
   assert.match(source, /THREAD_RESUME_TERMINAL_ERROR_TTL_MS/);
@@ -139,11 +142,22 @@ test("archived thread resume errors are cooled down with official response shape
   assert.match(source, /isArchivedThreadResumeError/);
   assert.match(source, /is archived\|codex unarchive/);
   assert.doesNotMatch(rememberBody, /recursiveStringMatches\(payload/);
-  assert.match(rememberBody, /isArchivedThreadResumeError\(payload\)/);
+  assert.match(rememberBody, /isTerminalThreadResumeErrorPayload\(cacheKey, payload, sessionFingerprint\)/);
   assert.match(serveBody, /thread_resume_terminal_error_cache_hit/);
   assert.match(serveBody, /cloneWithReplacement/);
+  assert.match(freshBody, /sessionFingerprintFromMatch\(threadId, entry\.sessionFingerprint\)/);
+  assert.match(freshBody, /!current\.archived/);
+  assert.match(terminalShapeBody, /isArchivedThreadResumeError\(payload\)/);
+  assert.match(terminalShapeBody, /sessionFingerprint && sessionFingerprint\.archived/);
   assert.match(rememberBody, /thread_resume_terminal_error_cached/);
   assert.match(rememberBody, /cloneCacheableResponseArgs/);
+  assert.match(rememberBody, /archivedThreadResumeSessionFingerprint\(cacheKey\)/);
+  assert.match(rememberBody, /isTerminalThreadResumeErrorPayload\(cacheKey, payload, sessionFingerprint\)/);
+  assert.match(rememberBody, /archivedBySessionFingerprint/);
+  assert.match(rememberBody, /sessionFingerprint/);
+  for (const wrapper of ["response", "payload", "result", "data", "body", "value"]) {
+    assert.match(archivedBody, new RegExp(JSON.stringify(wrapper)));
+  }
   assert.match(routeBody, /rememberTerminalThreadResumeError\(channel, args, requestSummary, requestId\)/);
   assert.ok(
     invokeBody.indexOf("rememberRequestRoute") < invokeBody.indexOf("maybeServeTerminalThreadResumeError"),
@@ -156,6 +170,8 @@ test("archived thread resume errors are cooled down with official response shape
 });
 
 test("successful thread resume responses survive app-server exits when session file is unchanged", () => {
+  const successShapeBody = officialRuntimeFunctionSource("hasExplicitThreadResumeSuccessPayload", "collectArchivedResumeErrorText");
+  const successPayloadBody = officialRuntimeFunctionSource("isSuccessfulThreadResumePayload", "maybeServeTerminalThreadResumeError");
   const serveBody = officialRuntimeFunctionSource("maybeServeThreadResumeSuccessCache", "rememberTerminalThreadResumeError");
   const rememberBody = officialRuntimeFunctionSource("rememberThreadResumeSuccess", "maybeServeReadOnlyAppServerCache");
   const invokeBody = officialRuntimeFunctionSource("invokeOfficialIpc", "connectOfficialAppHostPort");
@@ -174,6 +190,9 @@ test("successful thread resume responses survive app-server exits when session f
   assert.match(source, /visibleThreadResumeSignature/);
   assert.match(source, /threadResumeAppendIsSafe/);
   assert.match(source, /clearThreadResumeSuccessCache/);
+  assert.match(successShapeBody, /payload\.responseType === "success"/);
+  assert.match(successShapeBody, /Array\.isArray\(payload\)/);
+  assert.match(successPayloadBody, /hasExplicitThreadResumeSuccessPayload\(payload\)/);
   assert.match(serveBody, /thread_resume_success_cache_hit/);
   assert.match(serveBody, /validateThreadResumeSuccessCacheEntry\(cacheKey, entry\)/);
   assert.match(serveBody, /thread_resume_success_cache_invalidated/);
@@ -181,6 +200,8 @@ test("successful thread resume responses survive app-server exits when session f
   assert.match(rememberBody, /thread_resume_success_cached/);
   assert.match(rememberBody, /isSuccessfulThreadResumePayload\(payload\)/);
   assert.match(rememberBody, /findThreadResumeSessionFingerprint\(cacheKey\)/);
+  assert.match(rememberBody, /sessionFingerprint && sessionFingerprint\.archived/);
+  assert.match(rememberBody, /thread_resume_success_cache_skipped_archived_session/);
   assert.match(rememberBody, /appServerChildEpoch/);
   assert.match(rememberBody, /sessionFingerprint/);
   assert.match(routeBody, /rememberThreadResumeSuccess\(channel, args, requestSummary, requestId\)/);

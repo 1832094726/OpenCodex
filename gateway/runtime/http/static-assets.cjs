@@ -129,6 +129,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       '<base href="/official/">',
       initialRoute ? `<meta name="initial-route" content="${escapeHtml(initialRoute)}">` : "",
       createRendererHandoffCleanupScript(),
+      createEarlyTelemetryPatchScript(),
       `<link rel="manifest" href="${PWA_MANIFEST_PATH}">`,
       '<meta name="theme-color" content="#ffffff">',
       '<meta name="application-name" content="OpenCodex">',
@@ -161,6 +162,11 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   function createRendererHandoffCleanupScript() {
     const params = JSON.stringify(RENDERER_HANDOFF_CLEANUP_QUERY_PARAMS);
     return `<script>(function(){try{var u=new URL(location.href),p=${params},changed=false;for(var i=0;i<p.length;i++){if(u.searchParams.has(p[i])){u.searchParams.delete(p[i]);changed=true}}if(changed){history.replaceState(history.state,"",u.pathname+u.search+u.hash)}}catch(e){}})();</script>`;
+  }
+
+  function createEarlyTelemetryPatchScript() {
+    // 官方 Statsig SDK 可能在 bridge 大文件跑完前抓住 fetch；最早期就短路纯遥测，避免弱网 10s timeout 卡首屏。
+    return `<script>(function(){try{var w=window;if(w.__opencodexEarlyTelemetryPatched)return;w.__opencodexEarlyTelemetryPatched=true;function u(v){try{var p=new URL(v,location.href),x=p.pathname.replace(/\\/+$/,"");return p.hostname==="chatgpt.com"&&(x==="/ces/v1/rgstr"||x==="/ces/v1/log_event")||p.hostname==="ab.chatgpt.com"&&(x==="/v1/rgstr"||x==="/v1/log_event")}catch(e){return false}}function h(){return{"content-type":"application/json; charset=utf-8"}}if(typeof w.fetch==="function"&&!w.__opencodexEarlyFetchTelemetryPatched){var f=w.fetch.bind(w);w.fetch=function(i,n){var v=typeof i==="string"?i:i&&typeof i==="object"&&"url"in i?String(i.url||""):"";if(u(v))return Promise.resolve(new Response("{}",{status:200,headers:h()}));return f(i,n)};w.__opencodexEarlyFetchTelemetryPatched=true}if(typeof w.XMLHttpRequest==="function"&&!w.__opencodexEarlyXhrTelemetryPatched){var X=w.XMLHttpRequest;w.XMLHttpRequest=function(){var r=new X,t="",o=r.open,s=r.send;r.open=function(m,v){t=u(String(v||""))?String(v||""):"";if(t)return;return o.apply(r,arguments)};r.send=function(){if(!t)return s.apply(r,arguments);setTimeout(function(){try{Object.defineProperty(r,"readyState",{configurable:true,value:4});Object.defineProperty(r,"status",{configurable:true,value:200});Object.defineProperty(r,"responseText",{configurable:true,value:"{}"});Object.defineProperty(r,"response",{configurable:true,value:"{}"})}catch(e){}try{if(typeof r.onreadystatechange==="function")r.onreadystatechange(new Event("readystatechange"));r.dispatchEvent(new Event("readystatechange"));if(typeof r.onload==="function")r.onload(new Event("load"));r.dispatchEvent(new Event("load"));if(typeof r.onloadend==="function")r.onloadend(new Event("loadend"));r.dispatchEvent(new Event("loadend"))}catch(e){}},0)};return r};w.XMLHttpRequest.prototype=X.prototype;w.__opencodexEarlyXhrTelemetryPatched=true}}catch(e){}})();</script>`;
   }
 
   /** 给少量运行时 patch 过的官方 chunk 换路径命名空间，绕开浏览器 immutable 缓存。 */

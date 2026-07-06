@@ -2054,6 +2054,22 @@ function isThreadResumeMethod(summary) {
   return summary && String(summary.method || summary.requestMethod || "") === "thread/resume";
 }
 
+function hasExplicitThreadResumeSuccessPayload(payload, depth = 0, seen = new WeakSet()) {
+  if (payload == null || depth > 6) return false;
+  if (typeof payload !== "object") return false;
+  if (seen.has(payload)) return false;
+  seen.add(payload);
+  if (Array.isArray(payload)) {
+    return payload.some((item) => hasExplicitThreadResumeSuccessPayload(item, depth + 1, seen));
+  }
+  // 官方 message-for-view 有时把真实回包包在数组或 response/result 里；成功缓存只能接受明确成功壳。
+  if (payload.responseType === "success") return true;
+  for (const key of ["response", "payload", "result", "data", "body", "value"]) {
+    if (hasExplicitThreadResumeSuccessPayload(payload[key], depth + 1, seen)) return true;
+  }
+  return false;
+}
+
 function collectArchivedResumeErrorText(value, depth = 0, seen = new WeakSet()) {
   if (value == null || depth > 6) return "";
   if (typeof value === "string") return value;
@@ -2087,8 +2103,8 @@ function archivedThreadResumeErrorText(payload, depth = 0, seen = new WeakSet())
     Number(payload.status || 0) >= 400 ||
     (typeof payload.responseType === "string" && payload.responseType !== "success");
   if (hasErrorShape) return collectArchivedResumeErrorText(payload);
-  // 官方回包有时包在 response/payload 里；只沿这些协议壳继续找 error 字段，不能扫描正文消息。
-  for (const key of ["response", "payload"]) {
+  // 官方回包有时包在 response/result/data 里；只沿协议壳继续找 error 字段，不能扫描正文消息。
+  for (const key of ["response", "payload", "result", "data", "body", "value"]) {
     const text = archivedThreadResumeErrorText(payload[key], depth + 1, seen);
     if (text) return text;
   }
@@ -2427,9 +2443,31 @@ function validateThreadResumeSuccessCacheEntry(threadId, entry) {
 function hasFreshTerminalThreadResumeError(threadId, nowMs = Date.now()) {
   const entry = threadId ? threadResumeTerminalErrorCache.get(threadId) : null;
   if (!entry) return false;
-  if (entry.expiresAtMs > nowMs) return true;
-  threadResumeTerminalErrorCache.delete(threadId);
-  return false;
+  if (entry.expiresAtMs <= nowMs) {
+    threadResumeTerminalErrorCache.delete(threadId);
+    return false;
+  }
+  if (entry.sessionFingerprint && entry.sessionFingerprint.archived) {
+    const current = sessionFingerprintFromMatch(threadId, entry.sessionFingerprint);
+    if (!current || !current.archived || current.filePath !== entry.sessionFingerprint.filePath) {
+      threadResumeTerminalErrorCache.delete(threadId);
+      return false;
+    }
+    // 用户没有 unarchive 时只刷新指纹元数据，不保存正文，避免 5 分钟 TTL 内反复慢打 app-server。
+    entry.sessionFingerprint = current;
+  }
+  return true;
+}
+
+function archivedThreadResumeSessionFingerprint(threadId) {
+  const fingerprint = findThreadResumeSessionFingerprint(threadId);
+  return fingerprint && fingerprint.archived ? fingerprint : null;
+}
+
+function isTerminalThreadResumeErrorPayload(threadId, payload, sessionFingerprint) {
+  if (isArchivedThreadResumeError(payload)) return true;
+  // 官方有些版本把归档恢复失败包装成普通成功事件；本地 session 目录才是更稳定的终态信号。
+  return !!(threadId && sessionFingerprint && sessionFingerprint.archived);
 }
 
 function isArchivedThreadResumeError(payload) {
@@ -2461,6 +2499,7 @@ function isSuccessfulThreadResumePayload(payload) {
   if (!payload || typeof payload !== "object") return false;
   if (payload.error || Number(payload.status || 0) >= 400) return false;
   if (typeof payload.responseType === "string" && payload.responseType !== "success") return false;
+  if (!hasExplicitThreadResumeSuccessPayload(payload)) return false;
   return !isArchivedThreadResumeError(payload);
 }
 
@@ -2474,6 +2513,9 @@ function maybeServeTerminalThreadResumeError(channel, invokeArgs, context, reque
   if (!hasFreshTerminalThreadResumeError(cacheKey)) return false;
   const responseArgs = cloneWithReplacement(entry.response.args, entry.response.requestId, requestId);
   requestSummary.terminalResumeErrorCacheHit = true;
+  // requestRouteSummaries 存的是入站摘要拷贝；同步命中标记，避免缓存回包再次进入缓存写入路径。
+  const storedSummary = requestRouteSummaries.get(requestId);
+  if (storedSummary) storedSummary.terminalResumeErrorCacheHit = true;
   diagnosticLog("official-runtime", "thread_resume_terminal_error_cache_hit", {
     requestId: shortId(requestId),
     threadId: shortId(cacheKey),
@@ -2501,6 +2543,9 @@ function maybeServeThreadResumeSuccessCache(channel, invokeArgs, context, reques
   }
   const responseArgs = cloneWithReplacement(entry.response.args, entry.response.requestId, requestId);
   requestSummary.resumeSuccessCacheHit = true;
+  // 成功缓存命中同样要标记存储摘要，减少弱网重复 resume 时的无意义写入和诊断噪音。
+  const storedSummary = requestRouteSummaries.get(requestId);
+  if (storedSummary) storedSummary.resumeSuccessCacheHit = true;
   diagnosticLog("official-runtime", "thread_resume_success_cache_hit", {
     reason: validation.reason,
     requestId: shortId(requestId),
@@ -2566,9 +2611,10 @@ function rememberTerminalThreadResumeError(channel, args, requestSummary, reques
   if (requestSummary && requestSummary.terminalResumeErrorCacheHit) return;
   if (!requestId || !isThreadResumeMethod(requestSummary)) return;
   const payload = payloadFromArgs(args);
-  if (!isArchivedThreadResumeError(payload)) return;
   const cacheKey = terminalThreadResumeErrorKey(requestSummary, payload);
   if (!cacheKey) return;
+  const sessionFingerprint = archivedThreadResumeSessionFingerprint(cacheKey);
+  if (!isTerminalThreadResumeErrorPayload(cacheKey, payload, sessionFingerprint)) return;
   const cacheableArgs = cloneCacheableResponseArgs(args);
   if (!cacheableArgs) return;
   threadResumeTerminalErrorCache.set(cacheKey, {
@@ -2578,8 +2624,10 @@ function rememberTerminalThreadResumeError(channel, args, requestSummary, reques
       channel,
       requestId,
     },
+    sessionFingerprint,
   });
   diagnosticLog("official-runtime", "thread_resume_terminal_error_cached", {
+    archivedBySessionFingerprint: !!sessionFingerprint,
     requestId: shortId(requestId),
     threadId: shortId(cacheKey),
   });
@@ -2595,6 +2643,13 @@ function rememberThreadResumeSuccess(channel, args, requestSummary, requestId) {
   const cacheableArgs = cloneCacheableResponseArgs(args);
   if (!cacheableArgs) return;
   const sessionFingerprint = findThreadResumeSessionFingerprint(cacheKey);
+  if (sessionFingerprint && sessionFingerprint.archived) {
+    diagnosticLog("official-runtime", "thread_resume_success_cache_skipped_archived_session", {
+      requestId: shortId(requestId),
+      threadId: shortId(cacheKey),
+    });
+    return;
+  }
   threadResumeSuccessCache.set(cacheKey, {
     appServerChildEpoch,
     expiresAtMs: Date.now() + THREAD_RESUME_SUCCESS_CACHE_TTL_MS,
