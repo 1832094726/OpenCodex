@@ -2587,21 +2587,64 @@
       });
       return true;
     }
-    clientDiagnostic("thread-detail-snapshot-route-refresh", {
+    // 先记录状态机动作；是否真的走整页导航由后续 action 决定。
+    clientDiagnostic("thread-detail-snapshot-repair", {
+      action: decision.action,
       reason: message && message.reason ? String(message.reason) : "",
       threadId: shortThreadId(decision.threadId || ""),
     });
-    const preload = decision.action === "snapshot-preload" ? preloadGatewaySnapshotFromNudge(message) : null;
-    if (preload) {
-      preload.catch(() => {});
+    if (decision.action === "snapshot-preload") {
+      const preload = preloadGatewaySnapshotFromNudge(message);
+      if (preload) {
+        preload
+          .catch(() => {})
+          .finally(() => {
+            refreshRestorableRouteInPlace(decision.route, message, "snapshot-preload");
+          });
+        return true;
+      }
+      return refreshRestorableRouteInPlace(decision.route, message, "snapshot-preload");
+    }
+    if (decision.action === "in-place-refresh") {
+      return refreshRestorableRouteInPlace(decision.route, message, "snapshot-nudge");
     }
     return navigateToRestorableRoute(decision.route, message);
+  }
+
+  function refreshRestorableRouteInPlace(route, message, reason) {
+    try {
+      const current = `${location.pathname || "/"}${location.search || ""}${location.hash || ""}`;
+      if (route !== current) return navigateToRestorableRoute(route, message);
+      // 同一路由补偿只需要唤醒官方 router/桥层监听；整页 reload 会重新加载官方 bundle，手机弱网下会放大卡顿。
+      dispatchOpenCodexRouteChange(route, reason || "snapshot-repair");
+      try {
+        w.dispatchEvent(
+          new CustomEvent("opencodex:thread-snapshot-refresh", {
+            detail: {
+              reason: reason || "",
+              threadId: (message && message.threadId) || "",
+            },
+          })
+        );
+      } catch {}
+      clientDiagnostic("thread-detail-snapshot-in-place-refresh", {
+        reason: reason || "",
+        threadId: shortThreadId((message && message.threadId) || ""),
+      });
+      return true;
+    } catch (error) {
+      clientDiagnostic("thread-detail-snapshot-in-place-refresh-failed", {
+        error: error instanceof Error ? error.message : String(error),
+        threadId: shortThreadId((message && message.threadId) || ""),
+      });
+      return false;
+    }
   }
 
   function navigateToRestorableRoute(route, message) {
     try {
       if (route === `${location.pathname || "/"}${location.search || ""}${location.hash || ""}`) {
-        location.reload();
+        return refreshRestorableRouteInPlace(route, message, "route-refresh");
       } else {
         location.href = route;
       }

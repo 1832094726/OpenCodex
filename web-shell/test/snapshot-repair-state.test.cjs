@@ -36,14 +36,14 @@ test("snapshot repair state uses snapshot preload for replay gaps", () => {
   assert.equal(decision.reason, "replay-gap");
 });
 
-test("snapshot repair state falls back to route refresh for ordinary nudges", () => {
+test("snapshot repair state uses in-place refresh for ordinary nudges", () => {
   const decision = decideSnapshotRepair({
     message: { threadId: "thread-c" },
     route: "/thread/thread-c",
     visible: true,
   });
 
-  assert.equal(decision.action, "route-refresh");
+  assert.equal(decision.action, "in-place-refresh");
   assert.equal(decision.reason, "snapshot-nudge");
 });
 

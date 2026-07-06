@@ -41,7 +41,8 @@
     if (message.replayGap === true) {
       return snapshotRepairDecisionSnapshot({ action: "snapshot-preload", reason: "replay-gap", replaySent, route, threadId });
     }
-    return snapshotRepairDecisionSnapshot({ action: "route-refresh", reason: "snapshot-nudge", route, threadId });
+    // 普通快照 nudge 只表示同一路由有新全量状态可用；优先让桥层原地广播事件，避免整页刷新重跑官方 bundle。
+    return snapshotRepairDecisionSnapshot({ action: "in-place-refresh", reason: "snapshot-nudge", route, threadId });
   }
 
   return { decideSnapshotRepair, snapshotRepairDecisionSnapshot };

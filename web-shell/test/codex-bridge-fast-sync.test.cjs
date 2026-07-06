@@ -130,11 +130,19 @@ test("gateway thread snapshot hits acknowledge the client cursor", () => {
 test("gateway snapshots can be preloaded by snapshot key after a replay gap", () => {
   const source = readPolyfillSource();
   const refreshBody = sourceBetween(source, "function refreshCurrentThreadRouteFromSnapshotNudge", "function scheduleCrossClientSyncRefresh");
+  const inPlaceBody = sourceBetween(source, "function refreshRestorableRouteInPlace", "function navigateToRestorableRoute");
+  const navigateBody = sourceBetween(source, "function navigateToRestorableRoute", "function dispatchOpenCodexRouteChange");
   const keyReadBody = sourceBetween(source, "async function readGatewayFastSyncSnapshotByKey", "async function invokeFastSyncSnapshot");
 
   assert.match(refreshBody, /preloadGatewaySnapshotFromNudge\(message\)/);
-  assert.match(refreshBody, /preload\.catch\(\(\) => \{\}\)/);
-  assert.match(refreshBody, /return navigateToRestorableRoute\(decision\.route, message\)/);
+  assert.match(refreshBody, /\.finally\(\(\) => \{\s*refreshRestorableRouteInPlace\(decision\.route, message, "snapshot-preload"\)/);
+  assert.match(refreshBody, /decision\.action === "in-place-refresh"/);
+  assert.match(refreshBody, /return refreshRestorableRouteInPlace\(decision\.route, message, "snapshot-nudge"\)/);
+  // 同一路由补偿只能派发事件，不能整页 reload，否则手机弱网会重新冷启动官方 bundle。
+  assert.match(inPlaceBody, /dispatchOpenCodexRouteChange\(route, reason \|\| "snapshot-repair"\)/);
+  assert.match(inPlaceBody, /opencodex:thread-snapshot-refresh/);
+  assert.doesNotMatch(inPlaceBody, /location\.reload\(\)|location\.href/);
+  assert.match(navigateBody, /return refreshRestorableRouteInPlace\(route, message, "route-refresh"\)/);
   assert.match(source, /function preloadGatewaySnapshotFromNudge/);
   assert.match(source, /message\.snapshotKey/);
   assert.match(source, /rememberGatewayKeySnapshotHint\(method, threadId, snapshotKey\)/);
@@ -235,6 +243,7 @@ test("thread detail nudge uses an explicit repair decision state", () => {
   assert.match(decisionBody, /visible: document\.visibilityState === "visible"/);
   assert.match(refreshBody, /const decision = threadSnapshotNudgeDecision\(message\)/);
   assert.match(refreshBody, /thread-detail-snapshot-decision/);
+  assert.match(refreshBody, /thread-detail-snapshot-repair/);
   assert.match(refreshBody, /decision\.action === "incremental-replay"/);
   assert.match(refreshBody, /decision\.action === "snapshot-preload"/);
 });
