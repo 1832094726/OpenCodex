@@ -489,6 +489,7 @@
       (() => {
         const forceLoginKey = "codex_web_force_login";
         const lastThreadRouteKey = "opencodex_last_thread_route_v1";
+        const archivedThreadIdsKey = "opencodex_archived_thread_ids_v1";
         const skipLastRouteRestoreKey = "opencodex_skip_last_route_restore";
         const nonRestorableRouteParams = ["__opencodex_renderer", "full", "mobile", "probe", "_probe", "_deep", "_tail"];
         const pluginSystem = window.OpenCodexPluginSystem || window.__OpenCodexPluginSystem || null;
@@ -791,14 +792,36 @@
           }
         }
 
-        async function clearUnavailableLastRouteBeforeRenderer() {
-          if (location.pathname !== "/" || location.search || location.hash) return;
-          let route = "";
+        function readArchivedThreadIdsBeforeRenderer() {
           try {
-            route = normalizeThreadRoute(localStorage.getItem(lastThreadRouteKey) || "");
-          } catch {}
-          const threadId = threadIdFromRoute(route);
-          if (!threadId) return;
+            const parsed = JSON.parse(localStorage.getItem(archivedThreadIdsKey) || "[]");
+            // polyfill 会在 catalog 返回后记忆归档 id；入口壳优先读这份缓存，避免 direct route 为等 catalog 拖慢。
+            return new Set(Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string" && item) : []);
+          } catch {
+            return new Set();
+          }
+        }
+
+        function currentThreadRouteBeforeRenderer() {
+          return normalizeThreadRoute(`${location.pathname || "/"}${location.search || ""}${location.hash || ""}`);
+        }
+
+        function catalogThreadById(catalog, threadId) {
+          if (!catalog || !Array.isArray(catalog.threads) || !threadId) return null;
+          return catalog.threads.find((thread) => thread && String(thread.id || "") === threadId) || null;
+        }
+
+        async function readThreadCatalogBeforeRenderer() {
+          const hasCurrentThreadRoute = !!threadIdFromRoute(currentThreadRouteBeforeRenderer());
+          let hasLastThreadRoute = false;
+          if (!hasCurrentThreadRoute && location.pathname === "/" && !location.search && !location.hash) {
+            try {
+              hasLastThreadRoute = !!threadIdFromRoute(normalizeThreadRoute(localStorage.getItem(lastThreadRouteKey) || ""));
+            } catch {}
+          }
+          if (!hasCurrentThreadRoute && !hasLastThreadRoute) return null;
+          // direct route 只做短探测，不能为了判断归档拖慢所有正常会话；首页 last-route 清理可以多等一点。
+          const timeoutMs = hasCurrentThreadRoute ? 350 : 1200;
           const catalog = await withTimeout(
             (async () => {
               const res = await fetch(`/api/mobile/bootstrap?limit=200&catalog=1&_=${Date.now()}`, {
@@ -809,10 +832,21 @@
               if (!res.ok) return null;
               return res.json();
             })(),
-            1200,
+            timeoutMs,
             null
           );
           if (!catalog || !Array.isArray(catalog.threads)) return;
+          return catalog;
+        }
+
+        function clearUnavailableLastRouteBeforeRenderer(catalog) {
+          if (location.pathname !== "/" || location.search || location.hash) return;
+          let route = "";
+          try {
+            route = normalizeThreadRoute(localStorage.getItem(lastThreadRouteKey) || "");
+          } catch {}
+          const threadId = threadIdFromRoute(route);
+          if (!threadId || !catalog) return;
           const available = catalog.threads.some((thread) => thread && String(thread.id || "") === threadId && thread.archived !== true);
           if (available) return;
           try {
@@ -824,6 +858,28 @@
             route,
             threadId: `${threadId.slice(0, 10)}...${threadId.slice(-4)}`,
           });
+        }
+
+        function clearArchivedInitialRouteBeforeRenderer(catalog) {
+          const route = currentThreadRouteBeforeRenderer();
+          const threadId = threadIdFromRoute(route);
+          if (!threadId) return false;
+          const archivedIds = readArchivedThreadIdsBeforeRenderer();
+          const entry = catalogThreadById(catalog, threadId);
+          const archived = archivedIds.has(threadId) || entry?.archived === true;
+          if (!archived) return false;
+          try {
+            // 归档会话的直达深链会让官方 renderer 进入恢复失败分支，只剩列表/链路控件；入口层直接回首页更稳。
+            const homeRoute = runtimeConfig.mobileTrafficMode ? "/?mobile=1" : "/";
+            localStorage.removeItem(lastThreadRouteKey);
+            sessionStorage.setItem(skipLastRouteRestoreKey, "1");
+            history.replaceState(history.state, "", homeRoute);
+          } catch {}
+          console.info("[opencodex] skipped archived initial route before renderer", {
+            route,
+            threadId: `${threadId.slice(0, 10)}...${threadId.slice(-4)}`,
+          });
+          return true;
         }
 
         async function authStatus() {
@@ -838,7 +894,9 @@
 
         async function bootRenderer() {
           showBoot(t("web.auth.starting"));
-          await clearUnavailableLastRouteBeforeRenderer();
+          const catalog = await readThreadCatalogBeforeRenderer();
+          clearUnavailableLastRouteBeforeRenderer(catalog);
+          clearArchivedInitialRouteBeforeRenderer(catalog);
           // SW 预缓存只是加速项，不能阻塞真实 renderer 首屏；缺失资源会由浏览器按需请求并逐步缓存。
           if ("serviceWorker" in navigator && location.protocol === "https:") {
             navigator.serviceWorker.ready.catch(() => null);

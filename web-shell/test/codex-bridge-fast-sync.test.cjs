@@ -143,17 +143,44 @@ test("restored local thread routes skip archived catalog entries", () => {
 
 test("web shell clears unavailable last-route before renderer handoff", () => {
   const html = fs.readFileSync(path.join(repoRoot, "web-shell", "index.html"), "utf8");
+  const catalogBody = sourceBetween(html, "async function readThreadCatalogBeforeRenderer", "function clearUnavailableLastRouteBeforeRenderer");
+  const lastRouteBody = sourceBetween(html, "function clearUnavailableLastRouteBeforeRenderer", "function clearArchivedInitialRouteBeforeRenderer");
 
   // 壳页比官方 renderer 更早运行；在这里清理不可用 last-route，避免 renderer 已挂载后再改路由导致白屏或只剩链路控件。
   assert.match(html, /const lastThreadRouteKey = "opencodex_last_thread_route_v1"/);
+  assert.match(html, /const archivedThreadIdsKey = "opencodex_archived_thread_ids_v1"/);
   assert.match(html, /const skipLastRouteRestoreKey = "opencodex_skip_last_route_restore"/);
   assert.match(html, /function normalizeThreadRoute/);
   assert.match(html, /function threadIdFromRoute/);
-  assert.match(html, /async function clearUnavailableLastRouteBeforeRenderer/);
-  assert.match(html, /\/api\/mobile\/bootstrap\?limit=200&catalog=1/);
-  assert.match(html, /localStorage\.removeItem\(lastThreadRouteKey\)/);
-  assert.match(html, /sessionStorage\.setItem\(skipLastRouteRestoreKey,\s*"1"\)/);
-  assert.match(html, /await clearUnavailableLastRouteBeforeRenderer\(\)/);
+  assert.match(html, /async function readThreadCatalogBeforeRenderer/);
+  assert.match(catalogBody, /currentThreadRouteBeforeRenderer\(\)/);
+  assert.match(catalogBody, /if \(!hasCurrentThreadRoute && !hasLastThreadRoute\) return null/);
+  assert.match(catalogBody, /const timeoutMs = hasCurrentThreadRoute \? 350 : 1200/);
+  assert.match(catalogBody, /\/api\/mobile\/bootstrap\?limit=200&catalog=1/);
+  assert.match(lastRouteBody, /localStorage\.removeItem\(lastThreadRouteKey\)/);
+  assert.match(lastRouteBody, /sessionStorage\.setItem\(skipLastRouteRestoreKey,\s*"1"\)/);
+  assert.match(html, /const catalog = await readThreadCatalogBeforeRenderer\(\)/);
+  assert.match(html, /clearUnavailableLastRouteBeforeRenderer\(catalog\)/);
+});
+
+test("web shell skips archived direct local routes before renderer handoff", () => {
+  const html = fs.readFileSync(path.join(repoRoot, "web-shell", "index.html"), "utf8");
+  const archivedBody = sourceBetween(html, "function clearArchivedInitialRouteBeforeRenderer", "async function authStatus");
+  const bootBody = sourceBetween(html, "async function bootRenderer", "function utf8Bytes");
+
+  // 明确归档的 /local/:id 不能继续交给官方恢复链路，否则会停在列表或只剩链路控件。
+  assert.match(html, /function readArchivedThreadIdsBeforeRenderer/);
+  assert.match(html, /function currentThreadRouteBeforeRenderer/);
+  assert.match(html, /function catalogThreadById/);
+  assert.match(archivedBody, /const route = currentThreadRouteBeforeRenderer\(\)/);
+  assert.match(archivedBody, /const archivedIds = readArchivedThreadIdsBeforeRenderer\(\)/);
+  assert.match(archivedBody, /const entry = catalogThreadById\(catalog, threadId\)/);
+  assert.match(archivedBody, /const archived = archivedIds\.has\(threadId\) \|\| entry\?\.archived === true/);
+  assert.match(archivedBody, /if \(!archived\) return false/);
+  assert.match(archivedBody, /const homeRoute = runtimeConfig\.mobileTrafficMode \? "\/\?mobile=1" : "\/"/);
+  assert.match(archivedBody, /history\.replaceState\(history\.state,\s*"",\s*homeRoute\)/);
+  assert.match(archivedBody, /skipped archived initial route before renderer/);
+  assert.match(bootBody, /clearArchivedInitialRouteBeforeRenderer\(catalog\)/);
 });
 
 test("active local thread changes update route without full page navigation", () => {
