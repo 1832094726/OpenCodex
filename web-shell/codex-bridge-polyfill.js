@@ -510,6 +510,7 @@
   const OPENCODEX_ENABLED_STATSIG_GATES = ["567837310"];
   const OPENCODEX_CLIENT_ID_STORAGE_KEY = "opencodex_browser_client_id_v1";
   const OPENCODEX_LAST_ROUTE_STORAGE_KEY = "opencodex_last_thread_route_v1";
+  const OPENCODEX_ARCHIVED_THREAD_IDS_STORAGE_KEY = "opencodex_archived_thread_ids_v1";
   const OPENCODEX_APP_HOST_THREAD_SEQ_STORAGE_PREFIX = "opencodex_app_host_thread_seq_v1:";
   const OPENCODEX_NON_RESTORABLE_ROUTE_PARAMS = [
     "__opencodex_renderer",
@@ -570,9 +571,56 @@
     return normalizeRestorableRoute(`${location.pathname || "/"}${location.search || ""}${location.hash || ""}`);
   }
 
+  function threadIdFromRoute(route) {
+    try {
+      const parsed = new URL(String(route || ""), location.origin);
+      const match = parsed.pathname.match(/^\/(?:local|thread|conversation|remote)\/([^/?#]+)/);
+      return match ? decodeURIComponent(match[1]) : "";
+    } catch {
+      const match = String(route || "").match(/^\/(?:local|thread|conversation|remote)\/([^/?#]+)/);
+      return match ? decodeURIComponent(match[1]) : "";
+    }
+  }
+
+  function readArchivedThreadIds() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(OPENCODEX_ARCHIVED_THREAD_IDS_STORAGE_KEY) || "[]");
+      return new Set(Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string" && item) : []);
+    } catch {
+      return new Set();
+    }
+  }
+
+  function routePointsToArchivedThread(route) {
+    const threadId = threadIdFromRoute(route);
+    return !!(threadId && readArchivedThreadIds().has(threadId));
+  }
+
+  function rememberArchivedThreadIds(entries) {
+    const archivedIds = [];
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      if (entry && entry.archived === true && typeof entry.threadId === "string" && entry.threadId) archivedIds.push(entry.threadId);
+    }
+    try {
+      localStorage.setItem(OPENCODEX_ARCHIVED_THREAD_IDS_STORAGE_KEY, JSON.stringify(archivedIds.slice(0, 1000)));
+    } catch {}
+    let lastRoute = "";
+    try {
+      lastRoute = normalizeRestorableRoute(localStorage.getItem(OPENCODEX_LAST_ROUTE_STORAGE_KEY) || "");
+    } catch {}
+    if (lastRoute && routePointsToArchivedThread(lastRoute)) {
+      // catalog 已确认该会话归档后，不再把它作为下次首页入口，避免手机/弱网反复跳入恢复失败页。
+      try {
+        localStorage.removeItem(OPENCODEX_LAST_ROUTE_STORAGE_KEY);
+      } catch {}
+      clientDiagnostic("last-route-archived-cleared", { route: lastRoute });
+    }
+  }
+
   function persistCurrentRoute() {
     const route = currentRestorableRoute();
     if (!route) return;
+    if (routePointsToArchivedThread(route)) return;
     try {
       localStorage.setItem(OPENCODEX_LAST_ROUTE_STORAGE_KEY, route);
     } catch {}
@@ -586,6 +634,13 @@
       route = normalizeRestorableRoute(localStorage.getItem(OPENCODEX_LAST_ROUTE_STORAGE_KEY) || "");
     } catch {}
     if (!route) return;
+    if (routePointsToArchivedThread(route)) {
+      try {
+        localStorage.removeItem(OPENCODEX_LAST_ROUTE_STORAGE_KEY);
+      } catch {}
+      clientDiagnostic("last-route-restore-skipped-archived", { route });
+      return;
+    }
     try {
       history.replaceState(history.state, "", route);
       clientDiagnostic("last-route-restored", { route });
@@ -4700,6 +4755,7 @@
         isComplete: true,
         revision,
       };
+      rememberArchivedThreadIds(entries);
       safeClientDiagnostic("local-thread-catalog-refresh", {
         entryCount: entries.length,
         mode,

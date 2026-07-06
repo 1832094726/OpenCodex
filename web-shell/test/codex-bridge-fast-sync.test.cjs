@@ -97,6 +97,26 @@ test("restored local thread routes drop one-shot diagnostic query params", () =>
   assert.match(normalizeBody, /parsed\.searchParams\.delete\(param\)/);
 });
 
+test("restored local thread routes skip archived catalog entries", () => {
+  const source = readPolyfillSource();
+  const archivedRouteBody = sourceBetween(source, "function threadIdFromRoute", "function persistCurrentRoute");
+  const persistBody = sourceBetween(source, "function persistCurrentRoute", "function restoreLastRouteOnColdEntry");
+  const restoreBody = sourceBetween(source, "function restoreLastRouteOnColdEntry", "function installRoutePersistence");
+  const catalogBody = sourceBetween(source, "function localThreadCatalogTimestamp", "/** 把 Electron/Codex bridge API");
+
+  // 首页自动恢复只适合活跃会话；catalog 确认归档后要清掉 last-route，避免手机打开就跳进恢复失败循环。
+  assert.match(source, /OPENCODEX_ARCHIVED_THREAD_IDS_STORAGE_KEY/);
+  assert.match(archivedRouteBody, /function readArchivedThreadIds/);
+  assert.match(archivedRouteBody, /function rememberArchivedThreadIds/);
+  assert.match(archivedRouteBody, /routePointsToArchivedThread\(lastRoute\)/);
+  assert.match(archivedRouteBody, /last-route-archived-cleared/);
+  assert.match(persistBody, /if \(routePointsToArchivedThread\(route\)\) return/);
+  assert.match(restoreBody, /routePointsToArchivedThread\(route\)/);
+  assert.match(restoreBody, /last-route-restore-skipped-archived/);
+  assert.match(catalogBody, /rememberArchivedThreadIds\(entries\)/);
+  assert.match(catalogBody, /archived: thread\.archived === true/);
+});
+
 test("active local thread changes update route without full page navigation", () => {
   const source = readPolyfillSource();
   const navigateBody = sourceBetween(source, "function navigateToLocalThreadRouteInPlace", "function preloadGatewaySnapshotFromNudge");
