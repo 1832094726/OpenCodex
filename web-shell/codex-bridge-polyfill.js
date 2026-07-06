@@ -43,6 +43,14 @@
     250,
     Math.min(10000, Number(cfg.clientDiagnosticSlowUploadMs || 1200) || 1200)
   );
+  const AUXILIARY_FETCH_CACHE_TTL_MS = Math.max(
+    1000,
+    Math.min(30000, Number(cfg.auxiliaryFetchCacheTtlMs || 8000) || 8000)
+  );
+  const AUXILIARY_FETCH_CACHE_MAX_ENTRIES = Math.max(
+    20,
+    Math.min(200, Number(cfg.auxiliaryFetchCacheMaxEntries || 80) || 80)
+  );
   const LOW_PRIORITY_IPC_CONCURRENCY = 2;
   const LOW_PRIORITY_IPC_LOG_EVERY = 25;
   const READ_ONLY_APP_SERVER_CACHE_TTL_MS = 15000;
@@ -713,6 +721,10 @@
   const connectorLogoInFlight = new Map();
   const connectorLogoRequestCacheKeys = new Map();
   const connectorLogoDiagnosticCounts = new Map();
+  const auxiliaryFetchResponseCache = new Map();
+  const auxiliaryFetchInFlight = new Map();
+  const auxiliaryFetchRequestCacheKeys = new Map();
+  const auxiliaryFetchDiagnosticCounts = new Map();
   const readOnlyAppServerCache = new Map();
   const readOnlyAppServerInFlight = new Map();
   const gatewayKeySnapshotCache = new Map();
@@ -1403,11 +1415,11 @@
   }
 
   function shouldSuppressRoutineIpcDiagnostic(payload) {
-    // log-message 和 connector logo 都是高频非关键请求；默认不打印逐条 start/end，避免盖住会话加载链路。
+    // 高频非关键请求默认不打印逐条 start/end，避免盖住 thread/read、turn/start 等会话加载链路。
     return (
       payload &&
       typeof payload === "object" &&
-      (payload.type === "log-message" || isLowPriorityFetchPayload(payload))
+      (payload.type === "log-message" || isLowPriorityFetchPayload(payload) || shouldPreferHttpForAuxiliaryFetch(payload))
     );
   }
 
@@ -1455,8 +1467,12 @@
     return connectorLogoCacheKeyFromUrl(payload.url);
   }
 
-  function connectorLogoRequestId(payload) {
+  function fetchRequestId(payload) {
     return payload && typeof payload === "object" && payload.requestId != null ? String(payload.requestId) : "";
+  }
+
+  function connectorLogoRequestId(payload) {
+    return fetchRequestId(payload);
   }
 
   function isTrackedConnectorLogoResponse(payload) {
@@ -1486,10 +1502,14 @@
     return JSON.parse(JSON.stringify(payload));
   }
 
-  function cloneConnectorLogoFetchResponse(template, requestId) {
+  function cloneFetchResponseWithRequestId(template, requestId) {
     const cloned = clonePlainPayload(template);
     cloned.requestId = requestId;
     return cloned;
+  }
+
+  function cloneConnectorLogoFetchResponse(template, requestId) {
+    return cloneFetchResponseWithRequestId(template, requestId);
   }
 
   function isSuccessfulFetchResponse(payload) {
@@ -1533,6 +1553,110 @@
     });
   }
 
+  function normalizedAuxiliaryFetchUrl(payload) {
+    try {
+      const parsed = new URL(String(payload && payload.url ? payload.url : ""), "vscode://codex");
+      const sortedParams = [...parsed.searchParams.entries()].sort(([left], [right]) =>
+        String(left).localeCompare(String(right))
+      );
+      const query = new URLSearchParams(sortedParams).toString();
+      return `${parsed.protocol}//${parsed.host}${parsed.pathname.replace(/\/+$/, "")}${query ? `?${query}` : ""}`;
+    } catch {
+      return String(payload && payload.url ? payload.url : "");
+    }
+  }
+
+  function normalizedAuxiliaryFetchBody(payload) {
+    const raw =
+      payload && typeof payload === "object" && typeof payload.body === "string"
+        ? payload.body
+        : payload && typeof payload === "object" && typeof payload.bodyJsonString === "string"
+          ? payload.bodyJsonString
+          : "";
+    if (!raw || !raw.trim()) return "";
+    try {
+      const parsed = JSON.parse(raw);
+      // body 里有些字段是每次生成的请求 id；规范化后同一文件/同一 Git 状态读取才能合并。
+      return stringifyForIpc(stableReadOnlyAppServerKeyPart(parsed));
+    } catch {
+      return raw;
+    }
+  }
+
+  function auxiliaryFetchCacheKeyFromPayload(payload) {
+    if (!shouldPreferHttpForAuxiliaryFetch(payload)) return "";
+    try {
+      return stringifyForIpc({
+        body: normalizedAuxiliaryFetchBody(payload),
+        method: String(payload.method || "GET").toUpperCase(),
+        url: normalizedAuxiliaryFetchUrl(payload),
+      });
+    } catch {
+      return `${String(payload.method || "GET").toUpperCase()}:${normalizedAuxiliaryFetchUrl(payload)}`;
+    }
+  }
+
+  function logAuxiliaryFetchDiagnostic(event, details) {
+    const count = (auxiliaryFetchDiagnosticCounts.get(event) || 0) + 1;
+    auxiliaryFetchDiagnosticCounts.set(event, count);
+    // 文件/Git 状态请求在启动期很多，只采样打点；关键错误仍会通过 ipc-invoke-failed 上传。
+    if (!shouldLogSampledCount(count)) return;
+    clientDiagnostic(event, {
+      ...details,
+      cacheSize: auxiliaryFetchResponseCache.size,
+      count,
+      inFlightCount: auxiliaryFetchInFlight.size,
+    });
+  }
+
+  function pruneAuxiliaryFetchResponseCache(nowMs = Date.now()) {
+    for (const [cacheKey, entry] of auxiliaryFetchResponseCache) {
+      if (!entry || entry.expiresAtMs <= nowMs) auxiliaryFetchResponseCache.delete(cacheKey);
+    }
+    while (auxiliaryFetchResponseCache.size > AUXILIARY_FETCH_CACHE_MAX_ENTRIES) {
+      const firstKey = auxiliaryFetchResponseCache.keys().next().value;
+      auxiliaryFetchResponseCache.delete(firstKey);
+    }
+  }
+
+  function emitAuxiliaryFetchCachedResponse(cacheKey, requestId) {
+    pruneAuxiliaryFetchResponseCache();
+    const cached = auxiliaryFetchResponseCache.get(cacheKey);
+    if (!cached || cached.expiresAtMs <= Date.now()) {
+      if (cached) auxiliaryFetchResponseCache.delete(cacheKey);
+      return false;
+    }
+    emitFetchResponse(cloneFetchResponseWithRequestId(cached.value, requestId));
+    logAuxiliaryFetchDiagnostic("auxiliary_fetch_cache_hit", { cacheKey, requestId });
+    return true;
+  }
+
+  function emitAuxiliaryFetchWaitingResponses(cacheKey, responsePayload) {
+    const inFlight = auxiliaryFetchInFlight.get(cacheKey);
+    if (!inFlight) return 0;
+    auxiliaryFetchInFlight.delete(cacheKey);
+    let delivered = 0;
+    for (const waitingRequestId of inFlight.waitingRequestIds) {
+      emitFetchResponse(cloneFetchResponseWithRequestId(responsePayload, waitingRequestId));
+      delivered += 1;
+    }
+    return delivered;
+  }
+
+  function rememberAuxiliaryFetchRequest(cacheKey, requestId) {
+    if (!cacheKey || !requestId) return;
+    auxiliaryFetchRequestCacheKeys.set(requestId, cacheKey);
+    auxiliaryFetchInFlight.set(cacheKey, {
+      primaryRequestId: requestId,
+      waitingRequestIds: [],
+    });
+  }
+
+  function isTrackedAuxiliaryFetchResponse(payload) {
+    const requestId = fetchRequestId(payload);
+    return !!requestId && auxiliaryFetchRequestCacheKeys.has(requestId);
+  }
+
   function handleConnectorLogoFetchResponse(payload) {
     const requestId = connectorLogoRequestId(payload);
     if (!requestId) return false;
@@ -1564,6 +1688,41 @@
     return true;
   }
 
+  function handleAuxiliaryFetchResponse(payload) {
+    const requestId = fetchRequestId(payload);
+    if (!requestId) return false;
+    const cacheKey = auxiliaryFetchRequestCacheKeys.get(requestId);
+    if (!cacheKey) return false;
+    auxiliaryFetchRequestCacheKeys.delete(requestId);
+
+    const waiterCount = auxiliaryFetchInFlight.get(cacheKey)?.waitingRequestIds.length || 0;
+    if (isSuccessfulFetchResponse(payload)) {
+      // 缓存完整 fetch-response 模板，后续只替换 requestId，保证官方 fetch promise 能按原协议 resolve。
+      auxiliaryFetchResponseCache.set(cacheKey, {
+        expiresAtMs: Date.now() + AUXILIARY_FETCH_CACHE_TTL_MS,
+        value: clonePlainPayload(payload),
+      });
+      pruneAuxiliaryFetchResponseCache();
+      const delivered = emitAuxiliaryFetchWaitingResponses(cacheKey, payload);
+      logAuxiliaryFetchDiagnostic("auxiliary_fetch_cache_store", {
+        cacheKey,
+        requestId,
+        status: payload.status,
+        waiterCount: delivered,
+      });
+    } else {
+      // 失败不缓存，但必须唤醒等待者，否则官方 fetch 管理器会留下悬空请求。
+      const delivered = emitAuxiliaryFetchWaitingResponses(cacheKey, payload);
+      logAuxiliaryFetchDiagnostic("auxiliary_fetch_failed", {
+        cacheKey,
+        requestId,
+        status: payload.status || 0,
+        waiterCount: Math.max(waiterCount, delivered),
+      });
+    }
+    return true;
+  }
+
   function emitConnectorLogoInvokeError(cacheKey, requestId, error) {
     if (!cacheKey || !requestId) return;
     connectorLogoRequestCacheKeys.delete(requestId);
@@ -1576,6 +1735,25 @@
     const delivered = emitConnectorLogoWaitingResponses(cacheKey, errorPayload);
     emitFetchResponse(errorPayload);
     logConnectorLogoDiagnostic("logo_invoke_failed", {
+      cacheKey,
+      error: errorPayload.error,
+      requestId,
+      waiterCount: delivered,
+    });
+  }
+
+  function emitAuxiliaryFetchInvokeError(cacheKey, requestId, error) {
+    if (!cacheKey || !requestId) return;
+    auxiliaryFetchRequestCacheKeys.delete(requestId);
+    const errorPayload = {
+      requestId,
+      responseType: "error",
+      status: 500,
+      error: error instanceof Error ? error.message : String(error),
+    };
+    const delivered = emitAuxiliaryFetchWaitingResponses(cacheKey, errorPayload);
+    emitFetchResponse(errorPayload);
+    logAuxiliaryFetchDiagnostic("auxiliary_fetch_invoke_failed", {
       cacheKey,
       error: errorPayload.error,
       requestId,
@@ -3334,6 +3512,35 @@
     );
   }
 
+  function handleAuxiliaryFetchInvoke(channel, ipcArgs, payload, diagnosticSummary) {
+    const cacheKey = auxiliaryFetchCacheKeyFromPayload(payload);
+    const requestId = fetchRequestId(payload);
+    if (!cacheKey || !requestId) return null;
+
+    if (emitAuxiliaryFetchCachedResponse(cacheKey, requestId)) {
+      return Promise.resolve({ ok: true, cached: true });
+    }
+
+    const inFlight = auxiliaryFetchInFlight.get(cacheKey);
+    if (inFlight) {
+      // 同一页面短时间内会重复读取插件文件和 Git 状态；等待首个回包即可，不再制造新 IPC。
+      inFlight.waitingRequestIds.push(requestId);
+      logAuxiliaryFetchDiagnostic("auxiliary_fetch_inflight_join", {
+        cacheKey,
+        requestId,
+        waiterCount: inFlight.waitingRequestIds.length,
+      });
+      return Promise.resolve({ ok: true, joined: true });
+    }
+
+    rememberAuxiliaryFetchRequest(cacheKey, requestId);
+    logAuxiliaryFetchDiagnostic("auxiliary_fetch_cache_miss", { cacheKey, requestId });
+    return invokeGatewayImmediate(channel, ipcArgs, payload, { preferHttp: true }).catch((error) => {
+      emitAuxiliaryFetchInvokeError(cacheKey, requestId, error);
+      throw error;
+    });
+  }
+
   /** 统计被本地拦截的 log-message 数量，用于诊断上报。 */
   let logMessageInterceptedCount = 0;
 
@@ -4183,6 +4390,8 @@
     if (cachedReadOnlyAppServerInvoke) return cachedReadOnlyAppServerInvoke;
     const fastSyncInvoke = await invokeFastSyncSnapshot(channel, ipcArgs, payload, diagnosticSummary);
     if (fastSyncInvoke && fastSyncInvoke.hit) return fastSyncInvoke.value;
+    const auxiliaryFetchInvoke = handleAuxiliaryFetchInvoke(channel, ipcArgs, payload, diagnosticSummary);
+    if (auxiliaryFetchInvoke) return auxiliaryFetchInvoke;
     if (isLowPriorityFetchPayload(payload)) {
       /**
        * connector logo 属于首屏非关键资产，但官方 renderer 会一次性发很多。
@@ -5553,7 +5762,9 @@
           }
           const trackedConnectorLogoResponse =
             effectiveChannel === "fetch-response" && isTrackedConnectorLogoResponse(messagePayload);
-          if (!trackedConnectorLogoResponse) {
+          const trackedAuxiliaryFetchResponse =
+            effectiveChannel === "fetch-response" && isTrackedAuxiliaryFetchResponse(messagePayload);
+          if (!trackedConnectorLogoResponse && !trackedAuxiliaryFetchResponse) {
             // 常规 ws-message 摘要仍保留，便于排查基础 IPC 路由；真正的大包耗时采样由 debugWs 控制。
             clientDiagnostic("ws-message", {
               ...ipcDiagnosticSummary(effectiveChannel, messagePayload),
@@ -5577,12 +5788,14 @@
             return;
           }
           if (effectiveChannel === "fetch-response") {
-            // 官方 logo 回包到达后写入页内缓存，并把同 key 等待的 requestId 用原样数据唤醒。
+            // 官方 fetch 回包到达后写入页内缓存，并把同 key 等待的 requestId 用原样数据唤醒。
             handleConnectorLogoFetchResponse(messagePayload);
+            handleAuxiliaryFetchResponse(messagePayload);
           }
           // vscode://codex/... 这类 fetch IPC 的失败只会从 WebSocket 回来，这里统一转成页面错误 toast。
           if (
             !trackedConnectorLogoResponse &&
+            !trackedAuxiliaryFetchResponse &&
             effectiveChannel === "fetch-response" &&
             messagePayload &&
             messagePayload.responseType === "error"

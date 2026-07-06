@@ -545,6 +545,38 @@ test("conversation entry auxiliary ipc prefers http while critical thread reads 
   assert.match(invokeBody, /canUseWsForIpc\(\) && !preferHttp/);
 });
 
+test("auxiliary fetches are deduped and cached without touching realtime thread reads", () => {
+  const source = readPolyfillSource();
+  const helperBody = sourceBetween(source, "function normalizedAuxiliaryFetchUrl", "function handleConnectorLogoFetchResponse");
+  const invokeGatewayBody = sourceBetween(source, "async function invokeGateway(channel, args)", "// ─── WS IPC 通道");
+  const wsDispatchBody = sourceBetween(source, "const trackedConnectorLogoResponse", "handleTokenUsageGatewayPayload");
+  const suppressBody = sourceBetween(source, "function shouldSuppressRoutineIpcDiagnostic", "function isConnectorLogoUrl");
+
+  // read-file-binary/Git/CLI 状态是启动期辅助 fetch：同 key 等首个 fetch-response，再克隆 requestId 唤醒等待者。
+  assert.match(source, /AUXILIARY_FETCH_CACHE_TTL_MS/);
+  assert.match(source, /AUXILIARY_FETCH_CACHE_MAX_ENTRIES/);
+  assert.match(source, /const auxiliaryFetchResponseCache = new Map\(\)/);
+  assert.match(source, /const auxiliaryFetchInFlight = new Map\(\)/);
+  assert.match(source, /const auxiliaryFetchRequestCacheKeys = new Map\(\)/);
+  assert.match(helperBody, /normalizedAuxiliaryFetchUrl/);
+  assert.match(helperBody, /normalizedAuxiliaryFetchBody/);
+  assert.match(helperBody, /stableReadOnlyAppServerKeyPart\(parsed\)/);
+  assert.match(helperBody, /emitAuxiliaryFetchCachedResponse/);
+  assert.match(helperBody, /emitAuxiliaryFetchWaitingResponses/);
+  assert.match(helperBody, /cloneFetchResponseWithRequestId\(responsePayload, waitingRequestId\)/);
+  assert.match(source, /function handleAuxiliaryFetchInvoke\(channel, ipcArgs, payload, diagnosticSummary\)/);
+  assert.match(source, /function handleAuxiliaryFetchResponse\(payload\)/);
+  assert.match(invokeGatewayBody, /const auxiliaryFetchInvoke = handleAuxiliaryFetchInvoke/);
+  assert.match(invokeGatewayBody, /if \(auxiliaryFetchInvoke\) return auxiliaryFetchInvoke/);
+  assert.match(wsDispatchBody, /trackedAuxiliaryFetchResponse/);
+  assert.match(wsDispatchBody, /isTrackedAuxiliaryFetchResponse\(messagePayload\)/);
+  assert.match(wsDispatchBody, /handleAuxiliaryFetchResponse\(messagePayload\)/);
+  assert.match(suppressBody, /shouldPreferHttpForAuxiliaryFetch\(payload\)/);
+  assert.match(source, /method === "thread\/read"/);
+  assert.match(source, /method === "thread\/turns\/list"/);
+  assert.match(source, /method === "turn\/start"/);
+});
+
 test("token usage inline waits until conversation entry is idle", () => {
   const source = fs.readFileSync(path.join(repoRoot, "web-shell/plugins/token-usage-inline/index.js"), "utf8");
   // token 用量 badge 是辅助信息，必须晚于会话正文加载，避免抢占 thread/resume 和 turns/list。
