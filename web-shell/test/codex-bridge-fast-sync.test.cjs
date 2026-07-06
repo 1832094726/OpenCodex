@@ -165,22 +165,31 @@ test("web shell clears unavailable last-route before renderer handoff", () => {
 
 test("web shell skips archived direct local routes before renderer handoff", () => {
   const html = fs.readFileSync(path.join(repoRoot, "web-shell", "index.html"), "utf8");
+  const detailBody = sourceBetween(html, "async function readInitialThreadDetailBeforeRenderer", "function clearUnavailableLastRouteBeforeRenderer");
   const archivedBody = sourceBetween(html, "function clearArchivedInitialRouteBeforeRenderer", "async function authStatus");
   const bootBody = sourceBetween(html, "async function bootRenderer", "function utf8Bytes");
 
   // 明确归档的 /local/:id 不能继续交给官方恢复链路，否则会停在列表或只剩链路控件。
+  // 最近 catalog 可能不包含旧归档会话，直达深链需要再用详情接口做一次短探测。
   assert.match(html, /function readArchivedThreadIdsBeforeRenderer/);
   assert.match(html, /function currentThreadRouteBeforeRenderer/);
   assert.match(html, /function catalogThreadById/);
+  assert.match(html, /function rememberArchivedThreadIdBeforeRenderer/);
+  assert.match(html, /async function readInitialThreadDetailBeforeRenderer/);
+  assert.match(detailBody, /catalogThreadById\(catalog, threadId\)/);
+  assert.match(detailBody, /\/api\/mobile\/thread\/\$\{encodeURIComponent\(threadId\)\}\?limit=1/);
+  assert.match(detailBody, /String\(detail\.thread\.id \|\| ""\) !== threadId/);
   assert.match(archivedBody, /const route = currentThreadRouteBeforeRenderer\(\)/);
   assert.match(archivedBody, /const archivedIds = readArchivedThreadIdsBeforeRenderer\(\)/);
   assert.match(archivedBody, /const entry = catalogThreadById\(catalog, threadId\)/);
-  assert.match(archivedBody, /const archived = archivedIds\.has\(threadId\) \|\| entry\?\.archived === true/);
+  assert.match(archivedBody, /detailThread\?\.archived === true/);
+  assert.match(archivedBody, /rememberArchivedThreadIdBeforeRenderer\(threadId\)/);
   assert.match(archivedBody, /if \(!archived\) return false/);
   assert.match(archivedBody, /const homeRoute = runtimeConfig\.mobileTrafficMode \? "\/\?mobile=1" : "\/"/);
   assert.match(archivedBody, /history\.replaceState\(history\.state,\s*"",\s*homeRoute\)/);
   assert.match(archivedBody, /skipped archived initial route before renderer/);
-  assert.match(bootBody, /clearArchivedInitialRouteBeforeRenderer\(catalog\)/);
+  assert.match(bootBody, /const initialThreadDetail = await readInitialThreadDetailBeforeRenderer\(catalog\)/);
+  assert.match(bootBody, /clearArchivedInitialRouteBeforeRenderer\(catalog, initialThreadDetail\)/);
 });
 
 test("active local thread changes update route without full page navigation", () => {

@@ -811,6 +811,15 @@
           return catalog.threads.find((thread) => thread && String(thread.id || "") === threadId) || null;
         }
 
+        function rememberArchivedThreadIdBeforeRenderer(threadId) {
+          if (!threadId) return;
+          try {
+            const archivedIds = readArchivedThreadIdsBeforeRenderer();
+            archivedIds.add(threadId);
+            localStorage.setItem(archivedThreadIdsKey, JSON.stringify(Array.from(archivedIds).slice(-1000)));
+          } catch {}
+        }
+
         async function readThreadCatalogBeforeRenderer() {
           const hasCurrentThreadRoute = !!threadIdFromRoute(currentThreadRouteBeforeRenderer());
           let hasLastThreadRoute = false;
@@ -839,6 +848,30 @@
           return catalog;
         }
 
+        async function readInitialThreadDetailBeforeRenderer(catalog) {
+          const route = currentThreadRouteBeforeRenderer();
+          const threadId = threadIdFromRoute(route);
+          if (!threadId) return null;
+          if (readArchivedThreadIdsBeforeRenderer().has(threadId)) return null;
+          if (catalogThreadById(catalog, threadId)) return null;
+          // 最近 catalog 为了首屏速度可能没覆盖旧归档会话；直达深链再做一次短详情探测，避免交给官方 renderer 后半挂。
+          const detail = await withTimeout(
+            (async () => {
+              const res = await fetch(`/api/mobile/thread/${encodeURIComponent(threadId)}?limit=1&_=${Date.now()}`, {
+                cache: "no-store",
+                credentials: "same-origin",
+                headers: authHeaders({ accept: "application/json" }),
+              });
+              if (!res.ok) return null;
+              return res.json();
+            })(),
+            650,
+            null
+          );
+          if (!detail || detail.ok !== true || !detail.thread || String(detail.thread.id || "") !== threadId) return null;
+          return detail;
+        }
+
         function clearUnavailableLastRouteBeforeRenderer(catalog) {
           if (location.pathname !== "/" || location.search || location.hash) return;
           let route = "";
@@ -860,17 +893,22 @@
           });
         }
 
-        function clearArchivedInitialRouteBeforeRenderer(catalog) {
+        function clearArchivedInitialRouteBeforeRenderer(catalog, initialThreadDetail) {
           const route = currentThreadRouteBeforeRenderer();
           const threadId = threadIdFromRoute(route);
           if (!threadId) return false;
           const archivedIds = readArchivedThreadIdsBeforeRenderer();
           const entry = catalogThreadById(catalog, threadId);
-          const archived = archivedIds.has(threadId) || entry?.archived === true;
+          const detailThread =
+            initialThreadDetail && initialThreadDetail.thread && String(initialThreadDetail.thread.id || "") === threadId
+              ? initialThreadDetail.thread
+              : null;
+          const archived = archivedIds.has(threadId) || entry?.archived === true || detailThread?.archived === true;
           if (!archived) return false;
           try {
             // 归档会话的直达深链会让官方 renderer 进入恢复失败分支，只剩列表/链路控件；入口层直接回首页更稳。
             const homeRoute = runtimeConfig.mobileTrafficMode ? "/?mobile=1" : "/";
+            rememberArchivedThreadIdBeforeRenderer(threadId);
             localStorage.removeItem(lastThreadRouteKey);
             sessionStorage.setItem(skipLastRouteRestoreKey, "1");
             history.replaceState(history.state, "", homeRoute);
@@ -895,8 +933,9 @@
         async function bootRenderer() {
           showBoot(t("web.auth.starting"));
           const catalog = await readThreadCatalogBeforeRenderer();
+          const initialThreadDetail = await readInitialThreadDetailBeforeRenderer(catalog);
           clearUnavailableLastRouteBeforeRenderer(catalog);
-          clearArchivedInitialRouteBeforeRenderer(catalog);
+          clearArchivedInitialRouteBeforeRenderer(catalog, initialThreadDetail);
           // SW 预缓存只是加速项，不能阻塞真实 renderer 首屏；缺失资源会由浏览器按需请求并逐步缓存。
           if ("serviceWorker" in navigator && location.protocol === "https:") {
             navigator.serviceWorker.ready.catch(() => null);
