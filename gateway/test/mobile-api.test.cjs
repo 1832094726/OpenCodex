@@ -1561,6 +1561,8 @@ test("request handler keeps the official shell for mobile browsers and enables t
   assert.match(deepLink.body, /mobileTrafficMode":true/);
   assert.match(response.body, /opencodex-plugin-system/);
   assert.doesNotMatch(response.body, /opencodex-plugin-loader\.js/);
+  assert.doesNotMatch(response.body, /codex-window-controls-overlay\.(?:js|css)/);
+  assert.doesNotMatch(deepLink.body, /codex-window-controls-overlay\.(?:js|css)/);
 });
 
 test("official renderer skips token usage capability only for mobile traffic mode", () => {
@@ -1583,11 +1585,15 @@ test("official renderer skips token usage capability only for mobile traffic mod
     assert.match(desktop, /__opencodexDeferredPluginLoaderInstalled/);
     assert.match(desktop, /requestIdleCallback/);
     assert.match(desktop, /opencodex-plugin-loader\.js/);
+    assert.match(desktop, /codex-window-controls-overlay\.css/);
+    assert.match(desktop, /codex-window-controls-overlay\.js/);
     assert.doesNotMatch(mobile, /codex-token-usage-capability\.js/);
     assert.doesNotMatch(mobile, /__opencodexDeferredPluginLoaderInstalled/);
     assert.doesNotMatch(mobile, /opencodex-plugin-loader\.js/);
+    assert.doesNotMatch(mobile, /codex-window-controls-overlay\.(?:js|css)/);
     assert.match(mobile, /跳过 token usage capability/);
     assert.match(mobile, /跳过插件 loader/);
+    assert.match(mobile, /跳过 window controls overlay/);
     assert.match(mobile, /mobileTrafficMode:true/);
     assert.match(mobile, /__OPENCODEX_MOBILE_TRAFFIC_MODE__=true/);
   } finally {

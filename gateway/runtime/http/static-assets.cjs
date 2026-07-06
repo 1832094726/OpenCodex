@@ -125,6 +125,15 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     html = html.replace(/(src|href)=["']\/(?!(?:official|assets)\/)([^"'#?]+)["']/g, '$1="/official/$2"');
     html = html.replace(/(src|href)=["']\.\/([^"'#?]+)["']/g, '$1="/official/$2"');
     const initialRoute = typeof options.initialRoute === "string" ? options.initialRoute.trim() : "";
+    const windowControlsOverlayAssets =
+      options.mobileTrafficMode === true
+        ? [
+            "<!-- OpenCodex 手机流量模式跳过 window controls overlay，避免加载桌面标题栏修补脚本。 -->",
+          ]
+        : [
+            `<link id="codex-web-window-controls-overlay-styles" rel="stylesheet" href="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH}">`,
+            `<script src="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH}"></script>`,
+          ];
     const base = [
       '<base href="/official/">',
       initialRoute ? `<meta name="initial-route" content="${escapeHtml(initialRoute)}">` : "",
@@ -137,7 +146,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       '<meta name="apple-mobile-web-app-title" content="OpenCodex">',
       '<meta name="apple-mobile-web-app-capable" content="yes">',
       '<meta name="apple-mobile-web-app-status-bar-style" content="default">',
-      `<link id="codex-web-window-controls-overlay-styles" rel="stylesheet" href="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH}">`,
+      ...windowControlsOverlayAssets.slice(0, 1),
       '<script src="/codex-web-config.js"></script>',
       // mobile=1 是桌面调试手机链路的入口参数；cleanup 擦掉 query 后仍要把瘦身标志留给 bridge。
       options.mobileTrafficMode === true
@@ -150,7 +159,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       options.mobileTrafficMode === true
         ? "<!-- OpenCodex 手机流量模式跳过 token usage capability，避免进会话后逐条补统计阻塞渲染。 -->"
         : `<script src="${OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH}"></script>`,
-      `<script src="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH}"></script>`,
+      ...windowControlsOverlayAssets.slice(1),
       // fast-sync store 必须早于 bridge polyfill 初始化，后续 polyfill 才能首屏读取本地快照。
       `<script src="${OPENCODEX_FAST_SYNC_PATH}?v=${webShellStaticVersion(OPENCODEX_FAST_SYNC_PATH)}"></script>`,
       `<script src="${OPENCODEX_SNAPSHOT_REPAIR_STATE_PATH}?v=${webShellStaticVersion(OPENCODEX_SNAPSHOT_REPAIR_STATE_PATH)}"></script>`,
@@ -350,6 +359,19 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     );
   }
 
+  function stripMobileWebShellDesktopAssets(rawHtml, options = {}) {
+    if (options.mobileTrafficMode !== true) return rawHtml;
+    return rawHtml
+      .replace(
+        /\n\s*<link id="codex-web-window-controls-overlay-styles" rel="stylesheet" href="\/codex-window-controls-overlay\.css" \/?>/i,
+        "\n    <!-- OpenCodex 手机流量模式跳过 window controls overlay 样式。 -->"
+      )
+      .replace(
+        /\n\s*<script src="\/codex-window-controls-overlay\.js"><\/script>/i,
+        "\n    <!-- OpenCodex 手机流量模式跳过 window controls overlay 脚本。 -->"
+      );
+  }
+
   function createPluginLoaderScript() {
     const pluginUrls = listPluginEntries().map(
       (entry) => `${OPENCODEX_PLUGIN_URL_PREFIX}${entry.urlPath}?v=${entry.version}`
@@ -371,7 +393,10 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   function createWebShellIndexResponse(options = {}) {
     const shell = path.join(WEB_SHELL_DIR, "index.html");
     const i18n = currentI18n();
-    let html = patchWebShellAppVersion(patchHtmlLang(readText(shell), i18n.locale));
+    let html = stripMobileWebShellDesktopAssets(
+      patchWebShellAppVersion(patchHtmlLang(readText(shell), i18n.locale)),
+      options
+    );
     const links = officialStyleLinks();
     if (links) {
       // web-shell 自己负责承载 UI，注入官方样式后视觉表现和桌面 renderer 保持一致。
