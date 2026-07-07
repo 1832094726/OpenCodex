@@ -128,3 +128,41 @@ test("official asset file listings are reused across renderer and precache looku
     fs.rmSync(tempRoot, { force: true, recursive: true });
   }
 });
+
+test("renderer html source is cached while request-specific transforms stay dynamic", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-html-source-cache-"));
+  const indexFile = path.join(tempRoot, "index.html");
+  fs.mkdirSync(path.join(tempRoot, "assets"), { recursive: true });
+  fs.writeFileSync(indexFile, '<!doctype html><html><head><title>Codex</title></head><body><div id="root"></div></body></html>');
+
+  const staticAssets = createStaticAssetService({
+    getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+    getOfficialBundle: () => ({ webviewDir: tempRoot }),
+  });
+  const originalReadFileSync = fs.readFileSync;
+  let indexReads = 0;
+  fs.readFileSync = function readFileSyncWithCounter(target, ...args) {
+    if (path.resolve(String(target)) === indexFile) indexReads += 1;
+    return originalReadFileSync.call(this, target, ...args);
+  };
+
+  try {
+    const first = staticAssets.createRendererResponse({ initialRoute: "/local/thread-a", mobileTrafficMode: true });
+    const second = staticAssets.createRendererResponse({ initialRoute: "/local/thread-b", mobileTrafficMode: true });
+
+    assert.equal(indexReads, 1);
+    assert.match(first, /\/local\/thread-a/);
+    assert.match(second, /\/local\/thread-b/);
+
+    fs.writeFileSync(indexFile, '<!doctype html><html><head><title>Codex Updated</title></head><body></body></html>');
+    fs.utimesSync(indexFile, new Date(Date.now() + 2_000), new Date(Date.now() + 2_000));
+    const updated = staticAssets.createRendererResponse({ initialRoute: "/local/thread-c", mobileTrafficMode: true });
+
+    assert.equal(indexReads, 2);
+    assert.match(updated, /Codex Updated/);
+    assert.match(updated, /\/local\/thread-c/);
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+    fs.rmSync(tempRoot, { force: true, recursive: true });
+  }
+});

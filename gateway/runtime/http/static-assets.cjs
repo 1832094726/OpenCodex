@@ -64,6 +64,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   const patchedAssetCache = new Map();
   const officialAssetListCache = new Map();
   const staticResponseCache = new Map();
+  const textFileCache = new Map();
   // 旧版本曾经使用 /official-patched/；浏览器缓存的旧 chunk 可能还会懒加载这个前缀。
   const patchedOfficialPrefixes = Array.from(new Set([PATCHED_OFFICIAL_PREFIX, "/official-patched/"]));
 
@@ -96,6 +97,21 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     } catch {
       return OPENCODEX_VERSION_LABEL;
     }
+  }
+
+  function cachedReadText(file) {
+    let stat;
+    try {
+      stat = fs.statSync(file);
+    } catch {
+      return readText(file);
+    }
+    const cached = textFileCache.get(file);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.text;
+    // 原始 HTML 模板不会因为请求参数变化而改变；动态路由、i18n 和移动瘦身仍在后续 transform 阶段实时注入。
+    const text = readText(file);
+    textFileCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, text });
+    return text;
   }
 
   /** 给官方 renderer HTML 注入 web-shell polyfill 和运行时配置。 */
@@ -430,7 +446,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     const shell = path.join(WEB_SHELL_DIR, "index.html");
     const i18n = currentI18n();
     let html = stripMobileWebShellDesktopAssets(
-      patchWebShellAppVersion(patchHtmlLang(readText(shell), i18n.locale)),
+      patchWebShellAppVersion(patchHtmlLang(cachedReadText(shell), i18n.locale)),
       options
     );
     const links = options.mobileTrafficMode === true ? "" : officialStyleLinks();
@@ -469,7 +485,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     // 认证通过后直接返回官方 renderer，避免客户端 document.write 在浏览器里清空 body 后失败造成白屏。
     const located = locateOfficialIndex();
     if (!located) return null;
-    const html = readText(located.file);
+    const html = cachedReadText(located.file);
     return transformOfficialHtml(html, options);
   }
 
