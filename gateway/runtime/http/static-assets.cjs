@@ -61,6 +61,8 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   let hasWarnedHistoryPatchMiss = false;
   let hasWarnedTailHydrationPatchMiss = false;
   let hasWarnedLocalThreadCatalogPatchMiss = false;
+  const patchedAssetCache = new Map();
+  const staticResponseCache = new Map();
   // 旧版本曾经使用 /official-patched/；浏览器缓存的旧 chunk 可能还会懒加载这个前缀。
   const patchedOfficialPrefixes = Array.from(new Set([PATCHED_OFFICIAL_PREFIX, "/official-patched/"]));
 
@@ -636,6 +638,36 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     return Buffer.from(patched, "utf-8");
   }
 
+  function cachedPatchedAsset(file, reqPath, stat) {
+    const cacheKey = `${reqPath}\0${file}`;
+    const cached = patchedAssetCache.get(cacheKey);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.body;
+    const body = patchOfficialAsset(reqPath, fs.readFileSync(file));
+    patchedAssetCache.set(cacheKey, { body, mtimeMs: stat.mtimeMs, size: stat.size });
+    return body;
+  }
+
+  function compressionVariantForRequest(req) {
+    if (process.env.CODEX_WEB_DISABLE_GZIP === "1") return "identity";
+    return String(req.headers["accept-encoding"] || "").includes("gzip") ? "gzip" : "identity";
+  }
+
+  function cachedStaticResponse(req, file, reqPath) {
+    const stat = fs.statSync(file);
+    const variant = compressionVariantForRequest(req);
+    const cacheKey = `${reqPath}\0${file}\0${variant}`;
+    const cached = staticResponseCache.get(cacheKey);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.response;
+    const response = gzipIfUseful(
+      req,
+      { "content-type": mimeType(file), "cache-control": cacheControlForRequestPath(reqPath) },
+      cachedPatchedAsset(file, reqPath, stat)
+    );
+    const withEtag = { headers: { ...response.headers, etag: etagForResponseBody(response.body) }, body: response.body };
+    staticResponseCache.set(cacheKey, { response: withEtag, mtimeMs: stat.mtimeMs, size: stat.size });
+    return withEtag;
+  }
+
   /** 将 URL path 映射到 web-shell 或官方 asset 的真实文件。 */
   function staticFile(reqPath) {
     // 路径映射只接受固定前缀；不能把任意 URL path 直接拼到项目根目录。
@@ -690,19 +722,12 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
 
   /** 发送静态文件，并按路径套用合适的缓存策略。 */
   function serveFile(req, res, file, status = 200, reqPath = "") {
-    const data = patchOfficialAsset(reqPath, fs.readFileSync(file));
-    const response = gzipIfUseful(
-      req,
-      { "content-type": mimeType(file), "cache-control": cacheControlForRequestPath(reqPath) },
-      data
-    );
-    const etag = etagForResponseBody(response.body);
-    const headers = { ...response.headers, etag };
-    if (String(req.headers["if-none-match"] || "") === etag) {
-      send(res, 304, headers, "");
+    const response = cachedStaticResponse(req, file, reqPath);
+    if (String(req.headers["if-none-match"] || "") === response.headers.etag) {
+      send(res, 304, response.headers, "");
       return;
     }
-    send(res, status, headers, response.body);
+    send(res, status, response.headers, response.body);
   }
 
   function serveWebShellIndex(req, res, options = {}) {
@@ -765,7 +790,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     for (const urlPath of manifest) {
       const file = staticFile(urlPath);
       if (!file || !exists(file)) continue;
-      const data = patchOfficialAsset(urlPath, fs.readFileSync(file));
+      const data = cachedPatchedAsset(file, urlPath, fs.statSync(file));
       bundle[urlPath] = data.toString("utf-8");
     }
     const buf = Buffer.from(JSON.stringify(bundle), "utf-8");
