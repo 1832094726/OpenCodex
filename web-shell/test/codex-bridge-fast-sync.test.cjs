@@ -219,10 +219,11 @@ test("web shell restores last local route as the renderer handoff URL", () => {
   assert.match(restoreBody, /readArchivedThreadIdsBeforeRenderer\(\)\.has\(threadId\)/);
   assert.match(restoreBody, /catalogThreadById\(catalog, threadId\)/);
   assert.match(bootBody, /const lastRoute = lastThreadRouteForRendererHandoff\(catalog\)/);
-  assert.match(bootBody, /new URL\(lastRoute \|\| location\.href, location\.origin\)/);
+  assert.match(html, /function currentRouteForRendererHandoff/);
+  assert.match(bootBody, /new URL\(lastRoute \|\| currentRouteForRendererHandoff\(\), location\.origin\)/);
   assert.match(bootBody, /restored last route before renderer handoff/);
-  assert.match(bootBody, /currentQueryParamBeforeRenderer\("full"\) === "1"/);
-  assert.match(bootBody, /rendererUrl\.searchParams\.set\("full", "1"\)/);
+  assert.match(bootBody, /runtimeConfig\.mobileTrafficMode && currentQueryParamBeforeRenderer\("full"\) !== "1"/);
+  assert.doesNotMatch(bootBody, /rendererUrl\.searchParams\.set\("full", "1"\)/);
   assert.match(bootBody, /rendererUrl\.searchParams\.set\("mobile", "1"\)/);
   assert.match(bootBody, /rendererUrl\.searchParams\.set\("__opencodex_renderer", "1"\)/);
 });

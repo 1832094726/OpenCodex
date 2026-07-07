@@ -30,6 +30,19 @@ test("entry handoff does not prefetch renderer html or block on service worker c
   assert.doesNotMatch(bootRendererBody, /fetch\(rendererUrl/);
 });
 
+test("entry handoff cleans one-shot route params before renderer navigation", () => {
+  const source = readEntryHtml();
+  const routeBody = sourceBetween(source, "function currentRouteForRendererHandoff()", "function catalogThreadById");
+  const bootRendererBody = sourceBetween(source, "async function bootRenderer()", "function utf8Bytes");
+
+  // 这些参数只用于当前入口诊断或内部 handoff；本地会话 URL 进入 renderer 前必须恢复成干净深链。
+  assert.match(routeBody, /currentThreadRouteBeforeRenderer\(\)/);
+  assert.match(routeBody, /for \(const param of nonRestorableRouteParams\) parsed\.searchParams\.delete\(param\)/);
+  assert.match(bootRendererBody, /new URL\(lastRoute \|\| currentRouteForRendererHandoff\(\), location\.origin\)/);
+  assert.doesNotMatch(bootRendererBody, /new URL\(lastRoute \|\| location\.href, location\.origin\)/);
+  assert.doesNotMatch(bootRendererBody, /rendererUrl\.searchParams\.set\("full", "1"\)/);
+});
+
 test("entry shell does not load desktop plugins before renderer handoff", () => {
   const source = readEntryHtml();
 

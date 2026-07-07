@@ -829,6 +829,19 @@
           }
         }
 
+        function currentRouteForRendererHandoff() {
+          const threadRoute = currentThreadRouteBeforeRenderer();
+          if (threadRoute) return threadRoute;
+          try {
+            const parsed = new URL(location.href);
+            // full/probe 等参数只服务当前入口诊断；切入 renderer 前先清理，避免失败时地址栏停在一次性深链上。
+            for (const param of nonRestorableRouteParams) parsed.searchParams.delete(param);
+            return `${parsed.pathname || "/"}${parsed.search || ""}${parsed.hash || ""}`;
+          } catch {
+            return "/";
+          }
+        }
+
         function catalogThreadById(catalog, threadId) {
           if (!catalog || !Array.isArray(catalog.threads) || !threadId) return null;
           return catalog.threads.find((thread) => thread && String(thread.id || "") === threadId) || null;
@@ -989,15 +1002,16 @@
             navigator.serviceWorker.ready.catch(() => null);
           }
           const lastRoute = lastThreadRouteForRendererHandoff(catalog);
-          const rendererUrl = new URL(lastRoute || location.href, location.origin);
+          const rendererUrl = new URL(lastRoute || currentRouteForRendererHandoff(), location.origin);
           if (lastRoute) {
             console.info("[opencodex] restored last route before renderer handoff", {
               route: lastRoute,
               threadId: `${threadIdFromRoute(lastRoute).slice(0, 10)}...${threadIdFromRoute(lastRoute).slice(-4)}`,
             });
           }
-          if (currentQueryParamBeforeRenderer("full") === "1") rendererUrl.searchParams.set("full", "1");
-          else if (runtimeConfig.mobileTrafficMode) rendererUrl.searchParams.set("mobile", "1");
+          if (runtimeConfig.mobileTrafficMode && currentQueryParamBeforeRenderer("full") !== "1") {
+            rendererUrl.searchParams.set("mobile", "1");
+          }
           // 保持 /local/:id 原路径切入官方 renderer；官方 router 依赖真实 pathname 触发会话正文读取。
           rendererUrl.searchParams.set("__opencodex_renderer", "1");
           // 认证状态已经在入口 authStatus/login 阶段确认；这里不再预取 renderer，避免弱网下多一次 HTML 往返。
