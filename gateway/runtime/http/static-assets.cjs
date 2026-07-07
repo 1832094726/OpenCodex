@@ -130,7 +130,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
      * 浏览器环境需要额外注入：
      * - base href，把官方相对资源定位到 /official/。
      * - codex-web-config.js，提供端口、workspace roots 等运行时信息。
-     * - opencodex-plugin-system.js，提供插件 host。
+     * - opencodex-plugin-system.js，桌面端提供插件 host。
      * - opencodex-plugin-loader.js，按目录扫描结果加载插件脚本。
      * - manifest/移动 Web App 元数据，允许入口安装为独立窗口壳。
      * - bridge polyfill，把 Electron API 转成 HTTP/WS 调用。
@@ -180,7 +180,9 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       options.mobileTrafficMode === true
         ? '<script>window.__OPENCODEX_MOBILE_TRAFFIC_MODE__=true;window.__CODEX_WEB_CONFIG__=Object.assign({},window.__CODEX_WEB_CONFIG__||{},{mobileTrafficMode:true});</script>'
         : "",
-      `<script src="${OPENCODEX_PLUGIN_SYSTEM_PATH}"></script>`,
+      options.mobileTrafficMode === true
+        ? "<!-- OpenCodex 手机流量模式跳过插件 system，插件 loader 已禁用时无需再加载 host 脚本。 -->"
+        : `<script src="${OPENCODEX_PLUGIN_SYSTEM_PATH}"></script>`,
       options.mobileTrafficMode === true
         ? "<!-- OpenCodex 手机流量模式跳过插件 loader，减少首屏脚本和后台状态请求。 -->"
         : createDeferredPluginLoaderScript(),

@@ -1719,7 +1719,7 @@ test("request handler gzips sizeable shell and renderer html responses", async (
   }
 });
 
-test("official renderer skips token usage capability only for mobile traffic mode", () => {
+test("official renderer skips noncritical desktop scripts only for mobile traffic mode", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-official-html-"));
   try {
     fs.mkdirSync(path.join(tempRoot, "assets"), { recursive: true });
@@ -1745,6 +1745,7 @@ test("official renderer skips token usage capability only for mobile traffic mod
     const mobile = staticAssets.createRendererResponse({ mobileTrafficMode: true });
 
     assert.match(desktop, /codex-token-usage-capability\.js/);
+    assert.match(desktop, /opencodex-plugin-system\.js/);
     assert.match(desktop, /__opencodexDeferredPluginLoaderInstalled/);
     assert.match(desktop, /requestIdleCallback/);
     assert.match(desktop, /opencodex-plugin-loader\.js/);
@@ -1758,6 +1759,7 @@ test("official renderer skips token usage capability only for mobile traffic mod
     assert.match(desktop, /modulepreload-polyfill-preload-test\.js/);
     assert.match(desktop, /preload-helper-preload-test\.js/);
     assert.doesNotMatch(mobile, /codex-token-usage-capability\.js/);
+    assert.doesNotMatch(mobile, /opencodex-plugin-system\.js/);
     assert.doesNotMatch(mobile, /__opencodexDeferredPluginLoaderInstalled/);
     assert.doesNotMatch(mobile, /opencodex-plugin-loader\.js/);
     assert.doesNotMatch(mobile, /codex-window-controls-overlay\.(?:js|css)/);
@@ -1769,6 +1771,7 @@ test("official renderer skips token usage capability only for mobile traffic mod
     assert.doesNotMatch(mobile, /modulepreload-polyfill-preload-test\.js/);
     assert.doesNotMatch(mobile, /preload-helper-preload-test\.js/);
     assert.match(mobile, /跳过 token usage capability/);
+    assert.match(mobile, /跳过插件 system/);
     assert.match(mobile, /跳过插件 loader/);
     assert.match(mobile, /跳过 window controls overlay/);
     assert.match(mobile, /跳过 tooltip dismiss guard/);
