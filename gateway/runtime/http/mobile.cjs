@@ -421,12 +421,14 @@ function isUsefulThreadTitle(title) {
   ].some((prefix) => text.startsWith(prefix));
 }
 
-function sessionThreadFromFile(filePath, archived) {
-  let stat = null;
-  try {
-    stat = fs.statSync(filePath);
-  } catch {
-    return null;
+function sessionThreadFromFile(filePath, archived, knownStat = null) {
+  let stat = knownStat;
+  if (!stat) {
+    try {
+      stat = fs.statSync(filePath);
+    } catch {
+      return null;
+    }
   }
   const thread = {
     archived,
@@ -489,12 +491,14 @@ function jsonlLinesFromWindow(text, options = {}) {
   return lines.filter(Boolean);
 }
 
-function parseSessionFile(filePath, archived, options = {}) {
-  let stat = null;
-  try {
-    stat = fs.statSync(filePath);
-  } catch {
-    return null;
+function parseSessionFile(filePath, archived, options = {}, knownStat = null) {
+  let stat = knownStat;
+  if (!stat) {
+    try {
+      stat = fs.statSync(filePath);
+    } catch {
+      return null;
+    }
   }
   const limit = Math.max(1, Math.min(Number(options.limit) || 120, 500));
   const thread = {
@@ -595,7 +599,8 @@ function listLocalSessionThreads(options = {}) {
     if (!hasScanBudget() && filesWithMtime.length >= limit) break;
     try {
       const stat = fs.statSync(item.filePath);
-      filesWithMtime.push({ ...item, mtimeMs: stat.mtimeMs, size: stat.size });
+      // 排序时已经拿到 stat；后续解析标题/元信息复用它，避免手机首页对每个候选重复 syscall。
+      filesWithMtime.push({ ...item, mtimeMs: stat.mtimeMs, size: stat.size, stat });
     } catch {}
   }
   filesWithMtime.sort((left, right) => right.mtimeMs - left.mtimeMs);
@@ -603,7 +608,7 @@ function listLocalSessionThreads(options = {}) {
   const cachedFileStats = [];
   for (const item of filesWithMtime.slice(0, limit * 3)) {
     if (!hasScanBudget() && threads.length > 0) break;
-    const thread = sessionThreadFromFile(item.filePath, item.archived);
+    const thread = sessionThreadFromFile(item.filePath, item.archived, item.stat);
     if (thread) {
       // 列表页已经定位过文件，缓存映射后详情页无需再次全量扫描历史目录。
       rememberLocalSessionFile(thread.id, item);
@@ -620,14 +625,17 @@ function listLocalSessionThreads(options = {}) {
       recentFileLimit: Math.max(limit * 6, Number(options.includeRecentFileLimit) || 0, MOBILE_THREAD_HTTP_RECENT_FILE_LIMIT),
       threadId: includeThreadId,
     });
-    const includedThread = includeMatch ? sessionThreadFromFile(includeMatch.filePath, includeMatch.archived) : null;
+    let includeStat = null;
+    if (includeMatch) {
+      try {
+        includeStat = fs.statSync(includeMatch.filePath);
+      } catch {}
+    }
+    const includedThread = includeMatch && includeStat ? sessionThreadFromFile(includeMatch.filePath, includeMatch.archived, includeStat) : null;
     if (includedThread) {
       // 手机 catalog 可以只下发少量最近会话，但直达 /local/:id 必须包含当前会话，官方 renderer 才能恢复正文。
       rememberLocalSessionFile(includedThread.id, includeMatch);
-      try {
-        const stat = fs.statSync(includeMatch.filePath);
-        cachedFileStats.push({ filePath: includeMatch.filePath, mtimeMs: stat.mtimeMs, size: stat.size });
-      } catch {}
+      cachedFileStats.push({ filePath: includeMatch.filePath, mtimeMs: includeStat.mtimeMs, size: includeStat.size });
       threads.unshift(includedThread);
       while (threads.length > limit) threads.pop();
     }
@@ -684,7 +692,7 @@ function listLocalSessionThreadDetail(options = {}) {
   }
   const cached = cachedLocalThreadDetail(options, match, stat);
   if (cached) return cached;
-  const parsed = parseSessionFile(match.filePath, match.archived, options);
+  const parsed = parseSessionFile(match.filePath, match.archived, options, stat);
   if (parsed && parsed.metrics && match.lookupSource) parsed.metrics.lookupSource = match.lookupSource;
   rememberLocalThreadDetail(options, match, stat, parsed);
   return parsed || { ok: false };

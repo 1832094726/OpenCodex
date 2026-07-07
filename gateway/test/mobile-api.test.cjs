@@ -384,6 +384,48 @@ test("listLocalSessionThreads reuses a short cache for repeated mobile opens", (
   assert.deepEqual(refreshed.map((thread) => thread.id), ["thread-cache-2", "thread-cache-1"]);
 });
 
+test("listLocalSessionThreads reuses candidate stats while building mobile rows", () => {
+  const root = tempDir();
+  const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const file = path.join(sessionsDir, "rollout-2026-06-30T08-01-30-thread-list-stat.jsonl");
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T08:01:30.000Z",
+        type: "session_meta",
+        payload: {
+          cwd: "/repo/list-stat",
+          session_id: "thread-list-stat",
+        },
+      }),
+      JSON.stringify({
+        type: "user_message",
+        payload: {
+          message: "列表 stat 只需要一次",
+        },
+      }),
+    ].join("\n"),
+    "utf8"
+  );
+
+  const originalStatSync = fs.statSync;
+  let targetStats = 0;
+  fs.statSync = function patchedStatSync(target, ...args) {
+    if (path.resolve(String(target)) === file) targetStats += 1;
+    return originalStatSync.call(this, target, ...args);
+  };
+  try {
+    const threads = listLocalSessionThreads({ cacheTtlMs: 0, codexHome: root, limit: 5 });
+
+    assert.deepEqual(threads.map((thread) => thread.id), ["thread-list-stat"]);
+    assert.equal(targetStats, 1);
+  } finally {
+    fs.statSync = originalStatSync;
+  }
+});
+
 test("listLocalSessionThreads reuses stale lightweight state when recent files are unchanged", () => {
   const root = tempDir();
   const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
@@ -1035,6 +1077,56 @@ test("listLocalSessionThreadDetail reuses a short cache while the session file i
     refreshed.messages.map((message) => message.text),
     ["详情短缓存", "文件变化后重新读取"]
   );
+});
+
+test("listLocalSessionThreadDetail reuses the cache stat for parsing after a miss", () => {
+  const root = tempDir();
+  const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const file = path.join(sessionsDir, "rollout-2026-06-30T10-35-00-thread-detail-stat.jsonl");
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T10:35:00.000Z",
+        type: "session_meta",
+        payload: {
+          cwd: "/repo/detail-stat",
+          session_id: "thread-detail-stat",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T10:35:01.000Z",
+        type: "event_msg",
+        payload: {
+          message: "详情解析复用 stat",
+          type: "user_message",
+        },
+      }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const originalStatSync = fs.statSync;
+  let targetStats = 0;
+  fs.statSync = function patchedStatSync(target, ...args) {
+    if (path.resolve(String(target)) === file) targetStats += 1;
+    return originalStatSync.call(this, target, ...args);
+  };
+  try {
+    const detail = listLocalSessionThreadDetail({
+      codexHome: root,
+      detailCacheTtlMs: 0,
+      threadId: "thread-detail-stat",
+    });
+
+    assert.equal(detail.ok, true);
+    assert.deepEqual(detail.messages.map((message) => message.text), ["详情解析复用 stat"]);
+    assert.equal(targetStats, 1);
+  } finally {
+    fs.statSync = originalStatSync;
+  }
 });
 
 test("listLocalSessionThreadDetail reads recent messages from the tail of large histories", () => {
