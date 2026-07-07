@@ -260,8 +260,11 @@ function cachedLocalThreadList(options = {}) {
     return null;
   }
   if (staleTtlMs > 0) {
-    // stale 窗口内只校验一次文件状态；变化时删除缓存后交给调用方重扫，避免弱网首页多做一轮同步 stat。
-    if (localThreadFilesUnchanged(cached.files)) return cloneMobileThreadList(cached.threads);
+    // stale 命中且文件未变时续一段短 TTL；连续打开/刷新手机首页不再每次同步 stat 同一批历史文件。
+    if (localThreadFilesUnchanged(cached.files)) {
+      cached.expiresAtMs = Math.min(now + ttlMs, cached.staleExpiresAtMs);
+      return cloneMobileThreadList(cached.threads);
+    }
     localThreadListCache.delete(key);
   }
   return null;

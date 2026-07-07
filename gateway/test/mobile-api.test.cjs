@@ -461,9 +461,15 @@ test("listLocalSessionThreads reuses stale lightweight state when recent files a
     staleCacheTtlMs: 30_000,
   });
   const originalOpenSync = fs.openSync;
+  const originalStatSync = fs.statSync;
+  let targetStats = 0;
   fs.openSync = function patchedOpenSync(target, ...args) {
     if (path.resolve(String(target)) === file) throw new Error("unchanged list state should not reopen jsonl");
     return originalOpenSync.call(this, target, ...args);
+  };
+  fs.statSync = function patchedStatSync(target, ...args) {
+    if (path.resolve(String(target)) === file) targetStats += 1;
+    return originalStatSync.call(this, target, ...args);
   };
   try {
     const stale = listLocalSessionThreads({
@@ -473,10 +479,20 @@ test("listLocalSessionThreads reuses stale lightweight state when recent files a
       now: () => 12_000,
       staleCacheTtlMs: 30_000,
     });
+    const renewed = listLocalSessionThreads({
+      cacheTtlMs: 1_000,
+      codexHome: root,
+      limit: 5,
+      now: () => 12_500,
+      staleCacheTtlMs: 30_000,
+    });
 
     assert.deepEqual(stale, first);
+    assert.deepEqual(renewed, first);
+    assert.equal(targetStats, 1);
   } finally {
     fs.openSync = originalOpenSync;
+    fs.statSync = originalStatSync;
   }
 
   fs.appendFileSync(
@@ -498,7 +514,7 @@ test("listLocalSessionThreads reuses stale lightweight state when recent files a
     cacheTtlMs: 1_000,
     codexHome: root,
     limit: 5,
-    now: () => 12_500,
+    now: () => 13_500,
     staleCacheTtlMs: 30_000,
   });
 
