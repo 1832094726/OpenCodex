@@ -442,24 +442,28 @@ test("client diagnostics upload only flow events by default", () => {
   assert.match(source, /eventName === "ws-transport-selected"/);
   assert.match(source, /eventName === "ws-hello-ack"/);
   assert.match(source, /eventName === "ipc-invoke-failed"/);
-  assert.match(source, /eventName\.startsWith\("local-thread-catalog-"\)/);
   assert.match(source, /IMPORTANT_DIAGNOSTIC_METHODS\.has\(method\)/);
   assert.match(source, /elapsedMs >= CLIENT_DIAGNOSTIC_SLOW_UPLOAD_MS/);
   assert.match(source, /shouldUploadClientDiagnostic\(event, diagnosticData\)/);
   assert.doesNotMatch(source, /eventName === "ipc-invoke-start" \|\|/);
   assert.doesNotMatch(source, /eventName === "ipc-invoke-success" \|\|/);
+  assert.doesNotMatch(sourceBetween(source, "function isImportantDiagnosticUpload", "function isImportantTraceEvent"), /local-thread-catalog/);
 });
 
 test("client trace keeps a larger local ring and a protected important ring", () => {
   const source = readPolyfillSource();
   const traceBody = sourceBetween(source, "function pushOpenCodexTrace", "function websocketStateName");
+  const importantTraceBody = sourceBetween(source, "function isImportantTraceEvent", "function pushOpenCodexTrace");
 
   // 普通请求可以留在浏览器本地排障，但 thread/read 等关键事件要放进独立缓冲，避免被图片和插件请求冲掉。
   assert.match(source, /OPENCODEX_TRACE_MAX_EVENTS/);
   assert.match(source, /OPENCODEX_IMPORTANT_TRACE_MAX_EVENTS/);
   assert.match(traceBody, /w\.__opencodexTrace/);
   assert.match(traceBody, /w\.__opencodexImportantTrace/);
-  assert.match(traceBody, /isImportantDiagnosticUpload\(event, data\)/);
+  assert.match(traceBody, /isImportantTraceEvent\(event, data\)/);
+  // catalog 事件保留在重要 trace 中，但不默认上传，减少进入会话时的 /api/client-log 噪声。
+  assert.match(importantTraceBody, /eventName\.startsWith\("local-thread-catalog-"\)/);
+  assert.match(importantTraceBody, /isImportantDiagnosticUpload\(event, data\)/);
   assert.match(traceBody, /w\.__opencodexTraceMeta/);
   assert.doesNotMatch(traceBody, /trace\.length > 240/);
 });

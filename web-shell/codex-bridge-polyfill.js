@@ -795,7 +795,6 @@
       eventName === "ws-transport-selected" ||
       eventName === "ws-hello-ack" ||
       eventName === "ipc-important-method" ||
-      eventName.startsWith("local-thread-catalog-") ||
       eventName.startsWith("app-host-")
     ) {
       return true;
@@ -814,6 +813,12 @@
     return elapsedMs >= CLIENT_DIAGNOSTIC_SLOW_UPLOAD_MS;
   }
 
+  function isImportantTraceEvent(event, data) {
+    const eventName = typeof event === "string" ? event : "";
+    // catalog 事件对“进会话为何慢”很有价值，但默认只放浏览器环形缓冲，避免首屏额外 POST。
+    return eventName.startsWith("local-thread-catalog-") || isImportantDiagnosticUpload(event, data);
+  }
+
   function pushOpenCodexTrace(event, data) {
     try {
       // 完整环形缓冲区留在页面内，不默认上传；关键缓冲区保证 thread/read 等早期事件不会被图片/Git 噪声挤掉。
@@ -821,7 +826,7 @@
       const entry = { event, data, at: new Date().toISOString(), ageMs: Date.now() - bridgeStartedAtMs };
       trace.push(entry);
       while (trace.length > OPENCODEX_TRACE_MAX_EVENTS) trace.shift();
-      if (isImportantDiagnosticUpload(event, data)) {
+      if (isImportantTraceEvent(event, data)) {
         const importantTrace = (w.__opencodexImportantTrace = Array.isArray(w.__opencodexImportantTrace)
           ? w.__opencodexImportantTrace
           : []);
