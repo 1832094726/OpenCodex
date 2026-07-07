@@ -163,7 +163,9 @@ test("web shell clears unavailable last-route before renderer handoff", () => {
   assert.match(catalogBody, /if \(hasCurrentThreadRoute\) \{/);
   assert.match(catalogBody, /return null/);
   assert.match(catalogBody, /if \(!hasLastThreadRoute\) return null/);
-  assert.match(catalogBody, /const timeoutMs = 1200/);
+  assert.match(html, /function threadCatalogTimeoutBeforeRenderer/);
+  assert.match(html, /return runtimeConfig\.mobileTrafficMode \? 450 : 1200/);
+  assert.match(catalogBody, /const timeoutMs = threadCatalogTimeoutBeforeRenderer\(\)/);
   assert.match(html, /function mobileThreadCatalogLimitBeforeRenderer/);
   assert.match(html, /function threadCatalogBootstrapUrlBeforeRenderer\(threadId\)/);
   assert.match(html, /parsed\.searchParams\.set\("limit", String\(mobileThreadCatalogLimitBeforeRenderer\(\)\)\)/);

@@ -787,6 +787,11 @@
           return runtimeConfig.mobileTrafficMode ? Math.max(10, Math.min(200, configured || 60)) : 200;
         }
 
+        function threadCatalogTimeoutBeforeRenderer() {
+          // 手机弱网下 catalog 只是 last-route 校验，不应让 handoff 等满一秒；拿不到时仍交给 renderer 恢复会话。
+          return runtimeConfig.mobileTrafficMode ? 450 : 1200;
+        }
+
         function threadCatalogBootstrapUrlBeforeRenderer(threadId) {
           const parsed = new URL("/api/mobile/bootstrap", location.origin);
           parsed.searchParams.set("limit", String(mobileThreadCatalogLimitBeforeRenderer()));
@@ -872,7 +877,7 @@
           }
           if (!hasLastThreadRoute) return null;
           // 首页 last-route 清理可以等一点；直达深链不在这里阻塞，避免热启动进会话出现额外空等。
-          const timeoutMs = 1200;
+          const timeoutMs = threadCatalogTimeoutBeforeRenderer();
           const catalog = await withTimeout(
             (async () => {
               const res = await fetch(threadCatalogBootstrapUrlBeforeRenderer(lastRouteThreadId), {
