@@ -8,8 +8,10 @@
 const CACHE_NAME = "opencodex-static-v8";
 const PRECACHE_MANIFEST_URL = "/api/precache-manifest";
 const PRECACHE_BUNDLE_URL = "/api/precache-bundle";
-const PRECACHE_DELAY_MS = 0;
+const PRECACHE_DELAY_MS = 30_000;
 const PRECACHE_CONCURRENCY = 12;
+const PRECACHE_BUNDLE_MIN_MISSING_COUNT = 64;
+const PRECACHE_BUNDLE_MIN_MISSING_RATIO = 0.35;
 
 // 缓存就绪状态，供页面 bootRenderer 做短等待判断；不能长期阻塞首屏。
 let precacheComplete = false;
@@ -26,6 +28,20 @@ function isStaticAsset(url) {
   return false;
 }
 
+async function cachedRequestUrlSet(cache) {
+  // cache.match 逐条检查会产生大量 IndexedDB 往返；先取 key 集合可把 1700+ 次查询压成一次。
+  const keys = await cache.keys();
+  return new Set(keys.map((request) => request.url));
+}
+
+function shouldUsePrecacheBundle(needCount, totalCount) {
+  if (needCount <= 0) return false;
+  if (needCount === totalCount) return true;
+  // 缓存只缺少少量资源时，下载整包反而会和首屏/会话请求抢带宽。
+  if (needCount < PRECACHE_BUNDLE_MIN_MISSING_COUNT) return false;
+  return needCount / Math.max(totalCount, 1) >= PRECACHE_BUNDLE_MIN_MISSING_RATIO;
+}
+
 /**
  * 优先用 bundle 一次性下载全部静态资源，失败时回退到逐文件下载。
  * bundle 方案把 1700+ 个 HTTP/2 请求压缩为 1 个大文件下载，
@@ -39,30 +55,34 @@ async function backgroundPrecache() {
     const urls = await manifestResp.json();
     if (!Array.isArray(urls) || urls.length === 0) return;
 
-    // 检查已有缓存，只下载缺失项
+    // 检查已有缓存，只下载缺失项。
     const need = [];
+    const cachedUrls = await cachedRequestUrlSet(cache);
     for (const url of urls) {
-      if (!(await cache.match(url))) need.push(url);
+      const absoluteUrl = new URL(url, self.location.origin).href;
+      if (!cachedUrls.has(absoluteUrl)) need.push(url);
     }
     if (need.length === 0) { notifyPrecacheComplete(); return; }
 
-    // 优先尝试 bundle 一次性下载
+    // 首次安装或大量缺失时优先尝试 bundle；少量缺失直接逐文件补齐，避免重复下载整包。
     let bundleOk = false;
-    try {
-      const resp = await fetch(PRECACHE_BUNDLE_URL);
-      if (resp && resp.ok) {
-        const bundle = await resp.json();
-        for (const [url, body] of Object.entries(bundle)) {
-          await cache.put(
-            url,
-            new Response(body, {
-              headers: { "content-type": url.endsWith(".css") ? "text/css" : "application/javascript" },
-            })
-          );
+    if (shouldUsePrecacheBundle(need.length, urls.length)) {
+      try {
+        const resp = await fetch(PRECACHE_BUNDLE_URL);
+        if (resp && resp.ok) {
+          const bundle = await resp.json();
+          for (const [url, body] of Object.entries(bundle)) {
+            await cache.put(
+              url,
+              new Response(body, {
+                headers: { "content-type": url.endsWith(".css") ? "text/css" : "application/javascript" },
+              })
+            );
+          }
+          bundleOk = true;
         }
-        bundleOk = true;
-      }
-    } catch {}
+      } catch {}
+    }
 
     // bundle 失败时回退到逐文件并发下载
     if (!bundleOk) {
