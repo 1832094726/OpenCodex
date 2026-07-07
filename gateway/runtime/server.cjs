@@ -521,7 +521,8 @@ function createRequestHandler({ getWsHub = () => null, localFiles, mobileApi, pi
 
     if (pathname === "/codex-web-config.js") {
       // 运行时配置必须动态生成，因为端口、workspace roots 和 locale 都来自当前进程环境。
-      return send(
+      return sendCompressed(
+        req,
         res,
         200,
         {

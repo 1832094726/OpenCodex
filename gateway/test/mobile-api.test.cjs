@@ -1881,7 +1881,7 @@ test("mobile shell trims bootstrap messages to web keys", async () => {
   assert.doesNotMatch(mobile.body, /插件大文案/);
 });
 
-test("request handler gzips sizeable shell and renderer html responses", async () => {
+test("request handler gzips sizeable shell, renderer html, and runtime config responses", async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-html-gzip-"));
   try {
     fs.mkdirSync(path.join(tempRoot, "assets"), { recursive: true });
@@ -1919,11 +1919,19 @@ test("request handler gzips sizeable shell and renderer html responses", async (
       socket: { remoteAddress: "127.0.0.1" },
       url: "/local/thread-1?mobile=1&__opencodex_renderer=1",
     });
+    const runtimeConfig = await collectResponse(handler, {
+      headers: { ...headers, accept: "application/javascript" },
+      method: "GET",
+      socket: { remoteAddress: "127.0.0.1" },
+      url: "/codex-web-config.js?mobile=1",
+    });
 
     assert.equal(shell.headers["content-encoding"], "gzip");
     assert.equal(renderer.headers["content-encoding"], "gzip");
+    assert.equal(runtimeConfig.headers["content-encoding"], "gzip");
     assert.match(zlib.gunzipSync(shell.bodyBuffer).toString("utf8"), /mobileTrafficMode/);
     assert.match(zlib.gunzipSync(renderer.bodyBuffer).toString("utf8"), /codex-bridge-polyfill/);
+    assert.match(zlib.gunzipSync(runtimeConfig.bodyBuffer).toString("utf8"), /__CODEX_WEB_CONFIG__/);
   } finally {
     fs.rmSync(tempRoot, { force: true, recursive: true });
   }
