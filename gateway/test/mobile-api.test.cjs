@@ -1723,6 +1723,15 @@ test("official renderer skips token usage capability only for mobile traffic mod
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-official-html-"));
   try {
     fs.mkdirSync(path.join(tempRoot, "assets"), { recursive: true });
+    for (const fileName of [
+      "app-main-preload-test.js",
+      "app-shell-preload-test.js",
+      "index-preload-test.js",
+      "modulepreload-polyfill-preload-test.js",
+      "preload-helper-preload-test.js",
+    ]) {
+      fs.writeFileSync(path.join(tempRoot, "assets", fileName), "export default null;");
+    }
     fs.writeFileSync(
       path.join(tempRoot, "index.html"),
       '<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>Codex</title><script src="./assets/app.js"></script></head><body><div id="root"></div></body></html>'
@@ -1742,11 +1751,23 @@ test("official renderer skips token usage capability only for mobile traffic mod
     assert.match(desktop, /codex-window-controls-overlay\.css/);
     assert.match(desktop, /codex-window-controls-overlay\.js/);
     assert.match(desktop, /codex-tooltip-dismiss-guard\.js/);
+    assert.equal((desktop.match(/rel="modulepreload"/g) || []).length, 5);
+    assert.match(desktop, /app-main-preload-test\.js/);
+    assert.match(desktop, /app-shell-preload-test\.js/);
+    assert.match(desktop, /index-preload-test\.js/);
+    assert.match(desktop, /modulepreload-polyfill-preload-test\.js/);
+    assert.match(desktop, /preload-helper-preload-test\.js/);
     assert.doesNotMatch(mobile, /codex-token-usage-capability\.js/);
     assert.doesNotMatch(mobile, /__opencodexDeferredPluginLoaderInstalled/);
     assert.doesNotMatch(mobile, /opencodex-plugin-loader\.js/);
     assert.doesNotMatch(mobile, /codex-window-controls-overlay\.(?:js|css)/);
     assert.doesNotMatch(mobile, /codex-tooltip-dismiss-guard\.js/);
+    assert.equal((mobile.match(/rel="modulepreload"/g) || []).length, 1);
+    assert.match(mobile, /app-main-preload-test\.js/);
+    assert.doesNotMatch(mobile, /app-shell-preload-test\.js/);
+    assert.doesNotMatch(mobile, /index-preload-test\.js/);
+    assert.doesNotMatch(mobile, /modulepreload-polyfill-preload-test\.js/);
+    assert.doesNotMatch(mobile, /preload-helper-preload-test\.js/);
     assert.match(mobile, /跳过 token usage capability/);
     assert.match(mobile, /跳过插件 loader/);
     assert.match(mobile, /跳过 window controls overlay/);

@@ -173,7 +173,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     if (/<head[^>]*>/i.test(html)) {
       html = html.replace(/<head([^>]*)>/i, `<head$1>\n    ${base}`);
     }
-    return patchOfficialHtmlForWeb(html);
+    return patchOfficialHtmlForWeb(html, options);
   }
 
   function createRendererHandoffCleanupScript() {
@@ -244,13 +244,19 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     return html;
   }
 
-  function patchOfficialHtmlForWeb(rawHtml) {
+  function officialScriptPreloadPrefixes(options = {}) {
+    // 手机弱网下预加载过多 chunk 会和真正入口脚本抢连接；只保留主入口，其他模块交给官方运行时按需加载。
+    if (options.mobileTrafficMode === true) return ["app-main-"];
+    return ["app-main-", "app-shell-", "index-", "modulepreload-polyfill-", "preload-helper-"];
+  }
+
+  function patchOfficialHtmlForWeb(rawHtml, options = {}) {
     let html = patchOfficialCspForWeb(patchOfficialAssetUrls(rawHtml));
-    // 注入 modulepreload 提示：仅预加载入口 chunk，避免洪泛 HTTP/2 连接
+    // 注入有限 modulepreload 提示；手机弱网只保留主入口，避免洪泛 HTTP/2 连接。
     // nginx proxy_cache 保证这些资源从服务器缓存秒回，浏览器 Cache-Control 保证二次访问命中
     // 入口 chunk 带 hash，不能写死文件名（官方 bundle 升级后 hash 会变导致 404 白屏），
     // 只能按构建稳定前缀在当前缓存中查找真实存在的文件。
-    const preloadHints = ["app-main-", "app-shell-", "index-", "modulepreload-polyfill-", "preload-helper-"]
+    const preloadHints = officialScriptPreloadPrefixes(options)
       .map(locateOfficialScriptAssetHref)
       .filter(Boolean)
       .map((href) => `<link rel="modulepreload" href="${href}">`)
