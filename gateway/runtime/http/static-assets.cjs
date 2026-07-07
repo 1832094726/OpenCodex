@@ -32,6 +32,7 @@ const FAVICON_PATH = "/favicon.ico";
 const PWA_MANIFEST_PATH = "/manifest.webmanifest";
 const WEB_SHELL_ASSETS_DIR = path.join(WEB_SHELL_DIR, "assets");
 const WEB_SHELL_STATIC_VERSION_CACHE_MS = 1_000;
+const EMPTY_OFFICIAL_ASSET_FILES = Object.freeze([]);
 // 壳页和 renderer 交接时允许短暂携带这些参数，但官方路由启动前必须擦掉，避免污染本地会话深链。
 const RENDERER_HANDOFF_CLEANUP_QUERY_PARAMS = [
   "__opencodex_renderer",
@@ -67,6 +68,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   const staticResponseCache = new Map();
   const textFileCache = new Map();
   const webShellStaticVersionCache = new Map();
+  const precacheManifestCache = new Map();
   // 旧版本曾经使用 /official-patched/；浏览器缓存的旧 chunk 可能还会懒加载这个前缀。
   const patchedOfficialPrefixes = Array.from(new Set([PATCHED_OFFICIAL_PREFIX, "/official-patched/"]));
 
@@ -322,12 +324,12 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
 
   function officialAssetFileNames() {
     const assetsDir = officialAssetsDir();
-    if (!assetsDir) return [];
+    if (!assetsDir) return EMPTY_OFFICIAL_ASSET_FILES;
     let stat;
     try {
       stat = fs.statSync(assetsDir);
     } catch {
-      return [];
+      return EMPTY_OFFICIAL_ASSET_FILES;
     }
     const cached = officialAssetListCache.get(assetsDir);
     if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.files;
@@ -798,10 +800,15 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
 
   /** 扫描官方 assets 目录，返回所有 JS/CSS 资源的完整 URL 路径，供 SW 预缓存。 */
   function createPrecacheManifest() {
-    const officialBundle = getOfficialBundle();
+    const assetsDir = officialAssetsDir();
+    const officialFiles = assetsDir ? officialAssetFileNames() : EMPTY_OFFICIAL_ASSET_FILES;
+    const cacheKey = assetsDir || "__no_official_assets__";
+    const cached = precacheManifestCache.get(cacheKey);
+    if (cached && cached.officialFiles === officialFiles) return cached.manifest;
+
     const manifest = [];
-    if (officialBundle && officialBundle.webviewDir) {
-      for (const file of officialAssetFileNames()) {
+    if (officialFiles.length > 0) {
+      for (const file of officialFiles) {
         if (!file.endsWith(".css") && !file.endsWith(".js")) continue;
         // locale 文件（如 zh-CN-hash.js）是懒加载的，只有用户切换语言时才需要。
         // 排除 53 个 locale 文件可减少 ~36MB 预缓存数据，大幅缩短首次预热时间。
@@ -819,8 +826,11 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     for (const [urlPath] of WEB_SHELL_STATIC_FILES) {
       if (urlPath !== FAVICON_PATH) manifest.push(urlPath);
     }
-   return manifest;
- }
+    // manifest 构建结果只依赖官方 assets 文件名列表和固定 web-shell 白名单；同一列表引用表示目录未变化。
+    const frozenManifest = Object.freeze(manifest);
+    precacheManifestCache.set(cacheKey, { manifest: frozenManifest, officialFiles });
+    return frozenManifest;
+  }
 
   /**
    * 将全部预缓存资源打包成单个 gzip 压缩的 JSON，供 SW 一次性下载。

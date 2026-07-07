@@ -110,10 +110,14 @@ test("official asset file listings are reused across renderer and precache looku
     const desktop = staticAssets.createRendererResponse({ mobileTrafficMode: false });
     const mobile = staticAssets.createRendererResponse({ mobileTrafficMode: true });
     const manifest = staticAssets.createPrecacheManifest();
+    const cachedManifest = staticAssets.createPrecacheManifest();
 
     assert.equal(assetDirReads, 1);
     assert.equal((desktop.match(/rel="modulepreload"/g) || []).length, 5);
     assert.equal((mobile.match(/rel="modulepreload"/g) || []).length, 1);
+    // 预缓存清单只依赖官方 assets 文件列表；目录未变时直接复用，减少连续入口请求的清单拼装成本。
+    assert.strictEqual(cachedManifest, manifest);
+    assert.equal(Object.isFrozen(cachedManifest), true);
     assert.ok(manifest.includes("/official/assets/app-main-cache-list.css"));
     assert.ok(manifest.includes(`${PATCHED_OFFICIAL_PREFIX}assets/app-main-cache-list.js`));
 
@@ -122,6 +126,7 @@ test("official asset file listings are reused across renderer and precache looku
     const refreshedManifest = staticAssets.createPrecacheManifest();
 
     assert.equal(assetDirReads, 2);
+    assert.notStrictEqual(refreshedManifest, manifest);
     assert.ok(refreshedManifest.includes(`${PATCHED_OFFICIAL_PREFIX}assets/zz-cache-list-new.js`));
   } finally {
     fs.readdirSync = originalReaddirSync;
