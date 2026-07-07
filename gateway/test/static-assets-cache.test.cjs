@@ -4,7 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { PATCHED_OFFICIAL_PREFIX } = require("../runtime/core/config.cjs");
+const { PATCHED_OFFICIAL_PREFIX, WEB_SHELL_DIR } = require("../runtime/core/config.cjs");
 const { createStaticAssetService } = require("../runtime/http/static-assets.cjs");
 
 function collectResponse(handler, req) {
@@ -163,6 +163,49 @@ test("renderer html source is cached while request-specific transforms stay dyna
     assert.match(updated, /\/local\/thread-c/);
   } finally {
     fs.readFileSync = originalReadFileSync;
+    fs.rmSync(tempRoot, { force: true, recursive: true });
+  }
+});
+
+test("web-shell bridge script versions reuse a short cache during renderer handoff", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-static-version-cache-"));
+  fs.mkdirSync(path.join(tempRoot, "assets"), { recursive: true });
+  fs.writeFileSync(
+    path.join(tempRoot, "index.html"),
+    '<!doctype html><html><head><title>Codex</title></head><body><div id="root"></div></body></html>'
+  );
+
+  const staticAssets = createStaticAssetService({
+    getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+    getOfficialBundle: () => ({ webviewDir: tempRoot }),
+  });
+  const versionedBridgeFiles = new Set(
+    ["opencodex-fast-sync.js", "snapshot-repair-state.js", "codex-bridge-polyfill.js"].map((fileName) =>
+      path.resolve(WEB_SHELL_DIR, fileName)
+    )
+  );
+  const originalStatSync = fs.statSync;
+  const originalNow = Date.now;
+  let bridgeVersionStats = 0;
+  let now = 1_000_000;
+  fs.statSync = function statSyncWithCounter(target, ...args) {
+    if (versionedBridgeFiles.has(path.resolve(String(target)))) bridgeVersionStats += 1;
+    return originalStatSync.call(this, target, ...args);
+  };
+  Date.now = () => now;
+
+  try {
+    // 同一秒内连续 handoff 不应反复 stat 固定 bridge 脚本，避免手机端刷新时把入口生成卡在同步 IO 上。
+    staticAssets.createRendererResponse({ initialRoute: "/local/thread-a", mobileTrafficMode: true });
+    staticAssets.createRendererResponse({ initialRoute: "/local/thread-b", mobileTrafficMode: true });
+    assert.equal(bridgeVersionStats, 3);
+
+    now += 1_100;
+    staticAssets.createRendererResponse({ initialRoute: "/local/thread-c", mobileTrafficMode: true });
+    assert.equal(bridgeVersionStats, 6);
+  } finally {
+    fs.statSync = originalStatSync;
+    Date.now = originalNow;
     fs.rmSync(tempRoot, { force: true, recursive: true });
   }
 });

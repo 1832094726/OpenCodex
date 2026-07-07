@@ -31,6 +31,7 @@ const CODEX_TOOLTIP_DISMISS_GUARD_PATH = "/codex-tooltip-dismiss-guard.js";
 const FAVICON_PATH = "/favicon.ico";
 const PWA_MANIFEST_PATH = "/manifest.webmanifest";
 const WEB_SHELL_ASSETS_DIR = path.join(WEB_SHELL_DIR, "assets");
+const WEB_SHELL_STATIC_VERSION_CACHE_MS = 1_000;
 // 壳页和 renderer 交接时允许短暂携带这些参数，但官方路由启动前必须擦掉，避免污染本地会话深链。
 const RENDERER_HANDOFF_CLEANUP_QUERY_PARAMS = [
   "__opencodex_renderer",
@@ -65,6 +66,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   const officialAssetListCache = new Map();
   const staticResponseCache = new Map();
   const textFileCache = new Map();
+  const webShellStaticVersionCache = new Map();
   // 旧版本曾经使用 /official-patched/；浏览器缓存的旧 chunk 可能还会懒加载这个前缀。
   const patchedOfficialPrefixes = Array.from(new Set([PATCHED_OFFICIAL_PREFIX, "/official-patched/"]));
 
@@ -91,9 +93,16 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   function webShellStaticVersion(reqPath) {
     const file = WEB_SHELL_STATIC_FILES.get(reqPath);
     if (!file) return OPENCODEX_VERSION_LABEL;
+    const now = Date.now();
+    const cached = webShellStaticVersionCache.get(reqPath);
+    if (cached && cached.expiresAtMs > now) return cached.version;
     try {
       // 开发和手机端刷新时用文件 mtime 做版本号，避免旧 Service Worker/浏览器缓存继续执行过期 bridge。
-      return String(Math.floor(fs.statSync(file).mtimeMs));
+      const version = String(Math.floor(fs.statSync(file).mtimeMs));
+      // 固定 web-shell 脚本在入口 HTML 中会被多次引用；短缓存可减少频繁刷新时的同步 stat，
+      // 同时让本地开发改文件后一秒内刷新到新版本。
+      webShellStaticVersionCache.set(reqPath, { expiresAtMs: now + WEB_SHELL_STATIC_VERSION_CACHE_MS, version });
+      return version;
     } catch {
       return OPENCODEX_VERSION_LABEL;
     }
