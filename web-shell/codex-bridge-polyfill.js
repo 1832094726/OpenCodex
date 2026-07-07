@@ -1310,6 +1310,8 @@
         flow.turn?.state === "waiting_for_events" ||
         flow.relay?.state === "relay_missing");
     root.dataset.state = bad ? "bad" : warn ? "warn" : "ok";
+    // 面板默认隐藏时只更新状态点；长文本、时间线和线程水位等到用户展开后再渲染。
+    if (!panel || panel.hidden) return;
     const body = root.querySelector(".opencodex-network-status__body");
     if (body) {
       const recentClient = snapshot.recent

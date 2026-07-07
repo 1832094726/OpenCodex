@@ -510,6 +510,8 @@ test("network status widget surfaces thread watermarks and repair counters", () 
   assert.match(scheduleBody, /requestAnimationFrame/);
   assert.match(scheduleBody, /networkStatusWidgetUpdateScheduled = false/);
   assert.match(scheduleBody, /updateNetworkStatusWidget\(\)/);
+  // 面板隐藏时只更新状态点，不拼接大段诊断文本，减少启动期不可见 DOM 更新。
+  assert.match(updateBody, /if \(!panel \|\| panel\.hidden\) return/);
   assert.match(updateBody, /threadDiagnosticsSummary\(threadDiagnostics\)/);
   assert.match(copyBody, /threadDiagnostics: latestThreadDiagnosticsSnapshot/);
   for (const field of ["clientWatermarks", "missedByTransport", "repairedByThreadReplay", "repairedBySnapshot"]) {
