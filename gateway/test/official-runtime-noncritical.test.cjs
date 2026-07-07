@@ -85,6 +85,72 @@ test("health status reports gateway source revision", () => {
   assert.match(healthBody, /source: gatewaySourceHealthStatus\(\)/);
 });
 
+test("persisted atom snapshot reuses unchanged desktop global state", () => {
+  const {
+    DESKTOP_GLOBAL_STATE_PATH,
+    DESKTOP_PERSISTED_ATOMS_KEY,
+    persistedAtomSnapshotForRenderer,
+  } = require("../runtime/state/desktop-state.cjs");
+  const originalReadFileSync = fs.readFileSync;
+  const originalStatSync = fs.statSync;
+  const globalStatePath = path.resolve(DESKTOP_GLOBAL_STATE_PATH);
+  const backupPath = path.resolve(`${DESKTOP_GLOBAL_STATE_PATH}.bak`);
+  let mainMtimeMs = 1_000_000;
+  let mainText = JSON.stringify({
+    [DESKTOP_PERSISTED_ATOMS_KEY]: {
+      "prompt-history": { global: ["first prompt"] },
+      localeOverride: "en-US",
+      "selected-remote-host-id": "remote-win",
+      "remote-thread-summaries:remote-win": { stale: true },
+    },
+  });
+  let readCount = 0;
+
+  fs.statSync = function statSyncDesktopStateCache(target, ...args) {
+    const resolved = path.resolve(String(target));
+    if (resolved === globalStatePath) return { size: Buffer.byteLength(mainText), mtimeMs: mainMtimeMs };
+    if (resolved === backupPath) {
+      const error = new Error("ENOENT");
+      error.code = "ENOENT";
+      throw error;
+    }
+    return originalStatSync.call(this, target, ...args);
+  };
+  fs.readFileSync = function readFileSyncDesktopStateCache(target, ...args) {
+    if (path.resolve(String(target)) === globalStatePath) {
+      readCount += 1;
+      return mainText;
+    }
+    return originalReadFileSync.call(this, target, ...args);
+  };
+
+  try {
+    const first = persistedAtomSnapshotForRenderer();
+    const second = persistedAtomSnapshotForRenderer();
+
+    assert.equal(readCount, 1);
+    assert.deepEqual(first["prompt-history"], ["first prompt"]);
+    assert.deepEqual(second["prompt-history"], ["first prompt"]);
+    assert.equal(first.localeOverride, undefined);
+    assert.equal(first["selected-remote-host-id"], undefined);
+    assert.equal(first["remote-thread-summaries:remote-win"], undefined);
+
+    mainMtimeMs += 1;
+    mainText = JSON.stringify({
+      [DESKTOP_PERSISTED_ATOMS_KEY]: {
+        "prompt-history": { global: ["second prompt"] },
+      },
+    });
+
+    const refreshed = persistedAtomSnapshotForRenderer();
+    assert.equal(readCount, 2);
+    assert.deepEqual(refreshed["prompt-history"], ["second prompt"]);
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+    fs.statSync = originalStatSync;
+  }
+});
+
 test("local resume omits null service tier before official ipc", () => {
   const methodBody = officialRuntimeFunctionSource("localResumeMethodFromPayload", "removeNullServiceTier");
   const removeBody = officialRuntimeFunctionSource("removeNullServiceTier", "normalizeLocalResumeServiceTier");

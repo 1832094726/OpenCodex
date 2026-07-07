@@ -8,6 +8,7 @@ const DESKTOP_GLOBAL_STATE_BACKUP_PATH = `${DESKTOP_GLOBAL_STATE_PATH}.bak`;
 const DESKTOP_PERSISTED_ATOMS_KEY = "electron-persisted-atom-state";
 const COMPOSER_PERMISSION_MODE_VISIBILITY_KEY = "composer-permission-mode-visibility";
 const SELECTED_REMOTE_HOST_ID_KEY = "selected-remote-host-id";
+let desktopGlobalStateCache = null;
 const DEFAULT_COMPOSER_PERMISSION_MODE_VISIBILITY = {
   "guardian-approvals": true,
   "full-access": true,
@@ -26,9 +27,30 @@ function readJsonObject(filePath) {
   }
 }
 
+function fileSignature(filePath) {
+  try {
+    const stat = fs.statSync(filePath);
+    return `${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return "missing";
+  }
+}
+
 function loadDesktopGlobalState() {
+  const primarySignature = fileSignature(DESKTOP_GLOBAL_STATE_PATH);
+  const backupSignature = fileSignature(DESKTOP_GLOBAL_STATE_BACKUP_PATH);
+  if (
+    desktopGlobalStateCache &&
+    desktopGlobalStateCache.primarySignature === primarySignature &&
+    desktopGlobalStateCache.backupSignature === backupSignature
+  ) {
+    return desktopGlobalStateCache.value;
+  }
   // 官方会同时维护主文件和 .bak；主文件损坏时按官方思路读取备份，避免首屏状态直接丢失。
-  return readJsonObject(DESKTOP_GLOBAL_STATE_PATH) || readJsonObject(DESKTOP_GLOBAL_STATE_BACKUP_PATH) || {};
+  const value = readJsonObject(DESKTOP_GLOBAL_STATE_PATH) || readJsonObject(DESKTOP_GLOBAL_STATE_BACKUP_PATH) || {};
+  // 入口配置脚本可能被多端连续请求；文件未变化时复用解析结果，避免每次首屏都同步读整份 JSON。
+  desktopGlobalStateCache = { primarySignature, backupSignature, value };
+  return value;
 }
 
 function normalizePromptHistoryForRenderer(value) {
