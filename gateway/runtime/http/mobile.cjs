@@ -206,8 +206,10 @@ function cachedLocalSessionFile(threadId) {
   const cached = localSessionFileCache.get(id);
   if (!cached || !cached.filePath) return null;
   try {
-    fs.accessSync(cached.filePath, fs.constants.R_OK);
-    return cached;
+    const stat = fs.statSync(cached.filePath);
+    if (!stat.isFile()) throw new Error("cached session path is not a file");
+    // 命中会话文件映射时直接 stat：既确认缓存路径仍是文件，也把 stat 传给详情缓存和解析逻辑复用。
+    return { ...cached, stat };
   } catch {
     localSessionFileCache.delete(id);
     return null;
@@ -684,11 +686,13 @@ function findLocalSessionFile(options = {}) {
 function listLocalSessionThreadDetail(options = {}) {
   const match = findLocalSessionFile(options);
   if (!match) return { ok: false };
-  let stat = null;
-  try {
-    stat = fs.statSync(match.filePath);
-  } catch {
-    return { ok: false };
+  let stat = match.stat || null;
+  if (!stat) {
+    try {
+      stat = fs.statSync(match.filePath);
+    } catch {
+      return { ok: false };
+    }
   }
   const cached = cachedLocalThreadDetail(options, match, stat);
   if (cached) return cached;

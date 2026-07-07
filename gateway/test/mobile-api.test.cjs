@@ -1129,6 +1129,66 @@ test("listLocalSessionThreadDetail reuses the cache stat for parsing after a mis
   }
 });
 
+test("listLocalSessionThreadDetail reuses cached session file stat after list lookup", () => {
+  const root = tempDir();
+  const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const file = path.join(sessionsDir, "rollout-2026-06-30T10-36-00-thread-detail-cache-stat.jsonl");
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T10:36:00.000Z",
+        type: "session_meta",
+        payload: {
+          cwd: "/repo/detail-cache-stat",
+          session_id: "thread-detail-cache-stat",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T10:36:01.000Z",
+        type: "event_msg",
+        payload: {
+          message: "缓存定位后不再 access",
+          type: "user_message",
+        },
+      }),
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  const seeded = listLocalSessionThreads({ cacheTtlMs: 0, codexHome: root, limit: 5 });
+  assert.deepEqual(seeded.map((thread) => thread.id), ["thread-detail-cache-stat"]);
+
+  const originalAccessSync = fs.accessSync;
+  const originalStatSync = fs.statSync;
+  let targetAccesses = 0;
+  let targetStats = 0;
+  fs.accessSync = function patchedAccessSync(target, ...args) {
+    if (path.resolve(String(target)) === file) targetAccesses += 1;
+    return originalAccessSync.call(this, target, ...args);
+  };
+  fs.statSync = function patchedStatSync(target, ...args) {
+    if (path.resolve(String(target)) === file) targetStats += 1;
+    return originalStatSync.call(this, target, ...args);
+  };
+  try {
+    const detail = listLocalSessionThreadDetail({
+      codexHome: root,
+      detailCacheTtlMs: 0,
+      threadId: "thread-detail-cache-stat",
+    });
+
+    assert.equal(detail.ok, true);
+    assert.deepEqual(detail.messages.map((message) => message.text), ["缓存定位后不再 access"]);
+    assert.equal(targetAccesses, 0);
+    assert.equal(targetStats, 1);
+  } finally {
+    fs.accessSync = originalAccessSync;
+    fs.statSync = originalStatSync;
+  }
+});
+
 test("listLocalSessionThreadDetail reads recent messages from the tail of large histories", () => {
   const root = tempDir();
   const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
