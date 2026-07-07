@@ -505,6 +505,64 @@ test("listLocalSessionThreads reuses stale lightweight state when recent files a
   assert.deepEqual(refreshed.map((thread) => thread.id), ["thread-stable-cache"]);
 });
 
+test("listLocalSessionThreads checks stale file state once before refreshing changed cache", () => {
+  const root = tempDir();
+  const sessionsDir = path.join(root, "sessions", "2026", "06", "30");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const file = path.join(sessionsDir, "rollout-2026-06-30T08-02-30-thread-stale-refresh.jsonl");
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({
+        timestamp: "2026-06-30T08:02:30.000Z",
+        type: "session_meta",
+        payload: {
+          cwd: "/repo/stale-refresh",
+          session_id: "thread-stale-refresh",
+        },
+      }),
+      JSON.stringify({
+        type: "user_message",
+        payload: {
+          message: "stale 变化后只校验一次",
+        },
+      }),
+    ].join("\n"),
+    "utf8"
+  );
+
+  const first = listLocalSessionThreads({
+    cacheTtlMs: 1_000,
+    codexHome: root,
+    limit: 5,
+    now: () => 10_000,
+    staleCacheTtlMs: 30_000,
+  });
+  fs.appendFileSync(file, "\n");
+
+  const originalStatSync = fs.statSync;
+  let targetStats = 0;
+  fs.statSync = function patchedStatSync(target, ...args) {
+    if (path.resolve(String(target)) === file) targetStats += 1;
+    return originalStatSync.call(this, target, ...args);
+  };
+  try {
+    const refreshed = listLocalSessionThreads({
+      cacheTtlMs: 1_000,
+      codexHome: root,
+      limit: 5,
+      now: () => 12_000,
+      staleCacheTtlMs: 30_000,
+    });
+
+    assert.deepEqual(first.map((thread) => thread.id), ["thread-stale-refresh"]);
+    assert.deepEqual(refreshed.map((thread) => thread.id), ["thread-stale-refresh"]);
+    assert.equal(targetStats, 2);
+  } finally {
+    fs.statSync = originalStatSync;
+  }
+});
+
 test("listLocalSessionThreads returns partial recent results when scan budget is exhausted", () => {
   const root = tempDir();
   const sessionsDir = path.join(root, "sessions", "2026", "06", "30");

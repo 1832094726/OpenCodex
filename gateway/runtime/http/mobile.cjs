@@ -255,10 +255,13 @@ function cachedLocalThreadList(options = {}) {
   const cached = localThreadListCache.get(key);
   if (!cached) return null;
   if (cached.expiresAtMs > now) return cloneMobileThreadList(cached.threads);
-  if (staleTtlMs > 0 && cached.staleExpiresAtMs > now && localThreadFilesUnchanged(cached.files)) {
-    return cloneMobileThreadList(cached.threads);
+  if (cached.staleExpiresAtMs <= now) {
+    localThreadListCache.delete(key);
+    return null;
   }
-  if (cached.staleExpiresAtMs <= now || !localThreadFilesUnchanged(cached.files)) {
+  if (staleTtlMs > 0) {
+    // stale 窗口内只校验一次文件状态；变化时删除缓存后交给调用方重扫，避免弱网首页多做一轮同步 stat。
+    if (localThreadFilesUnchanged(cached.files)) return cloneMobileThreadList(cached.threads);
     localThreadListCache.delete(key);
   }
   return null;
