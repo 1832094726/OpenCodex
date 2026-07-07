@@ -494,13 +494,22 @@ test("ipc diagnostics summarize resume payload shape without values", () => {
 
 test("network status widget surfaces thread watermarks and repair counters", () => {
   const source = readPolyfillSource();
+  const diagnosticBody = sourceBetween(source, "function clientDiagnostic", "/** 观测代码不能影响官方 renderer 主路径");
   const refreshBody = sourceBetween(source, "async function refreshThreadDiagnosticsSnapshot", "function ensureNetworkStatusWidget");
+  const scheduleBody = sourceBetween(source, "function scheduleNetworkStatusWidgetUpdate", "function updateNetworkStatusWidget");
   const updateBody = sourceBetween(source, "function updateNetworkStatusWidget", "async function checkNetworkStatusHealth");
   const copyBody = sourceBetween(source, "async function copyFlowDiagnostics", "function installNetworkStatusWidget");
 
   assert.match(source, /let latestThreadDiagnosticsSnapshot = null/);
   assert.match(refreshBody, /\/api\/diagnostics\/threads\?threadId=/);
   assert.match(refreshBody, /currentRouteThreadId\(\)/);
+  // 高频诊断只调度一次下一帧浮窗刷新，避免启动期每条 trace 都同步改 DOM。
+  assert.match(source, /let networkStatusWidgetUpdateScheduled = false/);
+  assert.match(diagnosticBody, /scheduleNetworkStatusWidgetUpdate\(\)/);
+  assert.doesNotMatch(diagnosticBody, /updateNetworkStatusWidget\(\)/);
+  assert.match(scheduleBody, /requestAnimationFrame/);
+  assert.match(scheduleBody, /networkStatusWidgetUpdateScheduled = false/);
+  assert.match(scheduleBody, /updateNetworkStatusWidget\(\)/);
   assert.match(updateBody, /threadDiagnosticsSummary\(threadDiagnostics\)/);
   assert.match(copyBody, /threadDiagnostics: latestThreadDiagnosticsSnapshot/);
   for (const field of ["clientWatermarks", "missedByTransport", "repairedByThreadReplay", "repairedBySnapshot"]) {

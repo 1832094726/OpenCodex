@@ -735,6 +735,7 @@
   const clientDiagnosticQueue = [];
   const recentClientDiagnostics = [];
   let clientDiagnosticFlushTimer = null;
+  let networkStatusWidgetUpdateScheduled = false;
   let crossClientSyncTimer = null;
   let lastCrossClientSyncAtMs = 0;
   const lowPriorityIpcQueue = [];
@@ -955,7 +956,7 @@
       recentClientDiagnostics.push({ event, data: diagnosticData });
       pushOpenCodexTrace(event, diagnosticData);
       while (recentClientDiagnostics.length > 30) recentClientDiagnostics.shift();
-      updateNetworkStatusWidget();
+      scheduleNetworkStatusWidgetUpdate();
       if (clientDiagnosticQueue.length === 0) {
         return;
       }
@@ -1263,6 +1264,21 @@
       copyFlowDiagnostics();
     });
     updateNetworkStatusWidget();
+  }
+
+  function scheduleNetworkStatusWidgetUpdate() {
+    if (networkStatusWidgetUpdateScheduled) return;
+    if (!document?.getElementById?.("opencodex-network-status")) return;
+    networkStatusWidgetUpdateScheduled = true;
+    // 启动期诊断事件可能密集到几十条；合并到下一帧，避免每条 trace 都同步改浮窗 DOM。
+    const schedule =
+      typeof w.requestAnimationFrame === "function"
+        ? w.requestAnimationFrame.bind(w)
+        : (callback) => w.setTimeout(callback, 120);
+    schedule(() => {
+      networkStatusWidgetUpdateScheduled = false;
+      updateNetworkStatusWidget();
+    });
   }
 
   function updateNetworkStatusWidget(extra, options) {
