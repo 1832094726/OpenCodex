@@ -4,6 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
+const { PATCHED_OFFICIAL_PREFIX } = require("../runtime/core/config.cjs");
 const { createStaticAssetService } = require("../runtime/http/static-assets.cjs");
 
 function collectResponse(handler, req) {
@@ -73,6 +74,57 @@ test("serveFile reuses cached static responses until the source file changes", a
     assert.notEqual(third.headers.etag, first.headers.etag);
   } finally {
     fs.readFileSync = originalReadFileSync;
+    fs.rmSync(tempRoot, { force: true, recursive: true });
+  }
+});
+
+test("official asset file listings are reused across renderer and precache lookups", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-asset-list-cache-"));
+  const assetsDir = path.join(tempRoot, "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  fs.writeFileSync(path.join(tempRoot, "index.html"), "<!doctype html><html><head><title>Codex</title></head><body></body></html>");
+  for (const fileName of [
+    "app-main-cache-list.js",
+    "app-shell-cache-list.js",
+    "index-cache-list.js",
+    "modulepreload-polyfill-cache-list.js",
+    "preload-helper-cache-list.js",
+    "app-main-cache-list.css",
+    "app-shell-cache-list.css",
+  ]) {
+    fs.writeFileSync(path.join(assetsDir, fileName), fileName.endsWith(".js") ? "export default null;" : "body{}");
+  }
+
+  const staticAssets = createStaticAssetService({
+    getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+    getOfficialBundle: () => ({ webviewDir: tempRoot }),
+  });
+  const originalReaddirSync = fs.readdirSync;
+  let assetDirReads = 0;
+  fs.readdirSync = function readdirSyncWithCounter(target, ...args) {
+    if (path.resolve(String(target)) === assetsDir) assetDirReads += 1;
+    return originalReaddirSync.call(this, target, ...args);
+  };
+
+  try {
+    const desktop = staticAssets.createRendererResponse({ mobileTrafficMode: false });
+    const mobile = staticAssets.createRendererResponse({ mobileTrafficMode: true });
+    const manifest = staticAssets.createPrecacheManifest();
+
+    assert.equal(assetDirReads, 1);
+    assert.equal((desktop.match(/rel="modulepreload"/g) || []).length, 5);
+    assert.equal((mobile.match(/rel="modulepreload"/g) || []).length, 1);
+    assert.ok(manifest.includes("/official/assets/app-main-cache-list.css"));
+    assert.ok(manifest.includes(`${PATCHED_OFFICIAL_PREFIX}assets/app-main-cache-list.js`));
+
+    fs.writeFileSync(path.join(assetsDir, "zz-cache-list-new.js"), "export default 1;");
+    fs.utimesSync(assetsDir, new Date(Date.now() + 2_000), new Date(Date.now() + 2_000));
+    const refreshedManifest = staticAssets.createPrecacheManifest();
+
+    assert.equal(assetDirReads, 2);
+    assert.ok(refreshedManifest.includes(`${PATCHED_OFFICIAL_PREFIX}assets/zz-cache-list-new.js`));
+  } finally {
+    fs.readdirSync = originalReaddirSync;
     fs.rmSync(tempRoot, { force: true, recursive: true });
   }
 });

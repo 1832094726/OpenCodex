@@ -62,6 +62,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   let hasWarnedTailHydrationPatchMiss = false;
   let hasWarnedLocalThreadCatalogPatchMiss = false;
   const patchedAssetCache = new Map();
+  const officialAssetListCache = new Map();
   const staticResponseCache = new Map();
   // 旧版本曾经使用 /official-patched/；浏览器缓存的旧 chunk 可能还会懒加载这个前缀。
   const patchedOfficialPrefixes = Array.from(new Set([PATCHED_OFFICIAL_PREFIX, "/official-patched/"]));
@@ -285,30 +286,40 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     return isWithinRoot(candidate, officialBundle.webviewDir) ? candidate : null;
   }
 
+  function officialAssetsDir() {
+    const officialBundle = getOfficialBundle();
+    if (!officialBundle || !officialBundle.webviewDir) return "";
+    const assetsDir = path.join(officialBundle.webviewDir, "assets");
+    return exists(assetsDir) ? assetsDir : "";
+  }
+
+  function officialAssetFileNames() {
+    const assetsDir = officialAssetsDir();
+    if (!assetsDir) return [];
+    let stat;
+    try {
+      stat = fs.statSync(assetsDir);
+    } catch {
+      return [];
+    }
+    const cached = officialAssetListCache.get(assetsDir);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.files;
+    // 官方 assets 目录很大；renderer HTML、precache manifest、样式查找共用这份短缓存，避免入口请求反复同步扫目录。
+    const files = fs.readdirSync(assetsDir).sort();
+    officialAssetListCache.set(assetsDir, { files, mtimeMs: stat.mtimeMs, size: stat.size });
+    return files;
+  }
+
   function locateOfficialStyleAssetHref(prefix) {
     // 官方 CSS 带 hash，不能写死文件名，只能按构建稳定前缀查找当前缓存中的实际文件。
-    const officialBundle = getOfficialBundle();
-    if (!officialBundle || !officialBundle.webviewDir) return null;
-    const assetsDir = path.join(officialBundle.webviewDir, "assets");
-    if (!exists(assetsDir)) return null;
-    const fileName = fs
-      .readdirSync(assetsDir)
-      .filter((entry) => entry.startsWith(prefix) && entry.endsWith(".css"))
-      .sort()[0];
+    const fileName = officialAssetFileNames().find((entry) => entry.startsWith(prefix) && entry.endsWith(".css"));
     return fileName ? `/official/assets/${fileName}` : null;
   }
 
   function locateOfficialScriptAssetHref(prefix) {
     // 官方入口 JS 带 hash，bundle 升级后文件名会变；按稳定前缀查找当前缓存中的真实文件，
     // 并走 patched 命名空间（与 patchOfficialAssetUrls 对 JS 的改写保持一致）。
-    const officialBundle = getOfficialBundle();
-    if (!officialBundle || !officialBundle.webviewDir) return null;
-    const assetsDir = path.join(officialBundle.webviewDir, "assets");
-    if (!exists(assetsDir)) return null;
-    const fileName = fs
-      .readdirSync(assetsDir)
-      .filter((entry) => entry.startsWith(prefix) && entry.endsWith(".js"))
-      .sort()[0];
+    const fileName = officialAssetFileNames().find((entry) => entry.startsWith(prefix) && entry.endsWith(".js"));
     return fileName ? `${PATCHED_OFFICIAL_PREFIX}assets/${fileName}` : null;
   }
 
@@ -763,21 +774,17 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     const officialBundle = getOfficialBundle();
     const manifest = [];
     if (officialBundle && officialBundle.webviewDir) {
-      const assetsDir = path.join(officialBundle.webviewDir, "assets");
-      if (exists(assetsDir)) {
-       const files = fs.readdirSync(assetsDir);
-       for (const file of files) {
-         if (!file.endsWith(".css") && !file.endsWith(".js")) continue;
-          // locale 文件（如 zh-CN-hash.js）是懒加载的，只有用户切换语言时才需要。
-          // 排除 53 个 locale 文件可减少 ~36MB 预缓存数据，大幅缩短首次预热时间。
-          if (/^[a-z]{2}-[A-Z]{2}-/.test(file)) continue;
-         // CSS 走 /official/assets/ 不变；JS 在 HTML 中被改写到 patched 命名空间
-          // 包含所有 chunk（含动态 import 的懒加载 chunk），供 prefetch 脚本预取
-          if (file.endsWith(".js")) {
-            manifest.push(`${PATCHED_OFFICIAL_PREFIX}assets/${file}`);
-          } else {
-            manifest.push(`/official/assets/${file}`);
-          }
+      for (const file of officialAssetFileNames()) {
+        if (!file.endsWith(".css") && !file.endsWith(".js")) continue;
+        // locale 文件（如 zh-CN-hash.js）是懒加载的，只有用户切换语言时才需要。
+        // 排除 53 个 locale 文件可减少 ~36MB 预缓存数据，大幅缩短首次预热时间。
+        if (/^[a-z]{2}-[A-Z]{2}-/.test(file)) continue;
+        // CSS 走 /official/assets/ 不变；JS 在 HTML 中被改写到 patched 命名空间。
+        // 包含所有 chunk（含动态 import 的懒加载 chunk），供 prefetch 脚本预取。
+        if (file.endsWith(".js")) {
+          manifest.push(`${PATCHED_OFFICIAL_PREFIX}assets/${file}`);
+        } else {
+          manifest.push(`/official/assets/${file}`);
         }
       }
     }
