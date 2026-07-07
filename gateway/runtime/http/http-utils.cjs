@@ -42,6 +42,13 @@ function sendJsonCompressed(req, res, status, value, extraHeaders = {}) {
   send(res, status, compressed.headers, compressed.body);
 }
 
+function sendCompressed(req, res, status, headers, body) {
+  // HTML 入口和 renderer 含较多内联配置/脚本；弱网下按客户端能力压缩，普通本地调试仍保持明文。
+  const rawBody = Buffer.isBuffer(body) ? body : Buffer.from(String(body));
+  const compressed = gzipIfUseful(req, headers, rawBody);
+  send(res, status, compressed.headers, compressed.body);
+}
+
 function gzipIfUseful(req, headers, body) {
   // 小响应压缩收益低，且会增加调试成本，只对较大的文本/wasm 类资源启用 gzip。
   if (process.env.CODEX_WEB_DISABLE_GZIP === "1" || !Buffer.isBuffer(body) || body.length < 1024) return { headers, body };
@@ -92,6 +99,7 @@ module.exports = {
   isRequestBodyTooLargeError,
   readBody,
   send,
+  sendCompressed,
   sendJson,
   sendJsonCompressed,
 };

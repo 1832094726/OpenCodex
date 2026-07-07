@@ -1671,6 +1671,54 @@ test("mobile shell trims bootstrap messages to web keys", async () => {
   assert.doesNotMatch(mobile.body, /插件大文案/);
 });
 
+test("request handler gzips sizeable shell and renderer html responses", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-html-gzip-"));
+  try {
+    fs.mkdirSync(path.join(tempRoot, "assets"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tempRoot, "index.html"),
+      '<!doctype html><html><head><title>Codex</title><script src="./assets/app.js"></script></head><body><div id="root"></div></body></html>'
+    );
+    const { createRequestHandler } = require("../runtime/server.cjs");
+    const staticAssets = createStaticAssetService({
+      getI18nSnapshot: () => ({ locale: "zh-CN", messages: { "web.auth.starting": "正在启动 OpenCodex..." } }),
+      getOfficialBundle: () => ({ webviewDir: tempRoot }),
+    });
+    const handler = createRequestHandler({
+      localFiles: {},
+      mobileApi: { handleBootstrap: () => assert.fail("mobile bootstrap should not handle shell HTML") },
+      pickedFiles: {},
+      staticAssets,
+    });
+    const headers = {
+      accept: "text/html",
+      "accept-encoding": "gzip",
+      host: "127.0.0.1:8080",
+      "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1",
+    };
+
+    const shell = await collectResponse(handler, {
+      headers,
+      method: "GET",
+      socket: { remoteAddress: "127.0.0.1" },
+      url: "/",
+    });
+    const renderer = await collectResponse(handler, {
+      headers,
+      method: "GET",
+      socket: { remoteAddress: "127.0.0.1" },
+      url: "/local/thread-1?mobile=1&__opencodex_renderer=1",
+    });
+
+    assert.equal(shell.headers["content-encoding"], "gzip");
+    assert.equal(renderer.headers["content-encoding"], "gzip");
+    assert.match(zlib.gunzipSync(shell.bodyBuffer).toString("utf8"), /mobileTrafficMode/);
+    assert.match(zlib.gunzipSync(renderer.bodyBuffer).toString("utf8"), /codex-bridge-polyfill/);
+  } finally {
+    fs.rmSync(tempRoot, { force: true, recursive: true });
+  }
+});
+
 test("official renderer skips token usage capability only for mobile traffic mode", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-official-html-"));
   try {
@@ -2001,7 +2049,7 @@ test("request handler serves the web shell for app routes", async () => {
     isAppShellRoute: (req, pathname) => req.method === "GET" && (pathname === "/" || pathname === "/m"),
     isPublicStaticPath: () => false,
     staticFile: () => null,
-    serveWebShellIndex(res, options) {
+    serveWebShellIndex(_req, res, options) {
       shellCalls.push(options);
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(options && options.mobileTrafficMode ? "<html>shell mobile</html>" : "<html>shell desktop</html>");
@@ -2203,7 +2251,7 @@ test("request handler supports an explicit mobile traffic query for desktop brow
     isAppShellRoute: (req, pathname) => req.method === "GET" && (pathname === "/" || pathname === "/m"),
     isPublicStaticPath: () => false,
     staticFile: () => null,
-    serveWebShellIndex(res, options) {
+    serveWebShellIndex(_req, res, options) {
       shellCalls.push(options);
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(options && options.mobileTrafficMode ? "<html>mobile</html>" : "<html>desktop</html>");

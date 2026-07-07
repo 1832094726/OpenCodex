@@ -24,7 +24,7 @@ const {
   ensureDir,
   exists,
 } = require("./core/config.cjs");
-const { readBody, send, sendJson } = require("./http/http-utils.cjs");
+const { readBody, send, sendCompressed, sendJson } = require("./http/http-utils.cjs");
 const {
   cacheKeyForSnapshot,
   createFastSyncCache,
@@ -143,11 +143,11 @@ function serveOfficialRendererOrShell(req, res, url, staticAssets) {
         "Official renderer bundle is not available yet."
       );
     }
-    return send(res, 200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }, html);
+    return sendCompressed(req, res, 200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }, html);
   }
   // 页面入口保持 web-shell 壳页，让认证、运行时配置和 bridge polyfill 先稳定安装；
   // 官方 renderer 只由壳页带内部 handoff 参数切入，避免直接首页启动时脚本顺序/CSP 退化。
-  return staticAssets.serveWebShellIndex(res, {
+  return staticAssets.serveWebShellIndex(req, res, {
     initialRoute: initialRouteForRequest(url),
     mobileTrafficMode: isMobileHtmlRequest(req, url.pathname, url),
   });
@@ -639,7 +639,7 @@ function createRequestHandler({ getWsHub = () => null, localFiles, mobileApi, pi
           "Official renderer bundle is not available yet."
         );
       }
-      return send(res, 200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }, html);
+      return sendCompressed(req, res, 200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }, html);
     }
 
     const file = staticAssets.staticFile(pathname);

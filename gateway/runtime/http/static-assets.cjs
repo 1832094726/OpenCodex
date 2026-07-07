@@ -16,7 +16,7 @@ const {
   pluginEntryFileFromRequestPath,
   withPluginI18nMessages,
 } = require("../core/plugin-assets.cjs");
-const { gzipIfUseful, send } = require("./http-utils.cjs");
+const { gzipIfUseful, send, sendCompressed } = require("./http-utils.cjs");
 const { OPENCODEX_VERSION_LABEL } = require("../../../shared/app-version.cjs");
 
 const OPENCODEX_PLUGIN_LOADER_PATH = "/opencodex-plugin-loader.js";
@@ -705,9 +705,10 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     send(res, status, headers, response.body);
   }
 
-  function serveWebShellIndex(res, options = {}) {
+  function serveWebShellIndex(req, res, options = {}) {
     // web-shell index 总是 no-store，便于调试和升级时立即拿到新的 bridge/polyfill 引用。
-    send(
+    sendCompressed(
+      req,
       res,
       200,
       { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
