@@ -1741,13 +1741,16 @@ test("official renderer skips token usage capability only for mobile traffic mod
     assert.match(desktop, /opencodex-plugin-loader\.js/);
     assert.match(desktop, /codex-window-controls-overlay\.css/);
     assert.match(desktop, /codex-window-controls-overlay\.js/);
+    assert.match(desktop, /codex-tooltip-dismiss-guard\.js/);
     assert.doesNotMatch(mobile, /codex-token-usage-capability\.js/);
     assert.doesNotMatch(mobile, /__opencodexDeferredPluginLoaderInstalled/);
     assert.doesNotMatch(mobile, /opencodex-plugin-loader\.js/);
     assert.doesNotMatch(mobile, /codex-window-controls-overlay\.(?:js|css)/);
+    assert.doesNotMatch(mobile, /codex-tooltip-dismiss-guard\.js/);
     assert.match(mobile, /跳过 token usage capability/);
     assert.match(mobile, /跳过插件 loader/);
     assert.match(mobile, /跳过 window controls overlay/);
+    assert.match(mobile, /跳过 tooltip dismiss guard/);
     assert.match(mobile, /mobileTrafficMode:true/);
     assert.match(mobile, /__OPENCODEX_MOBILE_TRAFFIC_MODE__=true/);
   } finally {

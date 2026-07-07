@@ -166,7 +166,9 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       `<script src="${OPENCODEX_FAST_SYNC_PATH}?v=${webShellStaticVersion(OPENCODEX_FAST_SYNC_PATH)}"></script>`,
       `<script src="${OPENCODEX_SNAPSHOT_REPAIR_STATE_PATH}?v=${webShellStaticVersion(OPENCODEX_SNAPSHOT_REPAIR_STATE_PATH)}"></script>`,
       `<script src="${CODEX_BRIDGE_POLYFILL_PATH}?v=${webShellStaticVersion(CODEX_BRIDGE_POLYFILL_PATH)}"></script>`,
-      `<script src="${CODEX_TOOLTIP_DISMISS_GUARD_PATH}"></script>`,
+      options.mobileTrafficMode === true
+        ? "<!-- OpenCodex 手机流量模式跳过 tooltip dismiss guard，避免首屏挂载桌面 hover 监听和 MutationObserver。 -->"
+        : `<script src="${CODEX_TOOLTIP_DISMISS_GUARD_PATH}"></script>`,
     ].join("\n    ");
     if (/<head[^>]*>/i.test(html)) {
       html = html.replace(/<head([^>]*)>/i, `<head$1>\n    ${base}`);
