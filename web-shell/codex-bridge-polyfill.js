@@ -52,6 +52,14 @@
     Math.min(200, Number(cfg.auxiliaryFetchCacheMaxEntries || 80) || 80)
   );
   const MOBILE_THREAD_CATALOG_LIMIT = Math.max(10, Math.min(200, Number(cfg.mobileThreadCatalogLimit || 60) || 60));
+  const LOCAL_THREAD_CATALOG_STARTUP_REUSE_MS = Math.max(
+    250,
+    Math.min(
+      5000,
+      Number(cfg.localThreadCatalogStartupReuseMs || (MOBILE_TRAFFIC_MODE ? 1500 : 750)) ||
+        (MOBILE_TRAFFIC_MODE ? 1500 : 750)
+    )
+  );
   const LOW_PRIORITY_IPC_CONCURRENCY = 2;
   const LOW_PRIORITY_IPC_LOG_EVERY = 25;
   const READ_ONLY_APP_SERVER_CACHE_TTL_MS = 15000;
@@ -5056,6 +5064,9 @@
   function createLocalThreadCatalogService() {
     let revision = 1;
     let snapshot = { entries: [], hosts: [{ hostId: "local", isComplete: false }], isComplete: false, revision };
+    let lastRefreshCompletedAtMs = 0;
+    let lastRefreshRouteKey = "";
+    const refreshInFlightByRoute = new Map();
     const subscribers = new Set();
 
     function notifySnapshot() {
@@ -5069,36 +5080,78 @@
       }
     }
 
+    function refreshRouteKey() {
+      return currentRestorableRoute() || "__home__";
+    }
+
     async function refresh(mode) {
-      const response = await fetch(localThreadCatalogBootstrapUrl(), {
-        cache: "no-store",
-        credentials: "same-origin",
-      });
-      if (!response.ok) throw new Error(`localThreadCatalog bootstrap failed: HTTP ${response.status}`);
-      const payload = await response.json();
-      const nowMs = Date.now();
-      const entries = Array.isArray(payload.threads)
-        ? payload.threads
-            .map((thread, index) => localThreadCatalogEntryFromMobileThread(thread, index, nowMs))
-            .filter(Boolean)
-        : [];
-      revision += 1;
-      // 官方 local-thread catalog 只需要先拿到本地 thread 索引；正文仍由 maybe-resume-conversation 拉取。
-      snapshot = {
-        entries,
-        hosts: [{ hostId: "local", isComplete: true }],
-        isComplete: true,
-        revision,
-      };
-      rememberArchivedThreadIds(entries);
-      safeClientDiagnostic("local-thread-catalog-refresh", {
-        entryCount: entries.length,
-        mode,
-        revision,
-        source: payload && payload.source ? String(payload.source) : "",
-      });
-      notifySnapshot();
-      return snapshot;
+      const routeKey = refreshRouteKey();
+      const inFlight = refreshInFlightByRoute.get(routeKey);
+      if (inFlight) {
+        // 深链预热和官方 startup sync 常会背靠背触发；同一路由只保留一次真实 bootstrap 请求。
+        safeClientDiagnostic("local-thread-catalog-refresh-join", { mode, routeKey });
+        return inFlight;
+      }
+      const nowBeforeRefresh = Date.now();
+      if (
+        mode === "startup" &&
+        snapshot.isComplete &&
+        lastRefreshRouteKey === routeKey &&
+        nowBeforeRefresh - lastRefreshCompletedAtMs < LOCAL_THREAD_CATALOG_STARTUP_REUSE_MS
+      ) {
+        // startup 同步是启动兜底，不需要在刚成功后立即重复拉同一份目录。
+        safeClientDiagnostic("local-thread-catalog-startup-reuse", {
+          ageMs: nowBeforeRefresh - lastRefreshCompletedAtMs,
+          entryCount: snapshot.entries.length,
+          revision: snapshot.revision,
+          routeKey,
+        });
+        return snapshot;
+      }
+
+      const refreshPromise = (async () => {
+        const response = await fetch(localThreadCatalogBootstrapUrl(), {
+          cache: "no-store",
+          credentials: "same-origin",
+        });
+        if (!response.ok) throw new Error(`localThreadCatalog bootstrap failed: HTTP ${response.status}`);
+        const payload = await response.json();
+        const nowMs = Date.now();
+        const entries = Array.isArray(payload.threads)
+          ? payload.threads
+              .map((thread, index) => localThreadCatalogEntryFromMobileThread(thread, index, nowMs))
+              .filter(Boolean)
+          : [];
+        revision += 1;
+        // 官方 local-thread catalog 只需要先拿到本地 thread 索引；正文仍由 maybe-resume-conversation 拉取。
+        snapshot = {
+          entries,
+          hosts: [{ hostId: "local", isComplete: true }],
+          isComplete: true,
+          revision,
+        };
+        lastRefreshCompletedAtMs = Date.now();
+        lastRefreshRouteKey = routeKey;
+        rememberArchivedThreadIds(entries);
+        safeClientDiagnostic("local-thread-catalog-refresh", {
+          entryCount: entries.length,
+          mode,
+          revision,
+          routeKey,
+          source: payload && payload.source ? String(payload.source) : "",
+        });
+        notifySnapshot();
+        return snapshot;
+      })();
+
+      refreshInFlightByRoute.set(routeKey, refreshPromise);
+      try {
+        return await refreshPromise;
+      } finally {
+        if (refreshInFlightByRoute.get(routeKey) === refreshPromise) {
+          refreshInFlightByRoute.delete(routeKey);
+        }
+      }
     }
 
     return {

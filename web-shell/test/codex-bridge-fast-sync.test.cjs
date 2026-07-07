@@ -69,9 +69,17 @@ test("bridge exposes local thread catalog for official local conversation resume
 
   // 官方 /local/:id 页面依赖 preload.localThreadCatalog 建立本地 thread 索引，再触发 maybe-resume-conversation。
   assert.match(source, /target\.localThreadCatalog = localThreadCatalogService/);
+  assert.match(source, /LOCAL_THREAD_CATALOG_STARTUP_REUSE_MS/);
   assert.match(catalogBody, /local-thread-catalog-read/);
   assert.match(catalogBody, /local-thread-catalog-startup-sync/);
   assert.match(catalogBody, /local-thread-catalog-sync/);
+  // 深链预热和官方 Provider 立即 startup sync 可能同时发生；catalog service 要合并同一路由请求。
+  assert.match(catalogBody, /const refreshInFlightByRoute = new Map\(\)/);
+  assert.match(catalogBody, /function refreshRouteKey\(\)/);
+  assert.match(catalogBody, /refreshInFlightByRoute\.get\(routeKey\)/);
+  assert.match(catalogBody, /local-thread-catalog-refresh-join/);
+  assert.match(catalogBody, /local-thread-catalog-startup-reuse/);
+  assert.match(catalogBody, /lastRefreshCompletedAtMs/);
   assert.match(catalogBody, /local-thread-catalog-subscribe/);
   assert.match(catalogBody, /return snapshot/);
   assert.match(catalogBody, /return refresh\("startup"\)/);
