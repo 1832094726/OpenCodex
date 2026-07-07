@@ -106,6 +106,18 @@ function rendererOptionsForRequest(req, url) {
   };
 }
 
+function authStatusSnapshotForShellRequest(req, url) {
+  const auth = authResultForRequest(req, url);
+  return {
+    ok: true,
+    authRequired: !!AUTH_PASSWORD_HASH,
+    authenticated: auth.authenticated === true,
+    // 已登录入口把短期 token 内联给壳页，避免再打一趟 /api/auth/status 才能建立 WS。
+    token: auth.authenticated === true ? auth.token : "",
+    expiresAtMs: typeof auth.expiresAtMs === "number" ? auth.expiresAtMs : null,
+  };
+}
+
 function normalizeInitialThreadRoute(route) {
   const text = typeof route === "string" ? route.trim() : "";
   if (!text || text.startsWith("//")) return "";
@@ -150,6 +162,7 @@ function serveOfficialRendererOrShell(req, res, url, staticAssets) {
   return staticAssets.serveWebShellIndex(req, res, {
     initialRoute: initialRouteForRequest(url),
     mobileTrafficMode: isMobileHtmlRequest(req, url.pathname, url),
+    authStatusSnapshot: authStatusSnapshotForShellRequest(req, url),
   });
 }
 

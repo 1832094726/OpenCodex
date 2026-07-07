@@ -987,6 +987,18 @@
         }
 
         async function authStatus() {
+          const snapshot = runtimeConfig.authStatusSnapshot;
+          if (snapshot && typeof snapshot === "object") {
+            // 服务端已在 shell 首包里给过认证快照；优先消费它，省掉进入 renderer 前的一次串行请求。
+            runtimeConfig.authStatusSnapshot = null;
+            return {
+              ok: snapshot.ok !== false,
+              authRequired: snapshot.authRequired !== false,
+              authenticated: snapshot.authenticated === true,
+              token: snapshot.authenticated === true ? String(snapshot.token || "") : "",
+              expiresAtMs: typeof snapshot.expiresAtMs === "number" ? snapshot.expiresAtMs : null,
+            };
+          }
           const res = await fetch("/api/auth/status", {
             cache: "no-store",
             credentials: "same-origin",

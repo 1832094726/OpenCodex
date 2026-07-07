@@ -2322,6 +2322,20 @@ test("request handler serves the web shell for app routes", async () => {
   assert.match(mobile.body, /shell mobile/);
   assert.equal(shellCalls[0].mobileTrafficMode, false);
   assert.equal(shellCalls[1].mobileTrafficMode, true);
+  assert.deepEqual(shellCalls[0].authStatusSnapshot, {
+    ok: true,
+    authRequired: false,
+    authenticated: true,
+    token: "",
+    expiresAtMs: null,
+  });
+  assert.deepEqual(shellCalls[1].authStatusSnapshot, {
+    ok: true,
+    authRequired: false,
+    authenticated: true,
+    token: "",
+    expiresAtMs: null,
+  });
 });
 
 test("request handler serves rewritten statsig telemetry locally", async () => {

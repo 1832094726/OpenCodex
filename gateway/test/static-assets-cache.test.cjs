@@ -214,3 +214,42 @@ test("web-shell bridge script versions reuse a short cache during renderer hando
     fs.rmSync(tempRoot, { force: true, recursive: true });
   }
 });
+
+test("web shell embeds a one-shot auth status snapshot", async () => {
+  const staticAssets = createStaticAssetService({
+    getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+    getOfficialBundle: () => null,
+  });
+
+  const authed = await collectResponse(
+    (req, res) =>
+      staticAssets.serveWebShellIndex(req, res, {
+        authStatusSnapshot: {
+          ok: true,
+          authRequired: true,
+          authenticated: true,
+          token: "token-shell-fast-path",
+          expiresAtMs: 12345,
+        },
+      }),
+    { headers: {}, method: "GET", socket: { remoteAddress: "127.0.0.1" } }
+  );
+  const guest = await collectResponse(
+    (req, res) =>
+      staticAssets.serveWebShellIndex(req, res, {
+        authStatusSnapshot: {
+          ok: true,
+          authRequired: true,
+          authenticated: false,
+          token: "must-not-leak",
+          expiresAtMs: 12345,
+        },
+      }),
+    { headers: {}, method: "GET", socket: { remoteAddress: "127.0.0.1" } }
+  );
+
+  assert.match(authed.bodyBuffer.toString("utf8"), /"authStatusSnapshot"/);
+  assert.match(authed.bodyBuffer.toString("utf8"), /"token":"token-shell-fast-path"/);
+  assert.match(guest.bodyBuffer.toString("utf8"), /"authenticated":false/);
+  assert.doesNotMatch(guest.bodyBuffer.toString("utf8"), /must-not-leak/);
+});

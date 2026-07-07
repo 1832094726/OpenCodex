@@ -50,3 +50,15 @@ test("entry shell does not load desktop plugins before renderer handoff", () => 
   assert.match(source, /opencodex-plugin-system\.js/);
   assert.doesNotMatch(source, /opencodex-plugin-loader\.js/);
 });
+
+test("entry auth status consumes the server snapshot before fetching", () => {
+  const source = readEntryHtml();
+  const authStatusBody = sourceBetween(source, "async function authStatus()", "async function bootRenderer()");
+
+  // 已登录入口的认证结果随 shell HTML 注入；前端先消费快照，避免进入 renderer 前多一次串行 /api/auth/status。
+  assert.match(authStatusBody, /const snapshot = runtimeConfig\.authStatusSnapshot/);
+  assert.match(authStatusBody, /runtimeConfig\.authStatusSnapshot = null/);
+  assert.match(authStatusBody, /token: snapshot\.authenticated === true \? String\(snapshot\.token \|\| ""\) : ""/);
+  assert.match(authStatusBody, /fetch\("\/api\/auth\/status"/);
+  assert.ok(authStatusBody.indexOf("const snapshot = runtimeConfig.authStatusSnapshot") < authStatusBody.indexOf('fetch("/api/auth/status"'));
+});

@@ -383,6 +383,17 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       localeMode: i18n.mode || "",
       messages,
     };
+    if (options.authStatusSnapshot && typeof options.authStatusSnapshot === "object") {
+      // 入口壳只需要一次认证快照来跳过 /api/auth/status 串行 RTT；敏感 API 和 renderer 资源仍由服务端 auth gate 校验。
+      publicConfig.authStatusSnapshot = {
+        ok: options.authStatusSnapshot.ok !== false,
+        authRequired: options.authStatusSnapshot.authRequired !== false,
+        authenticated: options.authStatusSnapshot.authenticated === true,
+        token: options.authStatusSnapshot.authenticated === true ? String(options.authStatusSnapshot.token || "") : "",
+        expiresAtMs:
+          typeof options.authStatusSnapshot.expiresAtMs === "number" ? options.authStatusSnapshot.expiresAtMs : null,
+      };
+    }
     if (typeof options.initialRoute === "string" && options.initialRoute.trim()) {
       // 官方 renderer 和 bridge 共用同一份深链信息，防止刷新 /local/:id 时首屏回到 home。
       publicConfig.initialRoute = options.initialRoute.trim();
