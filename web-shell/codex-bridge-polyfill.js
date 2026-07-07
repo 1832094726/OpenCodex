@@ -787,6 +787,29 @@
     return String(data.appServerMethod || data.requestMethod || data.method || data.payloadMethod || data.type || "");
   }
 
+  function isAppHostDiagnosticUploadEvent(eventName, data) {
+    if (eventName === "app-host-port-closed") {
+      const reason = data && typeof data.reason === "string" ? data.reason : "";
+      // 普通关闭在进会话和页面切换时很常见，默认只留本地 trace；异常关闭仍上传。
+      return !!reason && !["browser_closed", "official_closed", "gateway_close"].includes(reason);
+    }
+    return (
+      eventName === "app-host-browser-message-error" ||
+      eventName === "app-host-browser-non-string-message" ||
+      eventName === "app-host-connect-missing-port" ||
+      eventName === "app-host-duplicate-server-frame" ||
+      eventName === "app-host-duplicate-thread-frame" ||
+      eventName === "app-host-error" ||
+      eventName === "app-host-message-missing-port" ||
+      eventName === "app-host-non-string-message" ||
+      eventName === "app-host-port-post-failed" ||
+      eventName === "app-host-queue-overflow" ||
+      eventName === "app-host-relays-reconnected" ||
+      eventName === "app-host-thread-replay-gap" ||
+      eventName === "app-host-ws-send-failed"
+    );
+  }
+
   function isImportantDiagnosticUpload(event, data) {
     const eventName = typeof event === "string" ? event : "";
     const method = diagnosticMethodFromData(data);
@@ -795,7 +818,7 @@
       eventName === "ws-transport-selected" ||
       eventName === "ws-hello-ack" ||
       eventName === "ipc-important-method" ||
-      eventName.startsWith("app-host-")
+      isAppHostDiagnosticUploadEvent(eventName, data)
     ) {
       return true;
     }
@@ -815,8 +838,12 @@
 
   function isImportantTraceEvent(event, data) {
     const eventName = typeof event === "string" ? event : "";
-    // catalog 事件对“进会话为何慢”很有价值，但默认只放浏览器环形缓冲，避免首屏额外 POST。
-    return eventName.startsWith("local-thread-catalog-") || isImportantDiagnosticUpload(event, data);
+    // catalog/app-host 生命周期事件对“进会话为何慢”很有价值，但默认只放浏览器环形缓冲，避免首屏额外 POST。
+    return (
+      eventName.startsWith("app-host-") ||
+      eventName.startsWith("local-thread-catalog-") ||
+      isImportantDiagnosticUpload(event, data)
+    );
   }
 
   function pushOpenCodexTrace(event, data) {

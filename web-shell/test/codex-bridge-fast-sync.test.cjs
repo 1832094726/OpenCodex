@@ -433,18 +433,29 @@ test("mobile traffic mode disables token usage capability initialization", () =>
 
 test("client diagnostics upload only flow events by default", () => {
   const source = readPolyfillSource();
+  const appHostUploadBody = sourceBetween(source, "function isAppHostDiagnosticUploadEvent", "function isImportantDiagnosticUpload");
+  const diagnosticUploadBody = sourceBetween(source, "function isImportantDiagnosticUpload", "function isImportantTraceEvent");
+
   // 服务端默认只消费发送链路和传输选择诊断，普通诊断不上报可以避免进入会话时出现大量 /api/client-log。
   assert.match(source, /CLIENT_DIAGNOSTIC_UPLOAD_ENABLED/);
   assert.match(source, /CLIENT_DIAGNOSTIC_SLOW_UPLOAD_MS/);
   assert.match(source, /IMPORTANT_DIAGNOSTIC_METHODS/);
+  assert.match(source, /function isAppHostDiagnosticUploadEvent\(eventName, data\)/);
   assert.match(source, /function isImportantDiagnosticUpload\(event, data\)/);
+  assert.match(appHostUploadBody, /app-host-queue-overflow/);
+  assert.match(appHostUploadBody, /app-host-thread-replay-gap/);
+  assert.match(appHostUploadBody, /app-host-ws-send-failed/);
+  assert.doesNotMatch(appHostUploadBody, /app-host-connected/);
+  assert.doesNotMatch(appHostUploadBody, /app-host-connect-captured/);
   assert.match(source, /eventName === "fast-sync-flow"/);
   assert.match(source, /eventName === "ws-transport-selected"/);
   assert.match(source, /eventName === "ws-hello-ack"/);
   assert.match(source, /eventName === "ipc-invoke-failed"/);
+  assert.match(diagnosticUploadBody, /isAppHostDiagnosticUploadEvent\(eventName, data\)/);
   assert.match(source, /IMPORTANT_DIAGNOSTIC_METHODS\.has\(method\)/);
   assert.match(source, /elapsedMs >= CLIENT_DIAGNOSTIC_SLOW_UPLOAD_MS/);
   assert.match(source, /shouldUploadClientDiagnostic\(event, diagnosticData\)/);
+  assert.doesNotMatch(diagnosticUploadBody, /eventName\.startsWith\("app-host-"\)/);
   assert.doesNotMatch(source, /eventName === "ipc-invoke-start" \|\|/);
   assert.doesNotMatch(source, /eventName === "ipc-invoke-success" \|\|/);
   assert.doesNotMatch(sourceBetween(source, "function isImportantDiagnosticUpload", "function isImportantTraceEvent"), /local-thread-catalog/);
@@ -462,6 +473,7 @@ test("client trace keeps a larger local ring and a protected important ring", ()
   assert.match(traceBody, /w\.__opencodexImportantTrace/);
   assert.match(traceBody, /isImportantTraceEvent\(event, data\)/);
   // catalog 事件保留在重要 trace 中，但不默认上传，减少进入会话时的 /api/client-log 噪声。
+  assert.match(importantTraceBody, /eventName\.startsWith\("app-host-"\)/);
   assert.match(importantTraceBody, /eventName\.startsWith\("local-thread-catalog-"\)/);
   assert.match(importantTraceBody, /isImportantDiagnosticUpload\(event, data\)/);
   assert.match(traceBody, /w\.__opencodexTraceMeta/);
