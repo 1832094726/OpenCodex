@@ -85,7 +85,7 @@ test("health status reports gateway source revision", () => {
   assert.match(healthBody, /source: gatewaySourceHealthStatus\(\)/);
 });
 
-test("persisted atom snapshot reuses unchanged desktop global state", () => {
+test("persisted atom snapshot reuses unchanged desktop global state and isolates returned objects", () => {
   const {
     DESKTOP_GLOBAL_STATE_PATH,
     DESKTOP_PERSISTED_ATOMS_KEY,
@@ -129,11 +129,15 @@ test("persisted atom snapshot reuses unchanged desktop global state", () => {
     const second = persistedAtomSnapshotForRenderer();
 
     assert.equal(readCount, 1);
+    assert.notStrictEqual(first, second);
     assert.deepEqual(first["prompt-history"], ["first prompt"]);
     assert.deepEqual(second["prompt-history"], ["first prompt"]);
     assert.equal(first.localeOverride, undefined);
     assert.equal(first["selected-remote-host-id"], undefined);
     assert.equal(first["remote-thread-summaries:remote-win"], undefined);
+    first.extra = "caller mutation";
+    assert.equal(persistedAtomSnapshotForRenderer().extra, undefined);
+    assert.equal(readCount, 1);
 
     mainMtimeMs += 1;
     mainText = JSON.stringify({

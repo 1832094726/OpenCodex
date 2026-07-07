@@ -9,6 +9,7 @@ const DESKTOP_PERSISTED_ATOMS_KEY = "electron-persisted-atom-state";
 const COMPOSER_PERMISSION_MODE_VISIBILITY_KEY = "composer-permission-mode-visibility";
 const SELECTED_REMOTE_HOST_ID_KEY = "selected-remote-host-id";
 let desktopGlobalStateCache = null;
+let persistedAtomSnapshotCache = null;
 const DEFAULT_COMPOSER_PERMISSION_MODE_VISIBILITY = {
   "guardian-approvals": true,
   "full-access": true,
@@ -81,8 +82,15 @@ function desktopPersistedAtoms() {
 }
 
 function persistedAtomSnapshotForRenderer() {
+  const atoms = desktopPersistedAtoms();
+  const cacheKey = desktopGlobalStateCache
+    ? `${desktopGlobalStateCache.primarySignature}|${desktopGlobalStateCache.backupSignature}`
+    : "";
+  if (persistedAtomSnapshotCache && persistedAtomSnapshotCache.cacheKey === cacheKey && persistedAtomSnapshotCache.atoms === atoms) {
+    return { ...persistedAtomSnapshotCache.snapshot };
+  }
   const snapshot = Object.fromEntries(
-    Object.entries(desktopPersistedAtoms()).map(([key, value]) => [key, normalizePersistedAtomForRenderer(key, value)])
+    Object.entries(atoms).map(([key, value]) => [key, normalizePersistedAtomForRenderer(key, value)])
   );
   // 不注入 localeOverride：官方 i18n 在该 atom 存在时会跳过语言包解析，导致 locale 为中文但文案仍是英文。
   delete snapshot.localeOverride;
@@ -91,7 +99,9 @@ function persistedAtomSnapshotForRenderer() {
   for (const key of Object.keys(snapshot)) {
     if (key.startsWith("remote-thread-summaries:")) delete snapshot[key];
   }
-  return snapshot;
+  // runtime config 会在多端刷新时重复生成；文件和 atoms 未变时复用清理后的快照，避免重复归一化大对象。
+  persistedAtomSnapshotCache = { atoms, cacheKey, snapshot };
+  return { ...snapshot };
 }
 
 module.exports = {
